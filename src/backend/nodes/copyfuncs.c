@@ -2629,6 +2629,7 @@ _copyColumnDef(const ColumnDef *from)
 	COPY_NODE_FIELD(constraints);
 	COPY_NODE_FIELD(fdwoptions);
 	COPY_LOCATION_FIELD(location);
+	COPY_NODE_FIELD(comment);
 
 	return newnode;
 }

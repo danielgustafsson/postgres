@@ -22,7 +22,7 @@ PostgreSQL documentation
  <refsynopsisdiv>
 <synopsis>
 CREATE [ [ GLOBAL | LOCAL ] { TEMPORARY | TEMP } | UNLOGGED ] TABLE [ IF NOT EXISTS ] <replaceable class="PARAMETER">table_name</replaceable> ( [
-  { <replaceable class="PARAMETER">column_name</replaceable> <replaceable class="PARAMETER">data_type</replaceable> [ COLLATE <replaceable>collation</replaceable> ] [ <replaceable class="PARAMETER">column_constraint</replaceable> [ ... ] ]
+  { <replaceable class="PARAMETER">column_name</replaceable> <replaceable class="PARAMETER">data_type</replaceable> [ COLLATE <replaceable>collation</replaceable> ] [ <replaceable class="PARAMETER">column_constraint</replaceable> [ ... ] ] [ COMMENT <replaceable>comment_text</replaceable> ]
     | <replaceable>table_constraint</replaceable>
     | LIKE <replaceable>source_table</replaceable> [ <replaceable>like_option</replaceable> ... ] }
     [, ... ]
@@ -259,6 +259,17 @@ CREATE [ [ GLOBAL | LOCAL ] { TEMPORARY | TEMP } | UNLOGGED ] TABLE [ IF NOT EXI
       If not specified, the column data type's default collation is used.
      </para>
     </listitem>
+   </varlistentry>
+
+   <varlistentry>
+    <term><literal>COMMENT <replaceable>comment_text</replaceable></literal></term>
+	<listitem>
+	 <para>
+	  The optional <literal>COMMENT</> clause adds a comment on
+	  the column. See <xref linkend="sql-comment"> for more info
+	  on comments.
+	 </para>
+	</listitem>
    </varlistentry>
 
    <varlistentry>

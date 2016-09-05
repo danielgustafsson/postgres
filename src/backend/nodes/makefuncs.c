@@ -502,6 +502,7 @@ makeColumnDef(const char *colname, Oid typeOid, int32 typmod, Oid collOid)
 	n->constraints = NIL;
 	n->fdwoptions = NIL;
 	n->location = -1;
+	n->comment = NULL;
 
 	return n;
 }

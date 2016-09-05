@@ -718,6 +718,19 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 	 */
 	relation_close(rel, NoLock);
 
+	/*
+	 * Create any comments associated with the attributes.
+	 */
+	attnum = 0;
+	foreach(listptr, schema)
+	{
+		ColumnDef  *colDef = lfirst(listptr);
+
+		attnum++;
+		if (colDef->comment)
+			CreateComments(relationId, RelationRelationId, attnum, colDef->comment->comment);
+	}
+
 	return address;
 }
 

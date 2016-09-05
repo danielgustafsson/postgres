@@ -600,6 +600,7 @@ typedef struct ColumnDef
 	List	   *constraints;	/* other constraints on column */
 	List	   *fdwoptions;		/* per-column FDW options */
 	int			location;		/* parse location, or -1 if none/unknown */
+	struct CommentStmt *comment;	/* column comment if any */
 } ColumnDef;
 
 /*

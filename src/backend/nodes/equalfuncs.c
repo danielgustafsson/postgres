@@ -2381,6 +2381,7 @@ _equalColumnDef(const ColumnDef *a, const ColumnDef *b)
 	COMPARE_NODE_FIELD(constraints);
 	COMPARE_NODE_FIELD(fdwoptions);
 	COMPARE_LOCATION_FIELD(location);
+	COMPARE_NODE_FIELD(comment);
 
 	return true;
 }

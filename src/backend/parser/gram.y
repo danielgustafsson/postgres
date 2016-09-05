@@ -509,6 +509,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 %type <ival>	TableLikeOptionList TableLikeOption
 %type <list>	ColQualList
 %type <node>	ColConstraint ColConstraintElem ConstraintAttr
+%type <node>	OptColComment ColComment
 %type <ival>	key_actions key_delete key_match key_update key_action
 %type <ival>	ConstraintAttributeSpec ConstraintAttributeElem
 %type <str>		ExistingIndex
@@ -2952,7 +2953,7 @@ TypedTableElement:
 			| TableConstraint					{ $$ = $1; }
 		;
 
-columnDef:	ColId Typename create_generic_options ColQualList
+columnDef:	ColId Typename OptColComment create_generic_options ColQualList
 				{
 					ColumnDef *n = makeNode(ColumnDef);
 					n->colname = $1;
@@ -2965,10 +2966,11 @@ columnDef:	ColId Typename create_generic_options ColQualList
 					n->raw_default = NULL;
 					n->cooked_default = NULL;
 					n->collOid = InvalidOid;
-					n->fdwoptions = $3;
-					SplitColQualList($4, &n->constraints, &n->collClause,
+					n->fdwoptions = $4;
+					SplitColQualList($5, &n->constraints, &n->collClause,
 									 yyscanner);
 					n->location = @1;
+					n->comment = (CommentStmt *) $3;
 					$$ = (Node *)n;
 				}
 		;
@@ -2996,6 +2998,22 @@ columnOptions:	ColId WITH OPTIONS ColQualList
 ColQualList:
 			ColQualList ColConstraint				{ $$ = lappend($1, $2); }
 			| /*EMPTY*/								{ $$ = NIL; }
+		;
+
+OptColComment:
+			ColComment 								{ $$ = $1; }
+			| /* EMPTY */							{ $$ = NULL; }
+		;
+
+ColComment: COMMENT comment_text
+			{
+				CommentStmt *n = makeNode(CommentStmt);
+				n->objtype = OBJECT_COLUMN;
+				n->objname = NULL;
+				n->objargs = NIL;
+				n->comment = $2;
+				$$ = (Node *) n;
+			}
 		;
 
 ColConstraint:
