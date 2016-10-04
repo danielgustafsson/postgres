@@ -122,7 +122,7 @@ INIT
 
 =over
 
-=item PostgresNode::new($class, $name, $pghost, $pgport)
+=item PostgresNode::new($class, $name, $pghost, $pgport, $pgpath)
 
 Create a new PostgresNode instance. Does not initdb or start it.
 
@@ -133,12 +133,14 @@ of finding port numbers, registering instances for cleanup, etc.
 
 sub new
 {
-	my ($class, $name, $pghost, $pgport) = @_;
+	my ($class, $name, $pghost, $pgport, $pgpath) = @_;
 	my $testname = basename($0);
 	$testname =~ s/\.[^.]+$//;
+	$pgpath = '' unless defined $pgpath;
 	my $self = {
 		_port    => $pgport,
 		_host    => $pghost,
+		_pgpath  => $pgpath,
 		_basedir => TestLib::tempdir("data_" . $name),
 		_name    => $name,
 		_logfile => "$TestLib::log_path/${testname}_${name}.log" };
@@ -209,6 +211,21 @@ sub name
 {
 	my ($self) = @_;
 	return $self->{_name};
+}
+
+=pod
+
+=item $node->pgpath()
+
+Path to the PostgreSQL binaries to run, if empty then the installation in PATH
+is assumed.
+
+=cut
+
+sub pgpath
+{
+	my ($self) = @_;
+	return $self->{_pgpath};
 }
 
 =pod
@@ -313,6 +330,7 @@ sub info
 	my $_info = '';
 	open my $fh, '>', \$_info or die;
 	print $fh "Name: " . $self->name . "\n";
+	print $fh "Binary directory: " . $self->pgpath . "\n";
 	print $fh "Data directory: " . $self->data_dir . "\n";
 	print $fh "Backup directory: " . $self->backup_dir . "\n";
 	print $fh "Archive directory: " . $self->archive_dir . "\n";
@@ -388,6 +406,7 @@ sub init
 	my $port   = $self->port;
 	my $pgdata = $self->data_dir;
 	my $host   = $self->host;
+	my $pgpath = $self->pgpath;
 
 	$params{allows_streaming} = 0 unless defined $params{allows_streaming};
 	$params{has_archiving}    = 0 unless defined $params{has_archiving};
@@ -395,7 +414,7 @@ sub init
 	mkdir $self->backup_dir;
 	mkdir $self->archive_dir;
 
-	TestLib::system_or_bail('initdb', '-D', $pgdata, '-A', 'trust', '-N',
+	TestLib::system_or_bail($pgpath . 'initdb', '-D', $pgdata, '-A', 'trust', '-N',
 		@{ $params{extra} });
 	TestLib::system_or_bail($ENV{PG_REGRESS}, '--config-auth', $pgdata);
 
@@ -487,9 +506,10 @@ sub backup
 	my $backup_path = $self->backup_dir . '/' . $backup_name;
 	my $port        = $self->port;
 	my $name        = $self->name;
+	my $pgpath      = $self->pgpath;
 
 	print "# Taking pg_basebackup $backup_name from node \"$name\"\n";
-	TestLib::system_or_bail('pg_basebackup', '-D', $backup_path, '-p', $port,
+	TestLib::system_or_bail($pgpath . 'pg_basebackup', '-D', $backup_path, '-p', $port,
 		'--no-sync');
 	print "# Backup finished\n";
 }
@@ -644,8 +664,9 @@ sub start
 	my $port   = $self->port;
 	my $pgdata = $self->data_dir;
 	my $name   = $self->name;
+	my $pgpath = $self->pgpath;
 	print("### Starting node \"$name\"\n");
-	my $ret = TestLib::system_log('pg_ctl', '-D', $self->data_dir, '-l',
+	my $ret = TestLib::system_log($pgpath . 'pg_ctl', '-D', $self->data_dir, '-l',
 		$self->logfile, 'start');
 
 	if ($ret != 0)
@@ -672,10 +693,11 @@ sub stop
 	my $port   = $self->port;
 	my $pgdata = $self->data_dir;
 	my $name   = $self->name;
+	my $pgpath = $self->pgpath;
 	$mode = 'fast' unless defined $mode;
 	return unless defined $self->{_pid};
 	print "### Stopping node \"$name\" using mode $mode\n";
-	TestLib::system_log('pg_ctl', '-D', $pgdata, '-m', $mode, 'stop');
+	TestLib::system_log($pgpath . 'pg_ctl', '-D', $pgdata, '-m', $mode, 'stop');
 	$self->{_pid} = undef;
 	$self->_update_pid;
 }
@@ -694,8 +716,9 @@ sub reload
 	my $port   = $self->port;
 	my $pgdata = $self->data_dir;
 	my $name   = $self->name;
+	my $pgpath = $self->pgpath;
 	print "### Reloading node \"$name\"\n";
-	TestLib::system_log('pg_ctl', '-D', $pgdata, 'reload');
+	TestLib::system_log($pgpath . 'pg_ctl', '-D', $pgdata, 'reload');
 }
 
 =pod
@@ -713,8 +736,9 @@ sub restart
 	my $pgdata  = $self->data_dir;
 	my $logfile = $self->logfile;
 	my $name    = $self->name;
+	my $pgpath  = $self->pgpath;
 	print "### Restarting node \"$name\"\n";
-	TestLib::system_log('pg_ctl', '-D', $pgdata, '-l', $logfile,
+	TestLib::system_log($pgpath . 'pg_ctl', '-D', $pgdata, '-l', $logfile,
 		'restart');
 	$self->_update_pid;
 }
@@ -734,8 +758,9 @@ sub promote
 	my $pgdata  = $self->data_dir;
 	my $logfile = $self->logfile;
 	my $name    = $self->name;
+	my $pgpath  = $self->pgpath;
 	print "### Promoting node \"$name\"\n";
-	TestLib::system_log('pg_ctl', '-D', $pgdata, '-l', $logfile,
+	TestLib::system_log($pgpath . 'pg_ctl', '-D', $pgdata, '-l', $logfile,
 		'promote');
 }
 
@@ -834,10 +859,12 @@ sub _update_pid
 
 =pod
 
-=item get_new_node(node_name)
+=item get_new_node(node_name, pgpath)
 
 Build a new PostgresNode object, assigning a free port number. Standalone
-function that's automatically imported.
+function that's automatically imported. If the pgpath parameter is defined then
+the path is tested for containing a PostgreSQL installation with the correct
+permissions for execution.
 
 Remembers the node, to prevent its port number from being reused for another
 node, and to ensure that it gets shut down when the test script exits.
@@ -848,7 +875,7 @@ You should generally use this instead of PostgresNode::new(...).
 
 sub get_new_node
 {
-	my $name  = shift;
+	my ($name, $pgpath) = @_;
 	my $found = 0;
 	my $port  = $last_port_assigned;
 
@@ -891,8 +918,19 @@ sub get_new_node
 
 	print "# Found free port $port\n";
 
+	# If a separate path to the binaries was specified then we do rudimentary
+	# checks for a sane installation. If an executable copy of initdb is there
+	# then let's go ahead.
+	if (defined $pgpath)
+	{
+		$pgpath =~ s!/*$!/!;
+		die "initdb missing in $pgpath" unless -x $pgpath . 'initdb';
+
+		print "# Found PostgreSQL installation in $pgpath\n";
+	}
+
 	# Lock port number found by creating a new node
-	my $node = new PostgresNode($name, $test_pghost, $port);
+	my $node = new PostgresNode($name, $test_pghost, $port, $pgpath);
 
 	# Add node to list of nodes
 	push(@all_nodes, $node);
@@ -1061,8 +1099,9 @@ sub psql
 	my $stderr            = $params{stderr};
 	my $timeout           = undef;
 	my $timeout_exception = 'psql timed out';
+	my $pgpath            = $self->pgpath;
 	my @psql_params =
-	  ('psql', '-XAtq', '-d', $self->connstr($dbname), '-f', '-');
+	  ($pgpath . 'psql', '-XAtq', '-d', $self->connstr($dbname), '-f', '-');
 
 	# If the caller wants an array and hasn't passed stdout/stderr
 	# references, allocate temporary ones to capture them so we
@@ -1202,12 +1241,13 @@ sub poll_query_until
 
 	my $max_attempts = 180;
 	my $attempts     = 0;
+	my $pgpath       = $self->pgpath();
 	my ($stdout, $stderr);
 
 	while ($attempts < $max_attempts)
 	{
 		my $cmd =
-		  [ 'psql', '-XAt', '-c', $query, '-d', $self->connstr($dbname) ];
+		  [ $pgpath . 'psql', '-XAt', '-c', $query, '-d', $self->connstr($dbname) ];
 		my $result = IPC::Run::run $cmd, '>', \$stdout, '2>', \$stderr;
 
 		chomp($stdout);
