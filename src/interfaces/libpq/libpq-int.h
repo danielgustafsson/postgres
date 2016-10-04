@@ -80,6 +80,14 @@ typedef struct
 #endif
 #endif   /* USE_OPENSSL */
 
+#ifdef USE_SECURETRANSPORT
+#define Size pg_Size
+#define uint64 pg_uint64
+#include <Security/Security.h>
+#undef Size
+#undef uint64
+#endif
+
 /*
  * POSTGRES backend dependent Constants.
  */
@@ -474,6 +482,14 @@ struct pg_conn
 								 * OpenSSL version changes */
 #endif
 #endif   /* USE_OPENSSL */
+
+#ifdef USE_SECURETRANSPORT
+	SSLContextRef	 ssl;		/* SSL context reference */
+	void		    *st_rootcert;
+	ssize_t			 ssl_buffered;
+	int				 ssl_key_bits;
+#endif   /* USE_SECURETRANSPORT */
+
 #endif   /* USE_SSL */
 
 #ifdef ENABLE_GSS

@@ -257,6 +257,10 @@ static const internalPQconninfoOption PQconninfoOptions[] = {
 		"SSL-Mode", "", 12,		/* sizeof("verify-full") == 12 */
 	offsetof(struct pg_conn, sslmode)},
 
+	/*
+	 * SSL Compression is only available in OpenSSL enabled builds making this
+	 * option a no op when using other SSL libraries.
+	 */
 	{"sslcompression", "PGSSLCOMPRESSION", "1", NULL,
 		"SSL-Compression", "", 1,
 	offsetof(struct pg_conn, sslcompression)},
