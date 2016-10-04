@@ -1288,13 +1288,14 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
       <term><literal>sslcompression</literal></term>
       <listitem>
        <para>
+        This requires <productname>OpenSSL</> 1.0.0 or later, when using
+        other SSL libraries this setting will be ignored.
         If set to 1 (default), data sent over SSL connections will be
         compressed.
-        If set to 0, compression will be disabled (this requires
-        <productname>OpenSSL</> 1.0.0 or later).
+        If set to 0, compression will be disabled.
         This parameter is ignored if a connection without SSL is made,
-        or if the version of <productname>OpenSSL</> used does not support
-        it.
+        if the version of <productname>OpenSSL</> used does not support
+        it or an SSL library other than <productname>OpenSSL</> is used.
        </para>
        <para>
         Compression uses CPU time, but can improve throughput if
@@ -1355,7 +1356,9 @@ postgresql://%2Fvar%2Flib%2Fpostgresql/dbname
         revocation list (CRL).  Certificates listed in this file, if it
         exists, will be rejected while attempting to authenticate the
         server's certificate.  The default is
-        <filename>~/.postgresql/root.crl</>.
+        <filename>~/.postgresql/root.crl</>. This setting is ignored
+        when using <productname>Secure Transport</> which require the
+        CRL to be included in the certificate.
        </para>
       </listitem>
      </varlistentry>
@@ -1972,8 +1975,7 @@ const char *PQsslAttribute(const PGconn *conn, const char *attribute_name);
          <term><literal>library</literal></term>
           <listitem>
            <para>
-            Name of the SSL implementation in use. (Currently, only
-            <literal>"OpenSSL"</literal> is implemented)
+            Name of the SSL implementation in use.
            </para>
           </listitem>
          </varlistentry>
@@ -7406,9 +7408,14 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
    <productname>PostgreSQL</> has native support for using <acronym>SSL</>
    connections to encrypt client/server communications for increased
    security. See <xref linkend="ssl-tcp"> for details about the server-side
-   <acronym>SSL</> functionality.
+   <acronym>SSL</> functionality. Multiple SSL libraries are supported and
+   are enabled at build time.
+   Table <xref linkend="supported-ssl-libraries"> lists the supported SSL
+   libraries.
   </para>
 
+  <sect2>
+   <title>Using OpenSSL</title>
   <para>
    <application>libpq</application> reads the system-wide
    <productname>OpenSSL</productname> configuration file. By default, this
@@ -7418,6 +7425,15 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
    <envar>OPENSSL_CONF</envar> to the name of the desired configuration
    file.
   </para>
+  </sect2>
+
+  <sect2>
+   <title>Using Secure Transport</title>
+  <para>
+   <productname>Secure Transport</productname> utilize the Keychain of the
+   current user. WRITEME. 
+  </para>
+  </sect2>
 
  <sect2 id="libq-ssl-certificates">
   <title>Client Verification of Server Certificates</title>
@@ -7464,10 +7480,13 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
   </para>
 
   <para>
-   Certificate Revocation List (CRL) entries are also checked
-   if the file <filename>~/.postgresql/root.crl</filename> exists
+   Certificate Revocation List (<acronym>CRL</>) entries are also checked. When libpq
+   is built using <productname>OpenSSL</>
+   the file <filename>~/.postgresql/root.crl</filename> is used
    (<filename>%APPDATA%\postgresql\root.crl</filename> on Microsoft
-   Windows).
+   Windows). When using <productname>Secure Transport</> the CRL must be
+   included in the server certificate for Keychain to perform certificate
+   revocation checks automatically.
   </para>
 
   <para>
@@ -7745,7 +7764,8 @@ ldap://ldap.acme.com/cn=dbserver,cn=hosts?pgconnectinfo?base?(objectclass=*)
      <row>
       <entry><filename>~/.postgresql/root.crl</></entry>
       <entry>certificates revoked by certificate authorities</entry>
-      <entry>server certificate must not be on this list</entry>
+      <entry>any certificate in this list will be rejected; server certificate
+      must not be on this list</entry>
      </row>
 
     </tbody>
