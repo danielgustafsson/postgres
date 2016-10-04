@@ -57,6 +57,11 @@ else
 OBJS += sha2.o
 endif
 
+ifeq ($(with_securetransport), yes)
+OBJS += fe-secure-securetransport.o securetransport_common.o
+override CFLAGS += -Wno-deprecated -framework Security -framework CoreFoundation -fconstant-cfstrings
+endif
+
 ifeq ($(PORTNAME), cygwin)
 override shlib = cyg$(NAME)$(DLSUFFIX)
 endif
@@ -112,6 +117,8 @@ ip.c md5.c base64.c scram-common.c sha2.c sha2_openssl.c saslprep.c unicode_norm
 encnames.c wchar.c: % : $(backend_src)/utils/mb/%
 	rm -f $@ && $(LN_S) $< .
 
+securetransport_common.c: % : $(backend_src)/libpq/%
+	rm -f $@ && $(LN_S) $< .
 
 distprep: libpq-dist.rc
 
@@ -158,6 +165,7 @@ clean distclean: clean-lib
 	rm -f chklocale.c crypt.c erand48.c getaddrinfo.c getpeereid.c inet_aton.c inet_net_ntop.c noblock.c open.c system.c pgsleep.c pg_strong_random.c pgstrcasecmp.c pqsignal.c snprintf.c strerror.c strlcpy.c thread.c win32error.c win32setlocale.c
 	rm -f ip.c md5.c base64.c scram-common.c sha2.c sha2_openssl.c saslprep.c unicode_norm.c
 	rm -f encnames.c wchar.c
+	rm -f securetransport_common.c
 
 maintainer-clean: distclean maintainer-clean-lib
 	$(MAKE) -C test $@

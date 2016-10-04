@@ -714,6 +714,7 @@ sub stop
 	$mode = 'fast' unless defined $mode;
 	return unless defined $self->{_pid};
 	print "### Stopping node \"$name\" using mode $mode\n";
+	TestLib::system_or_bail($pgpath . 'pg_ctl', '-D', $pgdata, '-m', $mode, 'stop');
 	$self->_update_pid(0);
 }
 
@@ -1270,7 +1271,7 @@ Returns 1 if successful, 0 if timed out.
 
 sub poll_query_until
 {
-	my ($self, $dbname, $query, $expected) = @_;
+	my ($self, $dbname, $query, $expected, $pgpath) = @_;
 
 	$expected = 't' unless defined($expected);	# default value
 
@@ -1488,7 +1489,7 @@ sub wait_for_catchup
 	  . $self->name . "\n";
 	my $query =
 qq[SELECT '$target_lsn' <= ${mode}_lsn FROM pg_catalog.pg_stat_replication WHERE application_name = '$standby_name';];
-	$self->poll_query_until('postgres', $query)
+	$self->poll_query_until('postgres', $query, $self->pgpath)
 	  or die "timed out waiting for catchup, current location is "
 	  . ($self->safe_psql('postgres', $query) || '(unknown)');
 	print "done\n";
