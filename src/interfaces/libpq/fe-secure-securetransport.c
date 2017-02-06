@@ -335,6 +335,8 @@ SSLOpenClient(PGconn *conn)
 		}
 	}
 
+	CFRelease(trust);
+
 	/*
 	 * TODO: return a better error code than SSLInternalError
 	 */

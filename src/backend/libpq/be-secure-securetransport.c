@@ -63,15 +63,16 @@ static void st_deallocate(void *ptr, void *info);
 static CFIndex st_preferredSize(CFIndex size, CFOptionFlags hint, void *info);
 
 static void SSLLoadCertificate(Port *port);
-static OSStatus load_key(Port *port, char *filename, CFArrayRef key);
-static OSStatus load_certificate(Port *port, char *filename, CFArrayRef certificate);
-static OSStatus load_certificate_keychain(Port *port, char *cert_name, CFArrayRef certificate);
-static OSStatus load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef items);
-static OSStatus load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef items);
+static OSStatus load_key(Port *port, char *filename, CFArrayRef *key);
+static OSStatus load_certificate(Port *port, char *filename, CFArrayRef *certificate);
+static OSStatus load_certificate_keychain(Port *port, char *cert_name, CFArrayRef *certificate);
+static OSStatus load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef *items);
+static OSStatus load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items);
 static char * SSLerrmessage(OSStatus status);
 static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
 static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
 static char * SSLerrmessage(OSStatus status);
+static const char * SSLciphername(SSLCipherSuite cipher);
 
 /*
  * Private API call used in the Webkit code for creating an identity from a
@@ -115,9 +116,14 @@ be_tls_open_server(Port *port)
 	CFAllocatorContext *ctx;
 	MemoryContext		ssl_context;
 	MemoryContext		old_context;
+	SecTrustRef			trust;
+	SecTrustResultType	trust_eval = 0;
 
 	Assert(!port->ssl);
 
+	//ereport(NOTICE, (errmsg("be_tls_open_server called")));
+
+	/*
 	Assert(PostmasterContext);
 	ssl_context = AllocSetContextCreate(PostmasterContext,
 										"Secure Transport SSL connection",
@@ -125,6 +131,7 @@ be_tls_open_server(Port *port)
 
 	old_context = MemoryContextSwitchTo(ssl_context);
 
+	*/
 	ctx = palloc0(sizeof(CFAllocatorContext));
 
 	/*
@@ -163,7 +170,8 @@ be_tls_open_server(Port *port)
 	 */
 	port->stpalloc = (void *) CFAllocatorCreate(kCFAllocatorUseContext, ctx);
 
-	port->ssl = (void *) SSLCreateContext((CFAllocatorRef) port->stpalloc, kSSLServerSide, kSSLStreamType);
+	//port->ssl = (void *) SSLCreateContext((CFAllocatorRef) port->stpalloc, kSSLServerSide, kSSLStreamType);
+	port->ssl = (void *) SSLCreateContext(NULL, kSSLServerSide, kSSLStreamType);
 	if (!port->ssl)
 	{
 		ereport(FATAL,
@@ -172,6 +180,9 @@ be_tls_open_server(Port *port)
 
 	port->ssl_in_use = true;
 
+	SSLSetClientSideAuthenticate((SSLContextRef) port->ssl, kAlwaysAuthenticate);
+
+	port->ssl_buffered = 0;
 	/*
 	 * SSLSetProtocolVersionEnabled() is marked as deprecated as of 10.9
 	 * but the alternative SSLSetSessionConfig() is as of 10.11 not yet
@@ -191,6 +202,13 @@ be_tls_open_server(Port *port)
 				 SSLerrmessage(status))));
 	}
 
+	status = SSLSetSessionOption((SSLContextRef) port->ssl, kSSLSessionOptionBreakOnClientAuth, true);
+	if (status != noErr)
+	{
+		ereport(FATAL,
+				(errmsg("could not set SSL certificate validation: \"%s\"",
+				 SSLerrmessage(status))));
+	}
 
 	status = SSLSetConnection((SSLContextRef) port->ssl, port);
 	if (status != noErr)
@@ -200,7 +218,243 @@ be_tls_open_server(Port *port)
 				 SSLerrmessage(status))));
 	}
 
-	MemoryContextSwitchTo(old_context);
+	/*
+	 * Perform handshake
+	 */
+	int h = 0;
+	//ereport(NOTICE, (errmsg("be_tls_open_server initiating handshake")));
+	for (;;)
+	{
+		h++;
+		status = SSLHandshake((SSLContextRef) port->ssl);
+
+		if (status == noErr)
+		{
+			//ereport(NOTICE, (errmsg("be_tls_open_server handshake successful on attempt: %d", h)));
+			break;
+		}
+
+		if (status == errSSLWouldBlock || status == -1)
+			continue;
+
+		if (status == errSSLPeerAuthCompleted)
+		{
+			//ereport(NOTICE, (errmsg("be_tls_open_server handshake in peer auth on attempt: %d", h)));
+			status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
+			if (status != noErr || trust == NULL)
+			{
+				ereport(WARNING,
+					(errmsg("SSLCopyPeerTrust returned: \"%s\"",
+					 SSLerrmessage(status))));
+				return -1;
+			}
+
+			if (ssl_loaded_verify_locations)
+			{
+				//ereport(NOTICE, (errmsg("be_tls_open_server handshake in ssl_loaded_verify_locations")));
+
+				status = SecTrustSetAnchorCertificates(trust, (CFArrayRef) port->rootcert);
+				if (status != noErr)
+				{
+					ereport(WARNING,
+						(errmsg("SecTrustSetAnchorCertificates returned: \"%s\"",
+						 SSLerrmessage(status))));
+					return -1;
+				}
+
+				status = SecTrustSetAnchorCertificatesOnly(trust, false);
+				if (status != noErr)
+				{
+					ereport(WARNING,
+						(errmsg("SecTrustSetAnchorCertificatesOnly returned: \"%s\"",
+						 SSLerrmessage(status))));
+					return -1;
+				}
+			}
+
+			status = SecTrustEvaluate(trust, &trust_eval);
+			if (status != noErr)
+			{
+				ereport(WARNING,
+					(errmsg("SecTrustEvaluate failed, returned: \"%s\"",
+					 SSLerrmessage(status))));
+				return -1;
+			}
+
+			switch (trust_eval)
+			{
+				/*
+				 * If 'Unspecified' then an anchor certificate was reached without
+				 * encountering any explicit user trust. If 'Proceed' then the user
+				 * has chosen to explicitly trust a certificate in the chain by
+				 * clicking "Trust" in the Keychain app.
+				 */
+				case kSecTrustResultUnspecified:
+				case kSecTrustResultProceed:
+					port->peer_cert_valid = true;
+					break;
+
+				/*
+				 * 'Confirm' indicates that an interactive confirmation from the
+				 * user is requested. This result code was deprecated in 10.9
+				 * however so treat it as a Deny to avoid having to invoke UI
+				 * elements from the Keychain.
+				 */
+				case kSecTrustResultConfirm:
+					//ereport(NOTICE, (errmsg("be_tls_open_server handshake trust_eval: kSecTrustResultConfirm")));
+					break;
+				/*
+				 * 'RecoverableTrustFailure' indicates that the certificate was
+				 * rejected but might be trusted with minor changes to the eval
+				 * context (ignoring expired certificate etc). TODO: Opening up to
+				 * changing the eval context here seems dangerous but we can do
+				 * better logging of the error by invoking SecTrustGetTrustResult()
+				 * to get info on exactly what failed; call and extract relevant
+				 * information to the logstring.
+				 */
+				case kSecTrustResultRecoverableTrustFailure:
+					//ereport(NOTICE, (errmsg("be_tls_open_server handshake trust_eval: kSecTrustResultRecoverableTrustFailure")));
+					port->peer_cert_valid = true;
+					break;
+				/*
+				 * Treat all other cases as rejection without further questioning.
+				 */
+				default:
+					//ereport(NOTICE, (errmsg("be_tls_open_server handshake trust_eval: other")));
+					port->peer_cert_valid = false;
+					break;
+			}
+
+			//ereport(NOTICE, (errmsg("be_tls_open_server handshake cert_valid: %s", port->peer_cert_valid ? "true" : "false")));
+
+
+			if (port->peer_cert_valid)
+			{
+				SecCertificateRef usercert = SecTrustGetCertificateAtIndex(trust, 0L);
+
+				CFStringRef usercert_cn;
+				SecCertificateCopyCommonName(usercert, &usercert_cn);
+				port->peer_cn = pstrdup(CFStringGetCStringPtr(usercert_cn, kCFStringEncodingUTF8));
+
+				//ereport(NOTICE, (errmsg("be_tls_open_server handshake peer cn: %s", port->peer_cn)));
+				CFRelease(usercert_cn);
+			}
+		}
+		//else
+			//ereport(NOTICE, (errmsg("be_tls_open_server handshake attempt: %d, returned status: %d", h, status)));
+	}
+
+#if 0
+		//ereport(NOTICE, (errmsg("be_tls_open_server initiating handshake for CA")));
+
+		do
+		{
+			status = SSLHandshake((SSLContextRef) port->ssl);
+		}
+		while (status == errSSLWouldBlock || status == -1);
+
+		if (status != noErr)
+		{
+			ereport(WARNING,
+					(errmsg("SSLHandshake returned: \"%s\"",
+					 SSLerrmessage(status))));
+			return -1;
+		}
+
+/*
+		port->peer_cn = pstrdup("danielgustafsson");
+		port->peer_cert_valid = true;
+		status = SSLHandshake((SSLContextRef) port->ssl);
+		ereport(WARNING, (errmsg("be_tls_open_server returning early after SSLHandshake returned: \"%s\"", SSLerrmessage(status))));
+*/
+
+	//	MemoryContextSwitchTo(old_context);
+		if (status == noErr)
+			return 0;
+
+		return -1;
+
+		status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
+		if (status != noErr || trust == NULL)
+		{
+			ereport(WARNING,
+					(errmsg("SSLCopyPeerTrust returned: \"%s\"",
+					 SSLerrmessage(status))));
+			return -1;
+		}
+
+		status = SecTrustSetAnchorCertificates(trust, (CFArrayRef) port->rootcert);
+		if (status != noErr)
+			return -1;
+
+		status = SecTrustSetAnchorCertificatesOnly(trust, false);
+		if (status != noErr)
+			return -1;
+
+		status = SecTrustEvaluate(trust, &trust_eval);
+		if (status == errSecSuccess)
+		{
+			switch (trust_eval)
+			{
+				/*
+				 * If 'Unspecified' then an anchor certificate was reached without
+				 * encountering any explicit user trust. If 'Proceed' then the user
+				 * has chosen to explicitly trust a certificate in the chain by
+				 * clicking "Trust" in the Keychain app.
+				 */
+				case kSecTrustResultUnspecified:
+				case kSecTrustResultProceed:
+					port->peer_cert_valid = true;
+					break;
+
+				/*
+				 * 'Confirm' indicates that an interactive confirmation from the
+				 * user is requested. This result code was deprecated in 10.9
+				 * however so treat it as a Deny to avoid having to invoke UI
+				 * elements from the Keychain.
+				 */
+				case kSecTrustResultConfirm:
+				/*
+				 * 'RecoverableTrustFailure' indicates that the certificate was
+				 * rejected but might be trusted with minor changes to the eval
+				 * context (ignoring expired certificate etc). TODO: Opening up to
+				 * changing the eval context here seems dangerous but we can do
+				 * better logging of the error by invoking SecTrustGetTrustResult()
+				 * to get info on exactly what failed; call and extract relevant
+				 * information to the logstring.
+				 */
+				case kSecTrustResultRecoverableTrustFailure:
+				/*
+				 * Treat all other cases as rejection without further questioning.
+				 */
+				default:
+					port->peer_cert_valid = false;
+					break;
+			}
+		}
+
+		SecCertificateRef usercert = SecTrustGetCertificateAtIndex(trust, 0L);
+
+		CFStringRef usercert_cn;
+		SecCertificateCopyCommonName(usercert, &usercert_cn);
+		port->peer_cn = pstrdup(CFStringGetCStringPtr(usercert_cn, kCFStringEncodingUTF8));
+
+		CFRelease(usercert_cn);
+
+		CFRelease(trust);
+	}
+	else
+		status = SSLHandshake((SSLContextRef) port->ssl);
+
+#endif
+
+	//MemoryContextSwitchTo(old_context);
+
+	if (status != noErr)
+		return -1;
+
+	//ereport(NOTICE, (errmsg("be_tls_open_server returning 0")));
+
 	return 0;
 }
 
@@ -221,6 +475,7 @@ SSLLoadCertificate(Port *port)
 	OSStatus			status;
 	CFArrayRef			certificate;
 	CFArrayRef			key;
+	CFArrayRef			rootcert;
 	SecIdentityRef		identity;
 	SecCertificateRef	cert_ref;
 	SecKeyRef			key_ref;
@@ -232,7 +487,9 @@ SSLLoadCertificate(Port *port)
 	CFMutableArrayRef	chain_copy;
 	CFAllocatorRef		stpalloc = (CFAllocatorRef) port->stpalloc;
 
-	status = load_certificate(port, ssl_cert_file, certificate);
+	//ereport(NOTICE, (errmsg("SSLLoadCertificate called")));
+
+	status = load_certificate(port, ssl_cert_file, &certificate);
 	if (status != noErr)
 	{
 		ereport(FATAL,
@@ -240,7 +497,7 @@ SSLLoadCertificate(Port *port)
 				 SSLerrmessage(status))));
 	}
 
-	status = load_key(port, ssl_key_file, key);
+	status = load_key(port, ssl_key_file, &key);
 	if (status != noErr)
 	{
 		ereport(FATAL,
@@ -251,7 +508,8 @@ SSLLoadCertificate(Port *port)
 	cert_ref = (SecCertificateRef) CFArrayGetValueAtIndex(certificate, 0);
 	key_ref = (SecKeyRef) CFArrayGetValueAtIndex(key, 0);
 	policy = SecPolicyCreateSSL(true, NULL);
-	identity = SecIdentityCreate(stpalloc, cert_ref, key_ref);
+	//identity = SecIdentityCreate(stpalloc, cert_ref, key_ref);
+	identity = SecIdentityCreate(NULL, cert_ref, key_ref);
 
 	status = SecTrustCreateWithCertificates(certificate, policy, &trust);
 	if (status != noErr)
@@ -268,7 +526,23 @@ SSLLoadCertificate(Port *port)
 	 */
 	if (ssl_ca_file[0])
 	{
-		/* TODO: read + load + add to chain */
+		status = load_certificate(port, ssl_ca_file, &rootcert);
+		if (status != noErr)
+		{
+			ereport(FATAL,
+					(errmsg("could not load root certificate: \"%s\"",
+					 SSLerrmessage(status))));
+		}
+		
+		status = SecTrustSetAnchorCertificates(trust, rootcert);
+		if (status != noErr)
+		{
+			ereport(FATAL,
+					(errmsg("unable to add root certificate to chain: \"%s\"",
+					 SSLerrmessage(status))));
+		}
+		SecTrustSetAnchorCertificatesOnly(trust, false);
+		ssl_loaded_verify_locations = true;
 	}
 
 	status = SecTrustEvaluate(trust, &trust_status);
@@ -315,7 +589,8 @@ SSLLoadCertificate(Port *port)
 
 	status = SecTrustGetResult(trust, &trust_status, &chain, &status_chain);
 
-	chain_copy = CFArrayCreateMutable(stpalloc, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
+	//chain_copy = CFArrayCreateMutable(stpalloc, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
+	chain_copy = CFArrayCreateMutable(NULL, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
 	
 	CFArrayAppendValue(chain_copy, identity);
 	if (CFArrayGetCount(chain) > 1)
@@ -330,6 +605,11 @@ SSLLoadCertificate(Port *port)
 				(errmsg("could not set certificate for connection: \"%s\"",
 				 SSLerrmessage(status))));
 	}
+
+	if (rootcert)
+		port->rootcert = (void *) CFRetain(rootcert);
+
+	//ereport(NOTICE, (errmsg("SSLLoadCertificate returning")));
 }
 
 /*
@@ -368,13 +648,14 @@ be_tls_get_version(Port *port, char *ptr, size_t len)
 	if (ptr == NULL || len == 0)
 		return;
 
-	if (!port->ssl)
+	if (!(SSLContextRef) port->ssl)
+	{
+		ptr[0] = '\0';
 		return;
-
-	ptr[0] = '\0';
+	}
 
 	status = SSLGetNegotiatedProtocolVersion((SSLContextRef) port->ssl, &protocol);
-	if (status != noErr)
+	if (status == noErr)
 	{
 		switch (protocol)
 		{
@@ -385,9 +666,12 @@ be_tls_get_version(Port *port, char *ptr, size_t len)
 				strlcpy(ptr, "TLSv1.2", len);
 				break;
 			default:
+				strlcpy(ptr, "Unknown", len);
 				break;
 		}
 	}
+	else
+		ptr[0] = '\0';
 }
 
 /*
@@ -396,48 +680,74 @@ be_tls_get_version(Port *port, char *ptr, size_t len)
 ssize_t
 be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 {
-	size_t n = 0;
-	OSStatus read_status;
+	size_t			n = 0;
+	ssize_t			ret;
+	OSStatus		read_status;
+	SSLContextRef	ssl = (SSLContextRef) port->ssl;
+	int				read_errno = 0;
 
 	errno = 0;
 
-	read_status = SSLRead((SSLContextRef) port->ssl, ptr, len, &n);
-	if (read_status != noErr)
+	if (len <= 0)
+		return 0;
+
+	////ereport(NOTICE, (errmsg("be_tls_read called asking %lu bytes", len)));
+
+	read_status = SSLRead(ssl, ptr, len, &n);
+	switch (read_status)
 	{
-		switch (read_status)
-		{
-			/* Function is blocked, waiting for I/O */
-			case errSSLWouldBlock:
+		case noErr:
+			ret = n;
+			break;
+
+		/* Function is blocked, waiting for I/O */
+		case errSSLWouldBlock:
+			if (port->ssl_buffered)
+				*waitfor = WL_SOCKET_WRITEABLE;
+			else
 				*waitfor = WL_SOCKET_READABLE;
-				errno = EWOULDBLOCK;
-				if (n)
-					return n;
-				return -1;
-				break;
 
-			/*
-			 * If the connection was closed for an unforeseen reason, return
-			 * error and set errno such that the caller can raise the
-			 * appropriate ereport()
-			 */
-			case errSSLClosedNoNotify:
-			case errSSLClosedAbort:
-			case errSSLClosedGraceful:
-				n = -1;
-				errno = ECONNRESET;
-				break;
+			read_errno = EWOULDBLOCK;
+			if (n == 0)
+			{
+				////ereport(NOTICE, (errmsg("be_tls_read returning no bytes from errSSLWouldBlock, errno:%d", read_errno)));
+				ret = -1;
+			}
+			else
+			{
+				ret = n;
+				////ereport(NOTICE, (errmsg("be_tls_read returning %lu bytes from errSSLWouldBlock, errno:%d", n, read_errno)));
+			}
 
-			default:
-				n = -1;
-				ereport(COMMERROR,
-						(errcode(ERRCODE_PROTOCOL_VIOLATION),
-						 errmsg("SSL error: %s",
-						 		SSLerrmessage(read_status))));
-				break;
-		}
+			break;
+
+		case errSSLClosedGraceful:
+			ret = 0;
+			break;
+
+		/*
+		 * If the connection was closed for an unforeseen reason, return
+		 * error and set errno such that the caller can raise the
+		 * appropriate ereport()
+		 */
+		case errSSLClosedNoNotify:
+		case errSSLClosedAbort:
+			ret = -1;
+			read_errno = ECONNRESET;
+			break;
+
+		default:
+			ret = -1;
+			ereport(COMMERROR,
+					(errcode(ERRCODE_PROTOCOL_VIOLATION),
+					 errmsg("SSL error: %s",
+					 		SSLerrmessage(read_status))));
+			break;
 	}
 	
-	return n;
+	errno = read_errno;
+	////ereport(NOTICE, (errmsg("be_tls_read returning %lu bytes (%zd), errno:%d (%d)", n, ret, errno, read_errno));
+	return ret;
 }
 
 /*
@@ -446,43 +756,134 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 ssize_t
 be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 {
-	size_t n = 0;
-	OSStatus write_status;
+	size_t		n = 0;
+	OSStatus 	write_status;
 
 	errno = 0;
 
-	write_status = SSLWrite((SSLContextRef) port->ssl, ptr, len, &n);
+	if (len == 0)
+		return 0;
 
-	/*
-	 * If we recieve errSSLWouldBlock the returned n denotes the number of
-	 * bytes written to the SSL context buffer and not the underlying socket.
-	 * We thus need to keep initiating blank writes until we get noErr, only
-	 * then do we know the data was transmitted.
-	 */
-	if (write_status == errSSLWouldBlock)
+	//ereport(NOTICE, (errmsg("be_tls_write called for %lu bytes", len)));
+
+	if (port->ssl_buffered > 0)
 	{
-		size_t retry_n = 0;
-		while (write_status == errSSLWouldBlock)
+		write_status = SSLWrite((SSLContextRef) port->ssl, NULL, 0, &n);
+
+		if (write_status == noErr)
 		{
-			write_status = SSLWrite((SSLContextRef) port->ssl, NULL, 0UL, &retry_n);
-			/* Pause to avoid essentially spinlocking? */
+			n = port->ssl_buffered;
+			port->ssl_buffered = 0;
+		}
+		else if (write_status == errSSLWouldBlock || write_status == -1)
+		{
+			n = -1;
+			errno = EINTR;
+		}
+		else
+		{
+			n = -1;
+			errno = ECONNRESET;
+		}
+	}
+	else
+	{
+		write_status = SSLWrite((SSLContextRef) port->ssl, ptr, len, &n);
+	
+		switch (write_status)
+		{
+			case noErr:
+				break;
+
+			case -1:
+			case errSSLWouldBlock:
+				port->ssl_buffered = len;
+				n = 0;
+#ifdef EAGAIN
+				errno = EAGAIN;
+#else
+				errno = EINTR;
+#endif
+				break;
+
+			/*
+			 * Clean disconnections
+		 	*/
+			case errSSLClosedNoNotify:
+				/* fall through */
+			case errSSLClosedGraceful:
+				errno = ECONNRESET;
+				n = -1;
+				break;
+
+			default:
+				errno = ECONNRESET;
+				n = -1;
+				break;
 		}
 	}
 
-	if (write_status != noErr)
-	{
-		ereport(COMMERROR,
-				(errcode(ERRCODE_PROTOCOL_VIOLATION),
-				 errmsg("SSL error: %s",
-				 		SSLerrmessage(write_status))));
-	}
-
+	//ereport(NOTICE, (errmsg("be_tls_write returning %lu bytes", n)));
 	return n;
 }
 
-int be_tls_get_cipher_bits(Port *port) { return 0; }
-void be_tls_get_cipher(Port *port, char *ptr, size_t len) { }
-void be_tls_get_peerdn_name(Port *port, char *ptr, size_t len) { }
+int
+be_tls_get_cipher_bits(Port *port)
+{
+	OSStatus			status;
+	SecTrustRef			trust;
+	SecCertificateRef	cert;
+	SecKeyRef			key;
+
+	status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
+	if (status == noErr)
+	{
+		cert = SecTrustGetCertificateAtIndex(trust, 0);
+		status = SecCertificateCopyPublicKey(cert, &key);
+		if (status == noErr)
+			return SecKeyGetBlockSize(key);
+	}
+
+	return 0;
+}
+
+void
+be_tls_get_peerdn_name(Port *port, char *ptr, size_t len)
+{
+	OSStatus			status;
+	SecTrustRef			trust;
+	SecCertificateRef	cert;
+	CFDataRef			dn;
+	CFStringRef			dn_str;
+
+	status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
+	if (status == noErr)
+	{
+		/*
+		 * TODO: copy the certificate parts with SecCertificateCopyValues and
+		 * parse the OIDs to build up the DN
+		 */
+		cert = SecTrustGetCertificateAtIndex(trust, 0);
+		dn_str = SecCertificateCopyLongDescription(NULL /*stpalloc*/, cert, NULL);
+		strlcpy(ptr, CFStringGetCStringPtr(dn_str, kCFStringEncodingASCII), len);
+		CFRelease(dn_str);
+	}
+	else
+		ptr[0] = '\0';
+}
+
+void
+be_tls_get_cipher(Port *port, char *ptr, size_t len)
+{
+	OSStatus		status;
+	SSLCipherSuite	cipher;
+
+	status = SSLGetNegotiatedCipher((SSLContextRef) port->ssl, &cipher);
+	if (status == noErr)
+		strlcpy(ptr, SSLciphername(cipher), len);
+	else
+		ptr[0] = '\0';
+}
 
 /*
  * be_tls_get_compression
@@ -505,7 +906,7 @@ be_tls_get_compression(Port *port)
 /* ------------------------------------------------------------ */
 
 static OSStatus
-load_key(Port *port, char *filename, CFArrayRef key)
+load_key(Port *port, char *filename, CFArrayRef *key)
 {
 	OSStatus	status;
 	struct stat	stat_buf;
@@ -549,7 +950,7 @@ load_key(Port *port, char *filename, CFArrayRef key)
 		if (strstr(filename, ".p12") != NULL)
 			status = load_pkcs12_file(port, filename, key);
 		else
-			status = load_pem_file(port, ssl_cert_file, stat_buf.st_size, key);
+			status = load_pem_file(port, filename, stat_buf.st_size, key);
 	}
 
 	return status;
@@ -562,7 +963,7 @@ load_key(Port *port, char *filename, CFArrayRef key)
  * keychain. The certificate is returned in the "certificate" ArrayRef.
  */
 static OSStatus
-load_certificate(Port *port, char *filename, CFArrayRef certificate)
+load_certificate(Port *port, char *filename, CFArrayRef *certificate)
 {
 	OSStatus	status;
 	struct stat	stat_buf;
@@ -602,7 +1003,7 @@ load_certificate(Port *port, char *filename, CFArrayRef certificate)
 }
 
 static OSStatus
-load_certificate_keychain(Port *port, char *cert_name, CFArrayRef certificate)
+load_certificate_keychain(Port *port, char *cert_name, CFArrayRef *certificate)
 {
 	/* TODO: use SecItemCopyMatching */ 
 	return errSSLInternal;
@@ -615,7 +1016,7 @@ load_certificate_keychain(Port *port, char *cert_name, CFArrayRef certificate)
  * currently doesn't handle passphrase protected files which is a TODO.
  */
 static OSStatus
-load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef items)
+load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef *items)
 {
 	OSStatus		status;
 	CFURLRef		p12_ref;
@@ -627,12 +1028,14 @@ load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef items)
 
 	CFDictionaryRef opt = CFDictionaryCreate(NULL, keys, vals, 0, NULL, NULL);
 
-	p12_ref = CFURLCreateFromFileSystemRepresentation(stpalloc,
+	//p12_ref = CFURLCreateFromFileSystemRepresentation(stpalloc,
+	p12_ref = CFURLCreateFromFileSystemRepresentation(NULL,
 					(UInt8 *) p12_fname, strlen(p12_fname), false);
 
-	if (CFURLCreateDataAndPropertiesFromResource(stpalloc, p12_ref, &buf, NULL, NULL, &status))
+	//if (CFURLCreateDataAndPropertiesFromResource(stpalloc, p12_ref, &buf, NULL, NULL, &status))
+	if (CFURLCreateDataAndPropertiesFromResource(NULL, p12_ref, &buf, NULL, NULL, &status))
 	{
-		status = SecPKCS12Import(buf, opt, &items);
+		status = SecPKCS12Import(buf, opt, items);
 		CFRelease(buf);
 	}
 
@@ -643,10 +1046,10 @@ load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef items)
 }
 
 static OSStatus
-load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef items)
+load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
 {
 	OSStatus							status;
-	File								cert_fd;
+	FILE							   *cert_fd;
 	UInt8							   *cert_buf;
 	int									ret;
 	CFDataRef							data_ref;
@@ -658,27 +1061,28 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef items)
 
 	cert_buf = palloc(size);
 
-	cert_fd = PathNameOpenFile(pem_fname, O_RDONLY, 0600);
+	cert_fd = fopen(pem_fname, "r");
 	if (cert_fd < 0)
 		ereport(FATAL,
 				(errcode_for_file_access(),
 				 errmsg("could not load server certificate file \"%s\": %m",
 				 pem_fname)));
 
-	ret = FileRead(cert_fd, (char *) cert_buf, size);
+	ret = fread(cert_buf, 1, size, cert_fd);
 
 	/*
 	 * TODO: Handle reading the certificate in chunks
 	 */
 	if (ret != size)
 	{
-		FileClose(cert_fd);
+		fclose(cert_fd);
 		return errSecInternalError;
 	}
 
-	FileClose(cert_fd);
+	fclose(cert_fd);
 
-	data_ref = CFDataCreate(stpalloc, cert_buf, size);
+	//data_ref = CFDataCreate(stpalloc, cert_buf, size);
+	data_ref = CFDataCreate(NULL, cert_buf, size);
 
 	memset(&params, 0, sizeof(SecItemImportExportKeyParameters));
 	params.version = SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION;
@@ -694,7 +1098,8 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef items)
 	 * the certificate data was read or the file extension.
 	 */
 	format = kSecFormatPEMSequence;
-	cert_path = CFStringCreateWithCString(stpalloc, pem_fname,
+	//cert_path = CFStringCreateWithCString(stpalloc, pem_fname,
+	cert_path = CFStringCreateWithCString(NULL, pem_fname,
 										  kCFStringEncodingUTF8);
 
 	item_type = kSecItemTypeCertificate;
@@ -706,7 +1111,7 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef items)
 	 */
 	status = SecItemImport(data_ref, cert_path, &format, &item_type,
 						   0 /* flags */, &params, NULL /* keychain */,
-						   &items);
+						   items);
 
 	CFRelease(cert_path);
 	CFRelease(data_ref);
@@ -745,6 +1150,428 @@ SSLerrmessage(OSStatus status)
 	return err_buf;
 }
 
+/*
+ * SSLciphername
+ *
+ * Translate a SSLCipherSuite code into a string literal suitable for printing
+ * in log/informational messages to the user. Since this implementation of the
+ * Secure Transport lib doesn't support SSLv2/v3 these ciphernames are omitted.
+ */
+static const char *
+SSLciphername(SSLCipherSuite cipher)
+{
+	switch (cipher)
+	{
+    	case TLS_NULL_WITH_NULL_NULL:
+    		return "NULL_WITH_NULL_NULL";
+			break;
+
+		/* TLS addenda using AES, per RFC 3268 */
+		case TLS_RSA_WITH_AES_128_CBC_SHA:
+			return "RSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_DH_DSS_WITH_AES_128_CBC_SHA:
+			return "DH_DSS_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_DH_RSA_WITH_AES_128_CBC_SHA:
+			return "DH_RSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_DHE_DSS_WITH_AES_128_CBC_SHA:
+			return "DHE_DSS_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_DHE_RSA_WITH_AES_128_CBC_SHA:
+			return "DHE_RSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_DH_anon_WITH_AES_128_CBC_SHA:
+			return "DH_anon_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_RSA_WITH_AES_256_CBC_SHA:
+			return "RSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_DH_DSS_WITH_AES_256_CBC_SHA:
+			return "DH_DSS_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_DH_RSA_WITH_AES_256_CBC_SHA:
+			return "DH_RSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_DHE_DSS_WITH_AES_256_CBC_SHA:
+			return "DHE_DSS_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_DHE_RSA_WITH_AES_256_CBC_SHA:
+			return "DHE_RSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_DH_anon_WITH_AES_256_CBC_SHA:
+			return "DH_anon_WITH_AES_256_CBC_SHA";
+			break;
+
+		/* ECDSA addenda, RFC 4492 */
+		case TLS_ECDH_ECDSA_WITH_NULL_SHA:
+			return "ECDH_ECDSA_WITH_NULL_SHA";
+			break;
+		case TLS_ECDH_ECDSA_WITH_RC4_128_SHA:
+			return "ECDH_ECDSA_WITH_RC4_128_SHA";
+			break;
+		case TLS_ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA:
+			return "ECDH_ECDSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA:
+			return "ECDH_ECDSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA:
+			return "ECDH_ECDSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_NULL_SHA:
+			return "ECDHE_ECDSA_WITH_NULL_SHA";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_RC4_128_SHA:
+			return "ECDHE_ECDSA_WITH_RC4_128_SHA";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA:
+			return "ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA:
+			return "ECDHE_ECDSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA:
+			return "ECDHE_ECDSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_ECDH_RSA_WITH_NULL_SHA:
+			return "ECDH_RSA_WITH_NULL_SHA";
+			break;
+		case TLS_ECDH_RSA_WITH_RC4_128_SHA:
+			return "ECDH_RSA_WITH_RC4_128_SHA";
+			break;
+		case TLS_ECDH_RSA_WITH_3DES_EDE_CBC_SHA:
+			return "ECDH_RSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_ECDH_RSA_WITH_AES_128_CBC_SHA:
+			return "ECDH_RSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_ECDH_RSA_WITH_AES_256_CBC_SHA:
+			return "ECDH_RSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_ECDHE_RSA_WITH_NULL_SHA:
+			return "ECDHE_RSA_WITH_NULL_SHA";
+			break;
+		case TLS_ECDHE_RSA_WITH_RC4_128_SHA:
+			return "ECDHE_RSA_WITH_RC4_128_SHA";
+			break;
+		case TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA:
+			return "ECDHE_RSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA:
+			return "ECDHE_RSA_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA:
+			return "ECDHE_RSA_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_ECDH_anon_WITH_NULL_SHA:
+			return "ECDH_anon_WITH_NULL_SHA";
+			break;
+		case TLS_ECDH_anon_WITH_RC4_128_SHA:
+			return "ECDH_anon_WITH_RC4_128_SHA";
+			break;
+		case TLS_ECDH_anon_WITH_3DES_EDE_CBC_SHA:
+			return "ECDH_anon_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_ECDH_anon_WITH_AES_128_CBC_SHA:
+			return "ECDH_anon_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_ECDH_anon_WITH_AES_256_CBC_SHA:
+			return "ECDH_anon_WITH_AES_256_CBC_SHA";
+			break;
+
+		/* Server provided RSA certificate for key exchange. */
+		case TLS_RSA_WITH_NULL_MD5:
+			return "RSA_WITH_NULL_MD5";
+			break;
+		case TLS_RSA_WITH_NULL_SHA:
+			return "RSA_WITH_NULL_SHA";
+			break;
+		case TLS_RSA_WITH_RC4_128_MD5:
+			return "RSA_WITH_RC4_128_MD5";
+			break;
+		case TLS_RSA_WITH_RC4_128_SHA:
+			return "RSA_WITH_RC4_128_SHA";
+			break;
+		case TLS_RSA_WITH_3DES_EDE_CBC_SHA:
+			return "RSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_RSA_WITH_NULL_SHA256:
+			return "RSA_WITH_NULL_SHA256";
+			break;
+		case TLS_RSA_WITH_AES_128_CBC_SHA256:
+			return "RSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_RSA_WITH_AES_256_CBC_SHA256:
+			return "RSA_WITH_AES_256_CBC_SHA256";
+			break;
+
+    	/*
+		 * Server-authenticated (and optionally client-authenticated)
+		 * Diffie-Hellman.
+		 */
+		case TLS_DH_DSS_WITH_3DES_EDE_CBC_SHA:
+			return "DH_DSS_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_DH_RSA_WITH_3DES_EDE_CBC_SHA:
+			return "DH_RSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA:
+			return "DHE_DSS_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA:
+			return "DHE_RSA_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_DH_DSS_WITH_AES_128_CBC_SHA256:
+			return "DH_DSS_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_DH_RSA_WITH_AES_128_CBC_SHA256:
+			return "DH_RSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_DHE_DSS_WITH_AES_128_CBC_SHA256:
+			return "DHE_DSS_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_DHE_RSA_WITH_AES_128_CBC_SHA256:
+			return "DHE_RSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_DH_DSS_WITH_AES_256_CBC_SHA256:
+			return "DH_DSS_WITH_AES_256_CBC_SHA256";
+			break;
+		case TLS_DH_RSA_WITH_AES_256_CBC_SHA256:
+			return "DH_RSA_WITH_AES_256_CBC_SHA256";
+			break;
+		case TLS_DHE_DSS_WITH_AES_256_CBC_SHA256:
+			return "DHE_DSS_WITH_AES_256_CBC_SHA256";
+			break;
+		case TLS_DHE_RSA_WITH_AES_256_CBC_SHA256:
+			return "DHE_RSA_WITH_AES_256_CBC_SHA256";
+			break;
+
+		/* Completely anonymous Diffie-Hellman */
+		case TLS_DH_anon_WITH_RC4_128_MD5:
+			return "DH_anon_WITH_RC4_128_MD5";
+			break;
+		case TLS_DH_anon_WITH_3DES_EDE_CBC_SHA:
+			return "DH_anon_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_DH_anon_WITH_AES_128_CBC_SHA256:
+			return "DH_anon_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_DH_anon_WITH_AES_256_CBC_SHA256:
+			return "DH_anon_WITH_AES_256_CBC_SHA256";
+			break;
+
+		/* Addendum from RFC 4279, TLS PSK */
+		case TLS_PSK_WITH_RC4_128_SHA:
+			return "PSK_WITH_RC4_128_SHA";
+			break;
+		case TLS_PSK_WITH_3DES_EDE_CBC_SHA:
+			return "PSK_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_PSK_WITH_AES_128_CBC_SHA:
+			return "PSK_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_PSK_WITH_AES_256_CBC_SHA:
+			return "PSK_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_DHE_PSK_WITH_RC4_128_SHA:
+			return "DHE_PSK_WITH_RC4_128_SHA";
+			break;
+		case TLS_DHE_PSK_WITH_3DES_EDE_CBC_SHA:
+			return "DHE_PSK_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_DHE_PSK_WITH_AES_128_CBC_SHA:
+			return "DHE_PSK_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_DHE_PSK_WITH_AES_256_CBC_SHA:
+			return "DHE_PSK_WITH_AES_256_CBC_SHA";
+			break;
+		case TLS_RSA_PSK_WITH_RC4_128_SHA:
+			return "RSA_PSK_WITH_RC4_128_SHA";
+			break;
+		case TLS_RSA_PSK_WITH_3DES_EDE_CBC_SHA:
+			return "RSA_PSK_WITH_3DES_EDE_CBC_SHA";
+			break;
+		case TLS_RSA_PSK_WITH_AES_128_CBC_SHA:
+			return "RSA_PSK_WITH_AES_128_CBC_SHA";
+			break;
+		case TLS_RSA_PSK_WITH_AES_256_CBC_SHA:
+			return "RSA_PSK_WITH_AES_256_CBC_SHA";
+			break;
+
+		/* RFC 4785 - Pre-Shared Key (PSK) Ciphersuites with NULL Encryption */
+		case TLS_PSK_WITH_NULL_SHA:
+			return "PSK_WITH_NULL_SHA";
+			break;
+		case TLS_DHE_PSK_WITH_NULL_SHA:
+			return "DHE_PSK_WITH_NULL_SHA";
+			break;
+		case TLS_RSA_PSK_WITH_NULL_SHA:
+			return "RSA_PSK_WITH_NULL_SHA";
+			break;
+
+		/*
+		 * Addenda from rfc 5288 AES Galois Counter Mode (GCM) Cipher Suites
+		 * for TLS.
+		 */
+		case TLS_RSA_WITH_AES_128_GCM_SHA256:
+			return "RSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_RSA_WITH_AES_256_GCM_SHA384:
+			return "RSA_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_DHE_RSA_WITH_AES_128_GCM_SHA256:
+			return "DHE_RSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_DHE_RSA_WITH_AES_256_GCM_SHA384:
+			return "DHE_RSA_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_DH_RSA_WITH_AES_128_GCM_SHA256:
+			return "DH_RSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_DH_RSA_WITH_AES_256_GCM_SHA384:
+			return "DH_RSA_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_DHE_DSS_WITH_AES_128_GCM_SHA256:
+			return "DHE_DSS_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_DHE_DSS_WITH_AES_256_GCM_SHA384:
+			return "DHE_DSS_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_DH_DSS_WITH_AES_128_GCM_SHA256:
+			return "DH_DSS_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_DH_DSS_WITH_AES_256_GCM_SHA384:
+			return "DH_DSS_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_DH_anon_WITH_AES_128_GCM_SHA256:
+			return "DH_anon_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_DH_anon_WITH_AES_256_GCM_SHA384:
+			return "DH_anon_WITH_AES_256_GCM_SHA384";
+			break;
+
+		/* RFC 5487 - PSK with SHA-256/384 and AES GCM */
+		case TLS_PSK_WITH_AES_128_GCM_SHA256:
+			return "PSK_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_PSK_WITH_AES_256_GCM_SHA384:
+			return "PSK_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_DHE_PSK_WITH_AES_128_GCM_SHA256:
+			return "DHE_PSK_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_DHE_PSK_WITH_AES_256_GCM_SHA384:
+			return "DHE_PSK_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_RSA_PSK_WITH_AES_128_GCM_SHA256:
+			return "RSA_PSK_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_RSA_PSK_WITH_AES_256_GCM_SHA384:
+			return "RSA_PSK_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_PSK_WITH_AES_128_CBC_SHA256:
+			return "PSK_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_PSK_WITH_AES_256_CBC_SHA384:
+			return "PSK_WITH_AES_256_CBC_SHA384";
+			break;
+		case TLS_PSK_WITH_NULL_SHA256:
+			return "PSK_WITH_NULL_SHA256";
+			break;
+		case TLS_PSK_WITH_NULL_SHA384:
+			return "PSK_WITH_NULL_SHA384";
+			break;
+		case TLS_DHE_PSK_WITH_AES_128_CBC_SHA256:
+			return "DHE_PSK_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_DHE_PSK_WITH_AES_256_CBC_SHA384:
+			return "DHE_PSK_WITH_AES_256_CBC_SHA384";
+			break;
+		case TLS_DHE_PSK_WITH_NULL_SHA256:
+			return "DHE_PSK_WITH_NULL_SHA256";
+			break;
+		case TLS_DHE_PSK_WITH_NULL_SHA384:
+			return "DHE_PSK_WITH_NULL_SHA384";
+			break;
+		case TLS_RSA_PSK_WITH_AES_128_CBC_SHA256:
+			return "RSA_PSK_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_RSA_PSK_WITH_AES_256_CBC_SHA384:
+			return "RSA_PSK_WITH_AES_256_CBC_SHA384";
+			break;
+		case TLS_RSA_PSK_WITH_NULL_SHA256:
+			return "RSA_PSK_WITH_NULL_SHA256";
+			break;
+		case TLS_RSA_PSK_WITH_NULL_SHA384:
+			return "RSA_PSK_WITH_NULL_SHA384";
+			break;
+
+		/*
+		 * Addenda from rfc 5289  Elliptic Curve Cipher Suites with
+		 * HMAC SHA-256/384.
+		 */
+		case TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:
+			return "ECDHE_ECDSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384:
+			return "ECDHE_ECDSA_WITH_AES_256_CBC_SHA384";
+			break;
+		case TLS_ECDH_ECDSA_WITH_AES_128_CBC_SHA256:
+			return "ECDH_ECDSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_ECDH_ECDSA_WITH_AES_256_CBC_SHA384:
+			return "ECDH_ECDSA_WITH_AES_256_CBC_SHA384";
+			break;
+		case TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256:
+			return "ECDHE_RSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384:
+			return "ECDHE_RSA_WITH_AES_256_CBC_SHA384";
+			break;
+		case TLS_ECDH_RSA_WITH_AES_128_CBC_SHA256:
+			return "ECDH_RSA_WITH_AES_128_CBC_SHA256";
+			break;
+		case TLS_ECDH_RSA_WITH_AES_256_CBC_SHA384:
+			return "ECDH_RSA_WITH_AES_256_CBC_SHA384";
+			break;
+
+		/*
+		 * Addenda from rfc 5289  Elliptic Curve Cipher Suites with
+		 * SHA-256/384 and AES Galois Counter Mode (GCM)
+		 */
+		case TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
+			return "ECDHE_ECDSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384:
+			return "ECDHE_ECDSA_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_ECDH_ECDSA_WITH_AES_128_GCM_SHA256:
+			return "ECDH_ECDSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_ECDH_ECDSA_WITH_AES_256_GCM_SHA384:
+			return "ECDH_ECDSA_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256:
+			return "ECDHE_RSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384:
+			return "ECDHE_RSA_WITH_AES_256_GCM_SHA384";
+			break;
+		case TLS_ECDH_RSA_WITH_AES_128_GCM_SHA256:
+			return "ECDH_RSA_WITH_AES_128_GCM_SHA256";
+			break;
+		case TLS_ECDH_RSA_WITH_AES_256_GCM_SHA384:
+			return "ECDH_RSA_WITH_AES_256_GCM_SHA384";
+			break;
+
+		default:
+			break;
+	}
+
+	return NULL;
+}
 /* ------------------------------------------------------------ */
 /*				Internal functions - Socket IO					*/
 /* ------------------------------------------------------------ */
@@ -766,10 +1593,6 @@ SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 
 	if (res < 0)
 	{
-		/*
-		 * TODO: Figure out if there is a case where it's reasonable to
-		 * return errSSLClosedGraceful
-		 */
 		switch (errno)
 		{
 #ifdef EAGAIN
@@ -780,6 +1603,9 @@ SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 #endif
 			case EINTR:
 				status = errSSLWouldBlock;
+				break;
+			case ENOENT:
+				status =  errSSLClosedGraceful;
 				break;
 
 			default:
@@ -793,19 +1619,20 @@ SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 	{
 		status = noErr;
 		*len = res;
+		//ereport(NOTICE, (errmsg("SSLSocketRead read: %d bytes", res)));
 	}
 
 	return status;
 }
-
 
 static OSStatus
 SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 {
 	OSStatus	status;
 	int			res;
+	Port	   *port = (Port *) conn;
 
-	res = secure_raw_write((Port *) conn, data, *len);
+	res = secure_raw_write(port, data, *len);
 
 	if (res < 0)
 	{
@@ -834,6 +1661,7 @@ SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 		*len = res;
 	}
 
+	//ereport(NOTICE, (errmsg("SSLSocketWrite wrote: %d bytes", res)));
 	return status;
 }
 
