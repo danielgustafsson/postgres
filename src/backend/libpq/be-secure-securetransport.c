@@ -87,6 +87,30 @@ extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator,
 										SecCertificateRef certificate,
 										SecKeyRef privateKey);
 
+/*
+ * Secure Transport doesn't support setting different keysizes for DH like
+ * the OpenSSL callback, instead a single keysize is set and there doesn't
+ * seem to be any negotiation from that?
+ */
+static const uint8_t file_dh2048[] =
+	"\x30\x82\x01\x08\x02\x82\x01\x01\x00\xa3\x09\x9b\x20\x73\xdd\x59"
+	"\x1b\x91\x05\x5b\x6c\x5f\xe7\xd7\xea\xaa\x01\x73\xe3\xf5\x89\xbe"
+	"\xc7\xb5\x38\x12\xf5\x28\x40\x03\x32\x89\x48\x39\x77\xb7\xa3\xa0"
+	"\x83\x5f\xff\xbe\x03\xe2\xa5\xf6\x64\xb7\xba\xbd\xb7\xeb\x57\x42"
+	"\xe3\x16\x12\xc3\x9d\xba\x06\xf0\xbb\xab\x13\x98\x0a\xcc\x6c\x63"
+	"\xb9\xca\xb0\x39\x86\x9e\xb7\xa0\x23\x96\xd5\xce\x24\x44\x2a\x05"
+	"\x1c\xe5\x69\x5d\xd1\x83\x8c\xc1\x92\xb1\xd6\x18\xe5\x4e\xc8\xeb"
+	"\x21\xe8\x16\x87\x69\x4f\x86\x95\x25\x10\xdb\x1e\x49\x1c\x80\x3e"
+	"\x9a\x3d\x43\x66\xf7\x45\x0d\x37\x61\x37\xad\xce\x31\xec\x3b\xbd"
+	"\x55\x08\xe9\xb2\x97\xf0\xfc\x59\x8e\xd3\x73\xe2\x4a\x9b\x58\xbb"
+	"\x0a\x34\xb7\xea\x42\x94\xf9\xf5\xba\xf2\x06\xd9\xe6\xf1\xa7\x4a"
+	"\x6f\xd4\x72\x1f\x8d\x20\x63\x85\x29\xe5\x90\x59\xc0\x36\x3e\x16"
+	"\x5c\xa4\x46\xac\x44\x8c\x89\x00\x5d\xa2\xe9\x5b\xf0\xe4\x8c\xea"
+	"\xa6\x37\xac\xf8\x2a\x33\xbb\x39\xc6\xdf\x14\x96\x64\x13\x9e\x99"
+	"\xd8\xdd\x94\x61\xfe\xa1\x87\x48\xb6\x65\x69\xc7\xe7\x49\x53\xcf"
+	"\xa8\xa1\xc0\x9d\xf6\x7c\x29\xfc\xb2\x74\xb1\x2d\xe5\x0c\xd0\x32"
+	"\xc4\x35\x85\x82\x30\x07\x60\x01\x93\x02\x01\x02";
+
 int
 be_tls_init(bool isServerStart)
 {
@@ -120,8 +144,6 @@ be_tls_open_server(Port *port)
 	SecTrustResultType	trust_eval = 0;
 
 	Assert(!port->ssl);
-
-	//ereport(NOTICE, (errmsg("be_tls_open_server called")));
 
 	/*
 	Assert(PostmasterContext);
@@ -179,10 +201,17 @@ be_tls_open_server(Port *port)
 	}
 
 	port->ssl_in_use = true;
-
-	SSLSetClientSideAuthenticate((SSLContextRef) port->ssl, kAlwaysAuthenticate);
-
 	port->ssl_buffered = 0;
+
+//	if (ssl_ca_file[0])
+//		SSLSetClientSideAuthenticate((SSLContextRef) port->ssl, kAlwaysAuthenticate);
+
+	/*
+	 * TODO: This loads a pregenerated DH parameter, code for loading the
+	 * dh files needs to be added.
+	 */
+	SSLSetDiffieHellmanParams((SSLContextRef) port->ssl, file_dh2048, sizeof(file_dh2048));
+
 	/*
 	 * SSLSetProtocolVersionEnabled() is marked as deprecated as of 10.9
 	 * but the alternative SSLSetSessionConfig() is as of 10.11 not yet
@@ -221,25 +250,18 @@ be_tls_open_server(Port *port)
 	/*
 	 * Perform handshake
 	 */
-	int h = 0;
-	//ereport(NOTICE, (errmsg("be_tls_open_server initiating handshake")));
 	for (;;)
 	{
-		h++;
 		status = SSLHandshake((SSLContextRef) port->ssl);
 
 		if (status == noErr)
-		{
-			//ereport(NOTICE, (errmsg("be_tls_open_server handshake successful on attempt: %d", h)));
 			break;
-		}
 
 		if (status == errSSLWouldBlock || status == -1)
 			continue;
 
 		if (status == errSSLPeerAuthCompleted)
 		{
-			//ereport(NOTICE, (errmsg("be_tls_open_server handshake in peer auth on attempt: %d", h)));
 			status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
 			if (status != noErr || trust == NULL)
 			{
@@ -249,10 +271,8 @@ be_tls_open_server(Port *port)
 				return -1;
 			}
 
-			if (ssl_loaded_verify_locations)
+			if (ssl_loaded_verify_locations && port->rootcert != NULL)
 			{
-				//ereport(NOTICE, (errmsg("be_tls_open_server handshake in ssl_loaded_verify_locations")));
-
 				status = SecTrustSetAnchorCertificates(trust, (CFArrayRef) port->rootcert);
 				if (status != noErr)
 				{
@@ -301,8 +321,6 @@ be_tls_open_server(Port *port)
 				 * elements from the Keychain.
 				 */
 				case kSecTrustResultConfirm:
-					//ereport(NOTICE, (errmsg("be_tls_open_server handshake trust_eval: kSecTrustResultConfirm")));
-					break;
 				/*
 				 * 'RecoverableTrustFailure' indicates that the certificate was
 				 * rejected but might be trusted with minor changes to the eval
@@ -313,20 +331,16 @@ be_tls_open_server(Port *port)
 				 * information to the logstring.
 				 */
 				case kSecTrustResultRecoverableTrustFailure:
-					//ereport(NOTICE, (errmsg("be_tls_open_server handshake trust_eval: kSecTrustResultRecoverableTrustFailure")));
-					port->peer_cert_valid = true;
-					break;
+					/* XXX TODO */
+					//port->peer_cert_valid = true;
+					//break;
 				/*
 				 * Treat all other cases as rejection without further questioning.
 				 */
 				default:
-					//ereport(NOTICE, (errmsg("be_tls_open_server handshake trust_eval: other")));
 					port->peer_cert_valid = false;
 					break;
 			}
-
-			//ereport(NOTICE, (errmsg("be_tls_open_server handshake cert_valid: %s", port->peer_cert_valid ? "true" : "false")));
-
 
 			if (port->peer_cert_valid)
 			{
@@ -336,12 +350,9 @@ be_tls_open_server(Port *port)
 				SecCertificateCopyCommonName(usercert, &usercert_cn);
 				port->peer_cn = pstrdup(CFStringGetCStringPtr(usercert_cn, kCFStringEncodingUTF8));
 
-				//ereport(NOTICE, (errmsg("be_tls_open_server handshake peer cn: %s", port->peer_cn)));
 				CFRelease(usercert_cn);
 			}
 		}
-		//else
-			//ereport(NOTICE, (errmsg("be_tls_open_server handshake attempt: %d, returned status: %d", h, status)));
 	}
 
 #if 0
@@ -360,13 +371,6 @@ be_tls_open_server(Port *port)
 					 SSLerrmessage(status))));
 			return -1;
 		}
-
-/*
-		port->peer_cn = pstrdup("danielgustafsson");
-		port->peer_cert_valid = true;
-		status = SSLHandshake((SSLContextRef) port->ssl);
-		ereport(WARNING, (errmsg("be_tls_open_server returning early after SSLHandshake returned: \"%s\"", SSLerrmessage(status))));
-*/
 
 	//	MemoryContextSwitchTo(old_context);
 		if (status == noErr)
@@ -453,8 +457,6 @@ be_tls_open_server(Port *port)
 	if (status != noErr)
 		return -1;
 
-	//ereport(NOTICE, (errmsg("be_tls_open_server returning 0")));
-
 	return 0;
 }
 
@@ -486,8 +488,6 @@ SSLLoadCertificate(Port *port)
 	CFArrayRef			chain;
 	CFMutableArrayRef	chain_copy;
 	CFAllocatorRef		stpalloc = (CFAllocatorRef) port->stpalloc;
-
-	//ereport(NOTICE, (errmsg("SSLLoadCertificate called")));
 
 	status = load_certificate(port, ssl_cert_file, &certificate);
 	if (status != noErr)
@@ -608,8 +608,6 @@ SSLLoadCertificate(Port *port)
 
 	if (rootcert)
 		port->rootcert = (void *) CFRetain(rootcert);
-
-	//ereport(NOTICE, (errmsg("SSLLoadCertificate returning")));
 }
 
 /*
@@ -684,14 +682,11 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 	ssize_t			ret;
 	OSStatus		read_status;
 	SSLContextRef	ssl = (SSLContextRef) port->ssl;
-	int				read_errno = 0;
 
 	errno = 0;
 
 	if (len <= 0)
 		return 0;
-
-	////ereport(NOTICE, (errmsg("be_tls_read called asking %lu bytes", len)));
 
 	read_status = SSLRead(ssl, ptr, len, &n);
 	switch (read_status)
@@ -707,17 +702,11 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 			else
 				*waitfor = WL_SOCKET_READABLE;
 
-			read_errno = EWOULDBLOCK;
+			errno = EWOULDBLOCK;
 			if (n == 0)
-			{
-				////ereport(NOTICE, (errmsg("be_tls_read returning no bytes from errSSLWouldBlock, errno:%d", read_errno)));
 				ret = -1;
-			}
 			else
-			{
 				ret = n;
-				////ereport(NOTICE, (errmsg("be_tls_read returning %lu bytes from errSSLWouldBlock, errno:%d", n, read_errno)));
-			}
 
 			break;
 
@@ -733,7 +722,7 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 		case errSSLClosedNoNotify:
 		case errSSLClosedAbort:
 			ret = -1;
-			read_errno = ECONNRESET;
+			errno = ECONNRESET;
 			break;
 
 		default:
@@ -745,8 +734,6 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 			break;
 	}
 	
-	errno = read_errno;
-	////ereport(NOTICE, (errmsg("be_tls_read returning %lu bytes (%zd), errno:%d (%d)", n, ret, errno, read_errno));
 	return ret;
 }
 
@@ -763,8 +750,6 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 
 	if (len == 0)
 		return 0;
-
-	//ereport(NOTICE, (errmsg("be_tls_write called for %lu bytes", len)));
 
 	if (port->ssl_buffered > 0)
 	{
@@ -823,7 +808,6 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 		}
 	}
 
-	//ereport(NOTICE, (errmsg("be_tls_write returning %lu bytes", n)));
 	return n;
 }
 

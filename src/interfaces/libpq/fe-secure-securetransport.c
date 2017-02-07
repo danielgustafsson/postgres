@@ -136,6 +136,8 @@ pgtls_open_client(PGconn *conn)
 	{
 		conn->ssl_key_bits = 0;
 		conn->ssl_buffered = 0;
+		conn->st_rootcert = NULL;
+
 		/*
 		 * Create the SSL context using the new API introduced in 10.8 since
 		 * the SSLNewContext() API call was deprecated in 10.9. The standard
@@ -181,7 +183,7 @@ pgtls_open_client(PGconn *conn)
 			return PGRES_POLLING_FAILED;
 		}
 
-		conn->st_rootcert = (void *) CFRetain(rootcert);
+		//conn->st_rootcert = CFRetain(rootcert);
 
 		/*
 		 * If we are asked to verify the peer hostname, set it as a requirement
@@ -335,7 +337,7 @@ SSLOpenClient(PGconn *conn)
 		}
 	}
 
-	CFRelease(trust);
+	//CFRelease(trust);
 
 	/*
 	 * TODO: return a better error code than SSLInternalError
@@ -572,7 +574,8 @@ pgtls_close(PGconn *conn)
 	if (!conn->ssl)
 		return;
 
-	CFRelease((CFArrayRef) conn->st_rootcert);
+	if (conn->st_rootcert != NULL)
+		CFRelease((CFArrayRef) conn->st_rootcert);
 
 	SSLClose(conn->ssl);
 	CFRelease(conn->ssl);
@@ -957,6 +960,8 @@ SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
 				return status;
 			}
 
+			if (*rootcert_array != NULL)
+				conn->st_rootcert = (void *) CFRetain(*rootcert_array);
 			/* TODO: Load the CRL */
 		}
 	}
