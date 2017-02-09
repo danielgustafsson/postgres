@@ -56,14 +56,6 @@
 #define pg_uint64 uint64
 #define pg_bool bool
 
-/*
- * Callbacks for the Core Foundation memory allocator
- */
-extern void *st_allocate(CFIndex size, CFOptionFlags hint, void *info);
-extern void *st_reallocate(void *ptr, CFIndex newsize, CFOptionFlags hint, void *info);
-extern void st_deallocate(void *ptr, void *info);
-extern CFIndex st_preferredSize(CFIndex size, CFOptionFlags hint, void *info);
-
 static void SSLLoadCertificate(Port *port);
 static OSStatus load_key(Port *port, char *filename, CFArrayRef *key);
 static OSStatus load_certificate(Port *port, char *filename, CFArrayRef *certificate);
