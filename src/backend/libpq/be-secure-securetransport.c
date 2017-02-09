@@ -11,6 +11,8 @@
  *		- Be able to set "not applicable" on some options like compression
  *		  which isn't supported in Secure Transport (and most likely other
  *		  SSL libraries supported in the future).
+ *		- Support memory allocation in Secure Transport via a custom CF
+ *		  allocator which is backed by a MemoryContext.
  *
  * IDENTIFICATION
  *	  src/backend/libpq/be-secure-securetransport.c
@@ -57,10 +59,10 @@
 /*
  * Callbacks for the Core Foundation memory allocator
  */
-static void *st_allocate(CFIndex size, CFOptionFlags hint, void *info);
-static void *st_reallocate(void *ptr, CFIndex newsize, CFOptionFlags hint, void *info);
-static void st_deallocate(void *ptr, void *info);
-static CFIndex st_preferredSize(CFIndex size, CFOptionFlags hint, void *info);
+extern void *st_allocate(CFIndex size, CFOptionFlags hint, void *info);
+extern void *st_reallocate(void *ptr, CFIndex newsize, CFOptionFlags hint, void *info);
+extern void st_deallocate(void *ptr, void *info);
+extern CFIndex st_preferredSize(CFIndex size, CFOptionFlags hint, void *info);
 
 static void SSLLoadCertificate(Port *port);
 static OSStatus load_key(Port *port, char *filename, CFArrayRef *key);
@@ -137,62 +139,11 @@ int
 be_tls_open_server(Port *port)
 {
 	OSStatus			status;
-	CFAllocatorContext *ctx;
-	MemoryContext		ssl_context;
-	MemoryContext		old_context;
 	SecTrustRef			trust;
 	SecTrustResultType	trust_eval = 0;
 
 	Assert(!port->ssl);
 
-	/*
-	Assert(PostmasterContext);
-	ssl_context = AllocSetContextCreate(PostmasterContext,
-										"Secure Transport SSL connection",
-										ALLOCSET_SMALL_SIZES);
-
-	old_context = MemoryContextSwitchTo(ssl_context);
-
-	*/
-	ctx = palloc0(sizeof(CFAllocatorContext));
-
-	/*
-	 * Set Core Foundation Allocator callbacks for allocating and freeing
-	 * memory to use the mmgr
-	 */
-	ctx->allocate = st_allocate;
-	ctx->deallocate = st_deallocate;
-	ctx->reallocate = st_reallocate;
-	ctx->preferredSize = st_preferredSize;
-	
-	/*
-	 * retain/release callbacks are to free the memory occupied by the
-	 * allocator definition itself, but since we are registering it in
-	 * a per-connection defined MemoryContext we can rely on the mmgr to
-	 * free the memory rather than doing it manually
-	 */
-	ctx->retain = NULL;
-	ctx->release = NULL;
-
-	/*
-	 * copyDescription is an optional callback for returning a CFString
-	 * pointer describing the allocator. Implementing this doesn't buy
-	 * us anything and Core Foundation will provide a boilerplate text
-	 * anyways so skip.
-	 */
-	ctx->copyDescription = NULL;
-
-	/*
-	 * CFAllocatorCreate() require an allocator to allocate the allocator
-	 * with. Using kCFAllocatorUseContext makes it use the allocation call
-	 * specified in the ctx->allocate member thus avoiding a "chicken and
-	 * egg" type situation. This further means we don't need to check the
-	 * returnvalue as the allocator is allocated with palloc and thus wont
-	 * return on failure.
-	 */
-	port->stpalloc = (void *) CFAllocatorCreate(kCFAllocatorUseContext, ctx);
-
-	//port->ssl = (void *) SSLCreateContext((CFAllocatorRef) port->stpalloc, kSSLServerSide, kSSLStreamType);
 	port->ssl = (void *) SSLCreateContext(NULL, kSSLServerSide, kSSLStreamType);
 	if (!port->ssl)
 	{
@@ -372,7 +323,6 @@ be_tls_open_server(Port *port)
 			return -1;
 		}
 
-	//	MemoryContextSwitchTo(old_context);
 		if (status == noErr)
 			return 0;
 
@@ -452,8 +402,6 @@ be_tls_open_server(Port *port)
 
 #endif
 
-	//MemoryContextSwitchTo(old_context);
-
 	if (status != noErr)
 		return -1;
 
@@ -487,7 +435,6 @@ SSLLoadCertificate(Port *port)
 	CSSM_TP_APPLE_EVIDENCE_INFO *status_chain;
 	CFArrayRef			chain;
 	CFMutableArrayRef	chain_copy;
-	CFAllocatorRef		stpalloc = (CFAllocatorRef) port->stpalloc;
 
 	status = load_certificate(port, ssl_cert_file, &certificate);
 	if (status != noErr)
@@ -508,7 +455,6 @@ SSLLoadCertificate(Port *port)
 	cert_ref = (SecCertificateRef) CFArrayGetValueAtIndex(certificate, 0);
 	key_ref = (SecKeyRef) CFArrayGetValueAtIndex(key, 0);
 	policy = SecPolicyCreateSSL(true, NULL);
-	//identity = SecIdentityCreate(stpalloc, cert_ref, key_ref);
 	identity = SecIdentityCreate(NULL, cert_ref, key_ref);
 
 	status = SecTrustCreateWithCertificates(certificate, policy, &trust);
@@ -589,7 +535,6 @@ SSLLoadCertificate(Port *port)
 
 	status = SecTrustGetResult(trust, &trust_status, &chain, &status_chain);
 
-	//chain_copy = CFArrayCreateMutable(stpalloc, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
 	chain_copy = CFArrayCreateMutable(NULL, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
 	
 	CFArrayAppendValue(chain_copy, identity);
@@ -848,7 +793,7 @@ be_tls_get_peerdn_name(Port *port, char *ptr, size_t len)
 		 * parse the OIDs to build up the DN
 		 */
 		cert = SecTrustGetCertificateAtIndex(trust, 0);
-		dn_str = SecCertificateCopyLongDescription(NULL /*stpalloc*/, cert, NULL);
+		dn_str = SecCertificateCopyLongDescription(NULL, cert, NULL);
 		strlcpy(ptr, CFStringGetCStringPtr(dn_str, kCFStringEncodingASCII), len);
 		CFRelease(dn_str);
 	}
@@ -1005,18 +950,15 @@ load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef *items)
 	OSStatus		status;
 	CFURLRef		p12_ref;
 	CFDataRef		buf;
-	CFAllocatorRef	stpalloc = (CFAllocatorRef) port->stpalloc;
 
 	const void	   *keys[] = {};
 	const void	   *vals[] = {};
 
 	CFDictionaryRef opt = CFDictionaryCreate(NULL, keys, vals, 0, NULL, NULL);
 
-	//p12_ref = CFURLCreateFromFileSystemRepresentation(stpalloc,
 	p12_ref = CFURLCreateFromFileSystemRepresentation(NULL,
 					(UInt8 *) p12_fname, strlen(p12_fname), false);
 
-	//if (CFURLCreateDataAndPropertiesFromResource(stpalloc, p12_ref, &buf, NULL, NULL, &status))
 	if (CFURLCreateDataAndPropertiesFromResource(NULL, p12_ref, &buf, NULL, NULL, &status))
 	{
 		status = SecPKCS12Import(buf, opt, items);
@@ -1040,7 +982,6 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
 	SecItemImportExportKeyParameters	params;
 	CFStringRef							cert_path;
 	SecExternalFormat					format;
-	CFAllocatorRef						stpalloc = (CFAllocatorRef) port->stpalloc;
 	SecExternalItemType					item_type;
 
 	cert_buf = palloc(size);
@@ -1065,7 +1006,6 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
 
 	fclose(cert_fd);
 
-	//data_ref = CFDataCreate(stpalloc, cert_buf, size);
 	data_ref = CFDataCreate(NULL, cert_buf, size);
 
 	memset(&params, 0, sizeof(SecItemImportExportKeyParameters));
@@ -1082,7 +1022,6 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
 	 * the certificate data was read or the file extension.
 	 */
 	format = kSecFormatPEMSequence;
-	//cert_path = CFStringCreateWithCString(stpalloc, pem_fname,
 	cert_path = CFStringCreateWithCString(NULL, pem_fname,
 										  kCFStringEncodingUTF8);
 
@@ -1647,80 +1586,4 @@ SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 
 	//ereport(NOTICE, (errmsg("SSLSocketWrite wrote: %d bytes", res)));
 	return status;
-}
-
-/* ------------------------------------------------------------ */
-/*			Internal functions - Memory Allocation				*/
-/* ------------------------------------------------------------ */
-
-/*
- * Core Foundation memory allocator callbacks. Memory allocations inside the
- * Secure Transport framework can either be backed by the default allocator
- * in core foundation, or via a custom allocator defined via a CFAllocatorRef.
- * To keep the memory under our mmgr control, set up callbacks to their mmgr
- * counterparts.
- *
- * The 'CFOptionFlags hint' parameter is intentionally not considered per the
- * API documentation.
- */
-
-static void *
-st_allocate(CFIndex size, CFOptionFlags hint, void *info)
-{
-	/*
-	 * While palloc(0) is a legitimate operation, a zero allocation is per
-	 * the Core Foundation allocator documentation not legal and any such
-	 * request is required to return NULL.
-	 */
-	if (size <= 0)
-		return NULL;
-	
-	return palloc(size);
-}
-
-static void *
-st_reallocate(void *ptr, CFIndex newsize, CFOptionFlags hint, void *info)
-{
-	/*
-	 * While repalloc with a NULL pointer is forbidden, a core foundation
-	 * allocator allows it so we must implement its expected API. On zero
-	 * size NULL is expected and for non-zero the ptr should be allocated
-	 * as if the user called the allocate callback.
-	 */
-	if (ptr == NULL)
-	{
-		if (newsize <= 0)
-			return NULL;
-	
-		return st_allocate(newsize, hint, info);
-	}
-
-	/*
-	 * If the pointer is non-NULL but the size is zero, the expectation
-	 * is to deallocate (free) the allocation rather than reallocate down
-	 * to zero for later reallocations to a greater size.
-	 */
-	if (newsize == 0)
-	{
-		st_deallocate(ptr, info);
-		return NULL;
-	}
-
-	return repalloc(ptr, newsize);
-}
-
-static void
-st_deallocate(void *ptr, void *info)
-{
-	if (ptr == NULL)
-		return;
-
-	pfree(ptr);
-}
-
-static CFIndex
-st_preferredSize(CFIndex size, CFOptionFlags hint, void *info)
-{
-	/* TODO: Return something sensible */
-	return size;
 }
