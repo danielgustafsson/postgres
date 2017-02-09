@@ -553,21 +553,22 @@ SSLLoadCertificate(Port *port)
 void
 be_tls_close(Port *port)
 {
-	OSStatus ssl_status;
+	OSStatus		ssl_status;
 
-	if (port->ssl)
-	{
-		ssl_status = SSLClose((SSLContextRef) port->ssl);
-		if (ssl_status != noErr)
-			ereport(COMMERROR,
-					(errcode(ERRCODE_PROTOCOL_VIOLATION),
-					 errmsg("error in closing SSL connection: %s",
-					 		SSLerrmessage(ssl_status))));
+	if (!port->ssl)
+		return;
 
-		CFRelease((SSLContextRef) port->ssl);
-		port->ssl = NULL;
-		port->ssl_in_use = false;
-	}
+	ssl_status = SSLClose((SSLContextRef) port->ssl);
+	if (ssl_status != noErr)
+		ereport(COMMERROR,
+				(errcode(ERRCODE_PROTOCOL_VIOLATION),
+				 errmsg("error in closing SSL connection: %s",
+				 		SSLerrmessage(ssl_status))));
+
+	CFRelease((SSLContextRef) port->ssl);
+
+	port->ssl = NULL;
+	port->ssl_in_use = false;
 }
 
 /*
@@ -670,7 +671,7 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 					 		SSLerrmessage(read_status))));
 			break;
 	}
-	
+
 	return ret;
 }
 
@@ -755,6 +756,7 @@ be_tls_get_cipher_bits(Port *port)
 	SecTrustRef			trust;
 	SecCertificateRef	cert;
 	SecKeyRef			key;
+	int					keysize = 0;
 
 	status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
 	if (status == noErr)
@@ -762,10 +764,10 @@ be_tls_get_cipher_bits(Port *port)
 		cert = SecTrustGetCertificateAtIndex(trust, 0);
 		status = SecCertificateCopyPublicKey(cert, &key);
 		if (status == noErr)
-			return SecKeyGetBlockSize(key);
+			keysize = SecKeyGetBlockSize(key);
 	}
-
-	return 0;
+	
+	return keysize;
 }
 
 void
@@ -774,7 +776,6 @@ be_tls_get_peerdn_name(Port *port, char *ptr, size_t len)
 	OSStatus			status;
 	SecTrustRef			trust;
 	SecCertificateRef	cert;
-	CFDataRef			dn;
 	CFStringRef			dn_str;
 
 	status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);

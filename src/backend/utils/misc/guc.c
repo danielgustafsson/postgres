@@ -505,6 +505,7 @@ static char *locale_ctype;
 static char *server_encoding_string;
 static char *server_version_string;
 static int	server_version_num;
+static char *ssl_library_string;
 static char *timezone_string;
 static char *log_timezone_string;
 static char *timezone_abbreviations_string;
@@ -3274,6 +3275,18 @@ static struct config_string ConfigureNamesString[] =
 		},
 		&server_version_string,
 		PG_VERSION,
+		NULL, NULL, NULL
+	},
+
+	{
+		/* Can't be set in postgresql.conf */
+		{"ssl_library", PGC_INTERNAL, PRESET_OPTIONS,
+			gettext_noop("Shows the SSL library used."),
+			NULL,
+			GUC_REPORT | GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
+		},
+		&ssl_library_string,
+		SSL_LIBRARY,
 		NULL, NULL, NULL
 	},
 
