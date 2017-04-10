@@ -207,7 +207,7 @@ typedef struct Port
 #ifdef USE_SSL
 /*
  * These functions are implemented by the glue code specific to each
- * SSL implementation (e.g. be-secure-openssl.c)
+ * SSL implementation (e.g. be-secure-<implementation>.c)
  */
 extern int	be_tls_init(bool isServerStart);
 extern void be_tls_destroy(void);

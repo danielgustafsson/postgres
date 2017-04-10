@@ -3538,6 +3538,16 @@ static struct config_string ConfigureNamesString[] =
 	},
 
 	{
+		{"ssl_certstorage", PGC_SIGHUP, CONN_AUTH_SECURITY,
+			gettext_noop("Location of the SSL certificate backing storage."),
+			NULL
+		},
+		&ssl_certstorage,
+		""
+		NULL, NULL, NULL
+	},
+
+	{
 		{"stats_temp_directory", PGC_SIGHUP, STATS_COLLECTOR,
 			gettext_noop("Writes temporary statistics files to the specified directory."),
 			NULL,

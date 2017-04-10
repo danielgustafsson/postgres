@@ -40,6 +40,7 @@
 #include "storage/fd.h"
 #include "storage/latch.h"
 #include "tcop/tcopprot.h"
+#include "utils/backend_random.h"
 #include "utils/memutils.h"
 
 #undef ACL_DELETE
@@ -48,6 +49,7 @@
 #define Size pg_Size
 #define uint64 pg_uint64
 #define bool pg_bool
+#include <Security/cssmerr.h>
 #include <Security/Security.h>
 #include <Security/SecureTransport.h>
 #include <CoreFoundation/CoreFoundation.h>
@@ -67,6 +69,43 @@ static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *
 static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
 static char * SSLerrmessage(OSStatus status);
 static const char * SSLciphername(SSLCipherSuite cipher);
+static bool make_db_attribute(uint32_t att_type, CSSM_DB_ATTRIBUTE_DATA *att, void *data);
+static void import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl);
+static CSSM_CL_HANDLE cssm_cl_startup(void);
+
+/*
+ * Time can be in either rfc2459 UtcTime or GeneralizedTime for CRL entries,
+ * but we need to insert in GeneralizedTime with the 'Z'. Copy the source time
+ * into the destination and fix up the format in the process.
+ * https://tools.ietf.org/html/rfc2459#section-4.1.2.5.2
+ */
+#define UTCTIME			13	/* YYMMDDHHMMSSZ */
+#define GENERALIZEDTIME	15	/* YYYYMMDDHHMMSSZ */
+#define STRLENTIME		15	/* YYYYMMDDHHMMSS\0 */
+#define PKIX_TIME(s, t, l) \
+	do { \
+		if (l == UTCTIME) \
+		{ \
+			memcpy(t + (STRLENTIME - UTCTIME), s, l - 1); \
+			if (t[2] <= '5') \
+			{ \
+				t[0] = '2'; t[1] = '0'; \
+			} \
+			else \
+			{ \
+				t[0] = '1'; t[1] = '9'; \
+			} \
+		} \
+		else if (l == GENERALIZEDTIME) \
+			memcpy(t, s, l - 1); \
+		else \
+			memcpy(t, s, l); \
+	} while (0)
+
+#define KEYCHAIN_DIR "ssl_keychain"
+#define KEYCHAIN_PWD_LEN 64
+
+static SecKeychainRef keychain = NULL;
 
 /*
  * Private API call used in the Webkit code for creating an identity from a
@@ -108,6 +147,14 @@ static const uint8_t file_dh2048[] =
 int
 be_tls_init(bool isServerStart)
 {
+	struct stat 		stat_buf;
+	char				keychain_path[MAXPGPATH];
+	char				keychain_pwd[KEYCHAIN_PWD_LEN];
+	CSSM_DL_DB_HANDLE	dldb_handle = {0,0};
+	CSSM_CL_HANDLE      cl_handle;
+	OSStatus			status;
+	FILE			   *fp;
+
 #ifndef __darwin__
 	/*
 	 * Secure Transport is only available on Darwin platforms so autoconf
@@ -116,16 +163,164 @@ be_tls_init(bool isServerStart)
 	Assert(false);
 #endif
 
+	/*
+	 * If the keychain has been created and opened already, avoid doing so
+	 * again.
+	 */
+	if (keychain)
+		return 0;
+
+	/*
+	 * If the Keychain path has been configured in the ssl_certstorage GUC we
+	 * expect it to already exist and if not we error out rather than create
+	 * it.
+	 */
+	if (ssl_certstorage)
+	{
+		strlcpy(keychain_path, ssl_certstorage, sizeof(keychain_path));
+		if (stat(keychain_path, &stat_buf) != 0 || !S_ISREG(stat_buf.st_mode))
+			ereport(FATAL,
+				(errmsg("Keychain file \"%s\" does not exist", keychain_path)));
+
+		status = SecKeychainOpen(keychain_path, &keychain);
+		if (status != errSecSuccess)
+			ereport(FATAL,
+					(errmsg("could not open Keychain file: \"%s\"",
+					 SSLerrmessage(status))));
+	}
+	/*
+	 * No Keychain was configured by the user, create a temporary Keychain for
+	 * the duration of the server, which we can load certificates and CRLs etc
+	 * into.
+	 */
+	else
+	{
+		snprintf(keychain_path, MAXPGPATH, "%s/pg.keychain", KEYCHAIN_DIR);
+
+		if (stat(KEYCHAIN_DIR, &stat_buf) == 0)
+		{
+			/*
+			 * This should be quite a rare cornercase but we might as well make
+			 * sure to avoid crashing on something so simple.
+			 */
+			if (!S_ISDIR(stat_buf.st_mode))
+				ereport(FATAL,
+					(errmsg("Keychain directory \"%s\" is a file", KEYCHAIN_DIR)));
+		}
+		else
+		{
+			if (mkdir(KEYCHAIN_DIR, S_IRWXU) < 0)
+				ereport(FATAL,
+					(errmsg("could not create Keychain directory \"%s\"",
+					 KEYCHAIN_DIR)));
+		}
+
+		/*
+		 * A Keychain cannot be created without a password, if one isn't
+		 * supplied in the SecKeychainCreate() call a popup dialog must be
+		 * presented to the user for manual entry. Since we are creating a
+		 * temporary Keychain (where temporary is defined by the runtime of
+		 * the server) for certificates which are readable to any user who
+		 * can read the Keychain file, set a dummy password.
+		 */
+		if (!pg_backend_random(keychain_pwd, KEYCHAIN_PWD_LEN))
+			ereport(FATAL,
+				(errmsg("could not generate Keychain password")));
+
+		/*
+		 * InitialAccess is not implemented and ignored in the API, passing
+		 * NULL is the documented correct behavior. Since we are supplying
+		 * a password the promptUser variable is FALSE to indicate that we
+		 * don't want to present a modal dialog to the user.
+		 */
+		status = SecKeychainCreate(keychain_path, KEYCHAIN_PWD_LEN,
+								   keychain_pwd, FALSE /* promptUser */,
+								   NULL /* InitialAccess */, &keychain);
+
+		if (status != errSecSuccess)
+			ereport(FATAL,
+					(errmsg("could not create Keychain file: \"%s\"",
+					 SSLerrmessage(status))));
+	}
+
+	/*
+	 * Load the CA store for verifying client certificates. TODO
+	 */
+	if (ssl_ca_file[0])
+	{
+	}
+
+	/*
+	 * Load the Certificate Revocation List in case configured.
+	 */
+	if (ssl_crl_file[0])
+	{
+		CSSM_DATA	crldata;
+		UInt8	   *crl;
+		int			result;
+		int			fp_size;
+
+		status = SecKeychainGetDLDBHandle(keychain, &dldb_handle);
+		if (status != errSecSuccess)
+			ereport(FATAL,
+					(errmsg("could not get DLDB handle for Keychain: \"%s\"",
+					 SSLerrmessage(status))));
+
+		cl_handle = cssm_cl_startup();
+		if (!cl_handle)
+			ereport(FATAL,
+					(errmsg("could not get CL handle for Keychain: \"%s\"",
+					 SSLerrmessage(status))));
+
+		fp = fopen(ssl_crl_file, "r");
+		if (fp == NULL)
+			ereport(FATAL,
+					(errmsg("unable to read CRL file \"%s\": %m",
+					 ssl_crl_file)));
+
+		fseek(fp, 0, SEEK_END);
+		fp_size = ftell(fp);
+		crl = palloc(fp_size);
+		rewind(fp);
+
+		if ((result = fread(crl, 1, fp_size, fp)) != fp_size)
+			ereport(FATAL,
+					(errmsg("unable to read CRL file \"%s\": %m",
+					 ssl_crl_file)));
+		
+		crldata.Data = crl;
+		crldata.Length = fp_size;
+
+		import_crl(dldb_handle, cl_handle, &crldata);
+	}
+
 	return 0;
 }
 
+/*
+ * be_tls_destroy
+ *		Tear down global Secure Transport structures and return resources.
+ *
+ * If we have a configured Keychain path it means that we have been using a
+ * usersupplied Keychain rather than our own. Refrain from deleting it in that
+ * case. If not, we remove the Keychain file upon server closure.
+ */
 void
 be_tls_destroy(void)
 {
+	if (!keychain)
+		return;
+
+	if (!ssl_certstorage)
+	{
+		SecKeychainDelete(keychain);
+		CFRelease(keychain);
+	}
 }
 
 /*
- *  Attempt to negotiate a secure connection
+ * bt_tls_open_server
+ *		Attempt to negotiate a secure connection
  */
 int
 be_tls_open_server(Port *port)
@@ -471,7 +666,7 @@ SSLLoadCertificate(Port *port)
 					(errmsg("could not load root certificate: \"%s\"",
 					 SSLerrmessage(status))));
 		}
-		
+
 		status = SecTrustSetAnchorCertificates(trust, rootcert);
 		if (status != noErr)
 		{
@@ -528,7 +723,7 @@ SSLLoadCertificate(Port *port)
 	status = SecTrustGetResult(trust, &trust_status, &chain, &status_chain);
 
 	chain_copy = CFArrayCreateMutable(NULL, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
-	
+
 	CFArrayAppendValue(chain_copy, identity);
 	if (CFArrayGetCount(chain) > 1)
 		CFArrayAppendArray(chain_copy, chain, CFRangeMake(1, CFArrayGetCount(chain) - 1));
@@ -563,7 +758,7 @@ be_tls_close(Port *port)
 		ereport(COMMERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg("error in closing SSL connection: %s",
-				 		SSLerrmessage(ssl_status))));
+						SSLerrmessage(ssl_status))));
 
 	CFRelease((SSLContextRef) port->ssl);
 
@@ -668,7 +863,7 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 			ereport(COMMERROR,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("SSL error: %s",
-					 		SSLerrmessage(read_status))));
+							SSLerrmessage(read_status))));
 			break;
 	}
 
@@ -682,7 +877,7 @@ ssize_t
 be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 {
 	size_t		n = 0;
-	OSStatus 	write_status;
+	OSStatus	write_status;
 
 	errno = 0;
 
@@ -712,7 +907,7 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 	else
 	{
 		write_status = SSLWrite((SSLContextRef) port->ssl, ptr, len, &n);
-	
+
 		switch (write_status)
 		{
 			case noErr:
@@ -731,7 +926,7 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 
 			/*
 			 * Clean disconnections
-		 	*/
+			 */
 			case errSSLClosedNoNotify:
 				/* fall through */
 			case errSSLClosedGraceful:
@@ -766,7 +961,7 @@ be_tls_get_cipher_bits(Port *port)
 		if (status == noErr)
 			keysize = SecKeyGetBlockSize(key);
 	}
-	
+
 	return keysize;
 }
 
@@ -794,17 +989,29 @@ be_tls_get_peerdn_name(Port *port, char *ptr, size_t len)
 		ptr[0] = '\0';
 }
 
+/*
+ * be_tls_get_cipher
+ *		Retrieve and return the negotiated ciphersuite for the
+ *		current connection.
+ *
+ * Returns NULL in case we weren't to either get the negotiated
+ * cipher, or translate it into a human readable string.
+ */
 void
 be_tls_get_cipher(Port *port, char *ptr, size_t len)
 {
 	OSStatus		status;
 	SSLCipherSuite	cipher;
+	const char	   *cipher_name;
 
+	ptr[0] = '\0';
 	status = SSLGetNegotiatedCipher((SSLContextRef) port->ssl, &cipher);
-	if (status == noErr)
+	if (status != noErr)
+		return;
+
+	cipher_name = SSLciphername(cipher);
+	if (cipher_name != NULL)
 		strlcpy(ptr, SSLciphername(cipher), len);
-	else
-		ptr[0] = '\0';
 }
 
 /*
@@ -859,10 +1066,10 @@ load_key(Port *port, char *filename, CFArrayRef *key)
 			(stat_buf.st_uid == 0 && stat_buf.st_mode & (S_IWGRP | S_IXGRP | S_IRWXO)))
 			ereport(FATAL,
 					(errcode(ERRCODE_CONFIG_FILE_ERROR),
-				  	 errmsg("private key file \"%s\" has group or world access",
+					 errmsg("private key file \"%s\" has group or world access",
 							ssl_key_file),
 					 errdetail("File must have permissions u=rw (0600) or less "
-					 		   "if owned by the database user, or permissions "
+							   "if owned by the database user, or permissions "
 							   "u=rw,g=r (0640) or less if owned by root.")));
 
 		/*
@@ -927,7 +1134,7 @@ load_certificate(Port *port, char *filename, CFArrayRef *certificate)
 static OSStatus
 load_certificate_keychain(Port *port, char *cert_name, CFArrayRef *certificate)
 {
-	/* TODO: use SecItemCopyMatching */ 
+	/* TODO: use SecItemCopyMatching */
 	return errSSLInternal;
 }
 
@@ -1062,7 +1269,7 @@ SSLerrmessage(OSStatus status)
 	}
 	else
 		err_buf = pstrdup(_("unknown SSL error"));
-	
+
 	return err_buf;
 }
 
@@ -1078,8 +1285,8 @@ SSLciphername(SSLCipherSuite cipher)
 {
 	switch (cipher)
 	{
-    	case TLS_NULL_WITH_NULL_NULL:
-    		return "NULL_WITH_NULL_NULL";
+		case TLS_NULL_WITH_NULL_NULL:
+			return "NULL_WITH_NULL_NULL";
 			break;
 
 		/* TLS addenda using AES, per RFC 3268 */
@@ -1223,7 +1430,7 @@ SSLciphername(SSLCipherSuite cipher)
 			return "RSA_WITH_AES_256_CBC_SHA256";
 			break;
 
-    	/*
+		/*
 		 * Server-authenticated (and optionally client-authenticated)
 		 * Diffie-Hellman.
 		 */
@@ -1563,7 +1770,7 @@ SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 			case EINTR:
 				status = errSSLWouldBlock;
 				break;
-			
+
 			default:
 				status = errSSLClosedAbort;
 				break;
@@ -1579,4 +1786,349 @@ SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 
 	//ereport(NOTICE, (errmsg("SSLSocketWrite wrote: %d bytes", res)));
 	return status;
+}
+
+/* ------------------------------------------------------------ */
+/*				Internal functions - CRL						*/
+/* ------------------------------------------------------------ */
+
+/*
+ * There are no Secure Transport APIs for working with Certificate Revocation
+ * Lists for some reason. Instead, we need to implement the CRL management
+ * using the underlying CDSA framework. This makes the implementation a lot
+ * longer and more cumbersome, but not supporting CRL is a worse tradeoff so
+ * below is the code required to load CRL files into a Keychain.
+ */
+
+/*
+ * For some reason these enums are not in any of Apples public headerfiles
+ * so we need to include them here.
+ */
+enum
+{
+	kSecCrlEncodingItemAttr = 'cren',
+	kSecCrlThisUpdateItemAttr = 'crtu',
+	kSecCrlNextUpdateItemAttr = 'crnu',
+};
+
+/*
+ * The CRL schema and required indexes for the CSSM database in case we need to
+ * create that in our Keychain. Keychain version 2.0 files are not created with
+ * the schema, it is only created on the first insertion, and since insert the
+ * CRL here we also need to be able to create it.
+ */
+static const CSSM_DB_SCHEMA_ATTRIBUTE_INFO x509_crl_schema[] =
+{
+	{kSecCrlType, "CrlType", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
+	{kSecCrlEncodingItemAttr, "CrlEncoding", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
+	{kSecLabelItemAttr, "PrintName", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{kSecIssuerItemAttr, "Issuer", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{kSecCrlThisUpdateItemAttr,	"ThisUpdate", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{kSecCrlNextUpdateItemAttr,	"NextUpdate", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+};
+
+static const CSSM_DB_SCHEMA_INDEX_INFO x509_crl_index[] =
+{
+    {kSecCrlType, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
+    {kSecIssuerItemAttr, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
+    {kSecCrlThisUpdateItemAttr, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
+    {kSecCrlNextUpdateItemAttr, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
+};
+
+struct attribute_data_entry
+{
+	uint32_t						type;
+	CSSM_DB_ATTRIBUTE_NAME_FORMAT	name_format;
+	char						   *name;
+	uint32							values;
+	CSSM_DB_ATTRIBUTE_FORMAT		format;
+};
+
+static struct attribute_data_entry cssm_db_attribute_data_entries[] =
+{
+	{kSecCrlType, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "CrlType", 1, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
+	{kSecCrlEncodingItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "CrlEncoding", 1, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
+	{kSecLabelItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "PrintName", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{kSecIssuerItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "Issuer", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{kSecCrlThisUpdateItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "ThisUpdate", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{kSecCrlNextUpdateItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "NextUpdate", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
+	{0},
+};
+
+/*
+ * make_db_attribute
+ *		Populate a CSSM_DB_ATTRIBUTE_DATA structure
+ *
+ * Helper function to populate the required strcts in order to avoid repetetive
+ * boilerplate in import_crl()
+ */
+static bool
+make_db_attribute(uint32_t att_type, CSSM_DB_ATTRIBUTE_DATA *att, void *data)
+{
+	struct attribute_data_entry *i = cssm_db_attribute_data_entries;
+
+	while (i->type && i->type != att_type)
+		i++;
+
+	if (!i->type)
+		return false;
+
+	att->Info.AttributeNameFormat = i->name_format;
+	att->Info.Label.AttributeName = strdup(i->name);
+	att->Info.AttributeFormat = i->format;
+	att->NumberOfValues = i->values;
+	att->Value = data;
+
+	return true;
+}
+
+static void *
+_malloc(CSSM_SIZE size, void *ref)
+{
+	return malloc(size);
+}
+
+static void
+_free(void *ptr, void *ref)
+{
+	free(ptr);
+}
+
+static void *
+_realloc(void *ptr, CSSM_SIZE size, void *ref)
+{
+	return realloc(ptr, size);
+}
+
+static void *
+_calloc(uint32 num, CSSM_SIZE size, void *ref)
+{
+	return calloc(num, size);
+}
+
+static CSSM_API_MEMORY_FUNCS mem_func = {
+	_malloc,
+	_free,
+	_realloc,
+	_calloc,
+	NULL
+};
+
+static CSSM_CL_HANDLE
+cssm_cl_startup(void)
+{
+	CSSM_VERSION	version = {2,0};
+	CSSM_GUID		guid = {0x1234, 0,0, {1,2,3,4,5,6,7,0}}; /* TODO: explain dummy guid */
+	CSSM_PVC_MODE	policy = CSSM_PVC_NONE;
+	CSSM_RETURN		status;
+	CSSM_CL_HANDLE	cl_handle;
+
+	status = CSSM_Init(&version, CSSM_PRIVILEGE_SCOPE_NONE, &guid, CSSM_KEY_HIERARCHY_NONE, &policy, NULL);
+	if (status == CSSM_OK)
+	{
+		status = CSSM_ModuleLoad(&gGuidAppleX509CL, CSSM_KEY_HIERARCHY_NONE, NULL, NULL);
+		if (status == CSSM_OK)
+		{
+			status = CSSM_ModuleAttach(&gGuidAppleX509CL, &version, &mem_func, 0,
+									   CSSM_SERVICE_CL, 0, CSSM_KEY_HIERARCHY_NONE,
+									   NULL, 0, NULL, &cl_handle);
+		}
+	}
+
+	if (status != CSSM_OK)
+		return 0;
+
+	return cl_handle;
+}
+
+static void
+import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl)
+{
+	CSSM_RETURN						status;
+	CSSM_DATA_PTR					issuer;
+	CSSM_DATA_PTR					crlstruct;
+	CSSM_HANDLE						result;
+	uint32							num;
+	CSSM_CRL_TYPE					type;
+	CSSM_DB_ATTRIBUTE_DATA			att[9];	/* TODO 9 == MAX_CRL_ATTRS */
+	CSSM_DB_RECORD_ATTRIBUTE_DATA	rec_attr;
+	CSSM_DB_UNIQUE_RECORD_PTR		rec_ptr;
+	CSSM_DATA						type_data;
+	char							thisupdate[STRLENTIME];
+	char							nextupdate[STRLENTIME];
+	CSSM_DATA						thisupdate_data;
+	CSSM_DATA						nextupdate_data;
+	CSSM_DATA						printname_data;
+	char						   *printname;
+	const CSSM_X509_TBS_CERTLIST   *cert_list;
+	bool							found = false;
+
+	/* Extract CRL */
+	status = CSSM_CL_CrlGetFirstFieldValue(cl, crl, &CSSMOID_X509V2CRLSignedCrlCStruct, &result, &num, &crlstruct);
+	if (status != CSSM_OK || crlstruct == NULL || crlstruct->Length != sizeof(CSSM_X509_SIGNED_CRL))
+		ereport(FATAL,
+			(errmsg("unable to read CRL")));
+	CSSM_CL_CrlAbortQuery(cl, result);
+
+	cert_list = &((const CSSM_X509_SIGNED_CRL *) crlstruct->Data)->tbsCertList;
+	if (cert_list->version.Length == 0)
+		type = CSSM_CRL_TYPE_X_509v1;
+	else
+	{
+		switch(cert_list->version.Data[cert_list->version.Length - 1])
+		{
+			case 0:
+				type = CSSM_CRL_TYPE_X_509v1;
+				break;
+			case 1:
+				type = CSSM_CRL_TYPE_X_509v2;
+				break;
+			default:
+				ereport(FATAL,
+						(errmsg("incorrect CRL version detected")));
+				break;
+		}
+	}
+
+	/* CRL Type */
+	type_data.Data = (uint8 *) &type;
+	type_data.Length = sizeof(CSSM_CRL_TYPE);
+	make_db_attribute(kSecCrlType, &att[0], &type_data);
+
+	/* CRL Encoding */
+	CSSM_CRL_ENCODING encoding = CSSM_CRL_ENCODING_DER;
+	CSSM_DATA encoding_data;
+	encoding_data.Data = (uint8 *) &encoding;
+	encoding_data.Length = sizeof(CSSM_CRL_ENCODING);
+	make_db_attribute(kSecCrlEncodingItemAttr, &att[1], &encoding_data);
+
+	/*
+	 * CRL Printname
+	 *
+	 * CSSM_X509_NAME contains a pointer to a CSSM_X509_RDN struct and the
+	 * number of RDNs in the struct. CSSM_X509_RDN in turn contains a set
+	 * of key/value pairs making up the x509 distinguished name structure.
+	 * The key is a CSSM_OID which consist of a pointer to Data and a Length
+	 * (since Data can be (is?) non-NULL terminated). CSSM_OID is a typedef
+	 * of CSSM_DATA.
+	 *
+	 * Loop over the pairs in the RDNs in order to find the Common Name to
+	 * use for the Issuer.
+	 */
+	for (int i = 0; i < cert_list->issuer.numberOfRDNs && !found; i++)
+	{
+		const CSSM_X509_RDN rdn = cert_list->issuer.RelativeDistinguishedName[i];
+		for (int j = 0; j < rdn.numberOfPairs && !found; j++)
+		{
+			const CSSM_X509_TYPE_VALUE_PAIR kv = rdn.AttributeTypeAndValue[j];
+
+			if ((kv.type.Length == CSSMOID_CommonName.Length) &&
+				(memcmp(kv.type.Data, CSSMOID_CommonName.Data, kv.type.Length) == 0))
+			{
+				printname_data = kv.value;
+				found = true;
+			}
+		}
+	}
+
+	/*
+	 * If we cannot find a Common Name, we need to invent something as the
+	 * PrintName, set a dummy "PostgreSQL CRL" for now.
+	 */
+	if (!found)
+	{
+		printname = strdup("PostgreSQL CRL");
+		printname_data.Data = (uint8 *) printname;
+		printname_data.Length = strlen(printname);
+	}
+	make_db_attribute(kSecLabelItemAttr, &att[2], &printname_data);
+
+	/* CRL Issuer */
+	status = CSSM_CL_CrlGetFirstFieldValue(cl, crl, &CSSMOID_X509V1IssuerName, &result, &num, &issuer);
+	if (status != CSSM_OK)
+		ereport(FATAL,
+			(errmsg("unable to read CRL")));
+	CSSM_CL_CrlAbortQuery(cl, result);
+	make_db_attribute(kSecIssuerItemAttr, &att[3], issuer);
+
+	/* CRL ThisUpdate */
+	PKIX_TIME(cert_list->thisUpdate.time.Data, thisupdate, cert_list->thisUpdate.time.Length);
+	thisupdate_data.Data = (uint8 *) thisupdate;
+	thisupdate_data.Length = STRLENTIME - 1;
+	make_db_attribute(kSecCrlThisUpdateItemAttr, &att[4], &thisupdate_data);
+
+	/* CRL NextUpdate */
+	if (cert_list->nextUpdate.time.Data == NULL)
+	{
+		/*
+		 * NextUpdate is missing from the cert entry in the CRL, set to the
+		 * synthetic value of ThisUpdate + 1000 years.
+		 */
+		memcpy(nextupdate, thisupdate, STRLENTIME);
+		nextupdate[0]++;
+	}
+	else
+		PKIX_TIME(cert_list->nextUpdate.time.Data, nextupdate, cert_list->nextUpdate.time.Length);
+
+	nextupdate_data.Data = (uint8 *) nextupdate;
+	nextupdate_data.Length = STRLENTIME - 1;
+	make_db_attribute(kSecCrlNextUpdateItemAttr, &att[5], &nextupdate_data);
+
+	rec_attr.DataRecordType = CSSM_DL_DB_RECORD_X509_CRL;
+	rec_attr.SemanticInformation = 0;
+	rec_attr.NumberOfAttributes = 6;
+	rec_attr.AttributeData = att;
+
+	bool upgraded = false;
+
+insert:
+
+	/*
+	 * Insert the CRL into the Keychain as referred to by the DLDB handle. If
+	 * the insertion fails with INVALID_RECORDTYPE, that means that the DLDB
+	 * database schema doesn't yet contain the CRL table. In that case we must
+	 * create the schema before retrying to add the CRL. If the Keychain was
+	 * creaated by the server then perform the schema addition, else error out
+	 * to avoid altering the structure of a user supplied Keychain file. The
+	 * schema is created on the first insertion of a CRL so the user needs to
+	 * manually add a CRL and then retry the operation.
+	 */
+	status = CSSM_DL_DataInsert(dldb, CSSM_DL_DB_RECORD_X509_CRL, &rec_attr, crl, &rec_ptr);
+	if (status == CSSMERR_DL_INVALID_RECORDTYPE && !upgraded)
+	{
+		if (ssl_certstorage)
+			ereport(FATAL,
+					(errmsg("CRL schema missing from Keychain")));
+
+		status = CSSM_DL_CreateRelation(dldb,
+							   CSSM_DL_DB_RECORD_X509_CRL,
+							   "CSSM_DL_DB_RECORD_X509_CRL",
+							   sizeof(x509_crl_schema) / sizeof(x509_crl_schema[0]),
+							   &x509_crl_schema[0],
+							   sizeof(x509_crl_index) / sizeof(x509_crl_index[0]),
+							   &x509_crl_index[0]);
+		if (status != CSSM_OK)
+			ereport(FATAL,
+					(errmsg("adding CRL schema to Keychain failed")));
+		upgraded = true;
+		goto insert;
+	}
+	else if (status == CSSMERR_DL_INVALID_UNIQUE_INDEX_DATA)
+	{
+		ereport(LOG,
+				(errmsg("CRL already added to Keychain")));
+	}
+	else if (status != CSSM_OK)
+	{
+		/*
+		 * We currently don't have support for translating the common
+		 * CSSMERR_DL_ status codes to human readable text for the
+		 * errormessage. While this is the only consumer, it would still
+		 * be good to cover at least the ones that can be expected. TODO
+		 */
+		ereport(FATAL,
+				(errmsg("adding CRL schema to Keychain failed")));
+	}
+
+	CSSM_DL_FreeUniqueRecord(dldb, rec_ptr);
 }
