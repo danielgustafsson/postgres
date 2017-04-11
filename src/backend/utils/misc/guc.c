@@ -3543,7 +3543,7 @@ static struct config_string ConfigureNamesString[] =
 			NULL
 		},
 		&ssl_certstorage,
-		""
+		"",
 		NULL, NULL, NULL
 	},
 

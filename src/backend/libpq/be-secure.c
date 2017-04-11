@@ -44,6 +44,7 @@ char	   *ssl_cert_file;
 char	   *ssl_key_file;
 char	   *ssl_ca_file;
 char	   *ssl_crl_file;
+char	   *ssl_certstorage;
 
 #ifdef USE_SSL
 bool		ssl_loaded_verify_locations = false;

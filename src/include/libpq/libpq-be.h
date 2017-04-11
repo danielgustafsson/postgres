@@ -199,7 +199,6 @@ typedef struct Port
 	X509	   *peer;
 #elif USE_SECURETRANSPORT
 	void	   *ssl;
-	void	   *rootcert;
 	int			ssl_buffered;
 #endif
 } Port;

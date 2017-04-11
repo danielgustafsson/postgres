@@ -60,10 +60,10 @@
 
 static void SSLLoadCertificate(Port *port);
 static OSStatus load_key(Port *port, char *filename, CFArrayRef *key);
-static OSStatus load_certificate(Port *port, char *filename, CFArrayRef *certificate);
-static OSStatus load_certificate_keychain(Port *port, char *cert_name, CFArrayRef *certificate);
-static OSStatus load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef *items);
-static OSStatus load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items);
+static OSStatus load_certificate(char *filename, CFArrayRef *certificate, bool import);
+static OSStatus load_certificate_keychain(char *cert_name, CFArrayRef *certificate);
+static OSStatus load_pkcs12_file(char *p12_fname, CFArrayRef *items);
+static OSStatus load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import);
 static char * SSLerrmessage(OSStatus status);
 static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
 static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
@@ -106,6 +106,7 @@ static CSSM_CL_HANDLE cssm_cl_startup(void);
 #define KEYCHAIN_PWD_LEN 64
 
 static SecKeychainRef keychain = NULL;
+static CFArrayRef rootcert = NULL;
 
 /*
  * Private API call used in the Webkit code for creating an identity from a
@@ -154,6 +155,7 @@ be_tls_init(bool isServerStart)
 	CSSM_CL_HANDLE      cl_handle;
 	OSStatus			status;
 	FILE			   *fp;
+	CFArrayRef			cert;
 
 #ifndef __darwin__
 	/*
@@ -244,10 +246,20 @@ be_tls_init(bool isServerStart)
 	}
 
 	/*
-	 * Load the CA store for verifying client certificates. TODO
+	 * Load the CA store for verifying client certificates.
 	 */
 	if (ssl_ca_file[0])
 	{
+		status = load_certificate(ssl_ca_file, &cert, true);
+		if (status != noErr)
+		{
+			ereport(FATAL,
+					(errmsg("could not load root certificate: \"%s\"",
+					 SSLerrmessage(status))));
+		}
+
+		rootcert = CFRetain(cert);
+		ssl_loaded_verify_locations = true;
 	}
 
 	/*
@@ -341,8 +353,8 @@ be_tls_open_server(Port *port)
 	port->ssl_in_use = true;
 	port->ssl_buffered = 0;
 
-//	if (ssl_ca_file[0])
-//		SSLSetClientSideAuthenticate((SSLContextRef) port->ssl, kAlwaysAuthenticate);
+	if (ssl_ca_file[0])
+		SSLSetClientSideAuthenticate((SSLContextRef) port->ssl, kAlwaysAuthenticate);
 
 	/*
 	 * TODO: This loads a pregenerated DH parameter, code for loading the
@@ -409,9 +421,10 @@ be_tls_open_server(Port *port)
 				return -1;
 			}
 
-			if (ssl_loaded_verify_locations && port->rootcert != NULL)
+			if (ssl_loaded_verify_locations && rootcert != NULL)
 			{
-				status = SecTrustSetAnchorCertificates(trust, (CFArrayRef) port->rootcert);
+				SecTrustSetKeychains(trust, keychain);
+				status = SecTrustSetAnchorCertificates(trust, rootcert);
 				if (status != noErr)
 				{
 					ereport(WARNING,
@@ -493,102 +506,6 @@ be_tls_open_server(Port *port)
 		}
 	}
 
-#if 0
-		//ereport(NOTICE, (errmsg("be_tls_open_server initiating handshake for CA")));
-
-		do
-		{
-			status = SSLHandshake((SSLContextRef) port->ssl);
-		}
-		while (status == errSSLWouldBlock || status == -1);
-
-		if (status != noErr)
-		{
-			ereport(WARNING,
-					(errmsg("SSLHandshake returned: \"%s\"",
-					 SSLerrmessage(status))));
-			return -1;
-		}
-
-		if (status == noErr)
-			return 0;
-
-		return -1;
-
-		status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
-		if (status != noErr || trust == NULL)
-		{
-			ereport(WARNING,
-					(errmsg("SSLCopyPeerTrust returned: \"%s\"",
-					 SSLerrmessage(status))));
-			return -1;
-		}
-
-		status = SecTrustSetAnchorCertificates(trust, (CFArrayRef) port->rootcert);
-		if (status != noErr)
-			return -1;
-
-		status = SecTrustSetAnchorCertificatesOnly(trust, false);
-		if (status != noErr)
-			return -1;
-
-		status = SecTrustEvaluate(trust, &trust_eval);
-		if (status == errSecSuccess)
-		{
-			switch (trust_eval)
-			{
-				/*
-				 * If 'Unspecified' then an anchor certificate was reached without
-				 * encountering any explicit user trust. If 'Proceed' then the user
-				 * has chosen to explicitly trust a certificate in the chain by
-				 * clicking "Trust" in the Keychain app.
-				 */
-				case kSecTrustResultUnspecified:
-				case kSecTrustResultProceed:
-					port->peer_cert_valid = true;
-					break;
-
-				/*
-				 * 'Confirm' indicates that an interactive confirmation from the
-				 * user is requested. This result code was deprecated in 10.9
-				 * however so treat it as a Deny to avoid having to invoke UI
-				 * elements from the Keychain.
-				 */
-				case kSecTrustResultConfirm:
-				/*
-				 * 'RecoverableTrustFailure' indicates that the certificate was
-				 * rejected but might be trusted with minor changes to the eval
-				 * context (ignoring expired certificate etc). TODO: Opening up to
-				 * changing the eval context here seems dangerous but we can do
-				 * better logging of the error by invoking SecTrustGetTrustResult()
-				 * to get info on exactly what failed; call and extract relevant
-				 * information to the logstring.
-				 */
-				case kSecTrustResultRecoverableTrustFailure:
-				/*
-				 * Treat all other cases as rejection without further questioning.
-				 */
-				default:
-					port->peer_cert_valid = false;
-					break;
-			}
-		}
-
-		SecCertificateRef usercert = SecTrustGetCertificateAtIndex(trust, 0L);
-
-		CFStringRef usercert_cn;
-		SecCertificateCopyCommonName(usercert, &usercert_cn);
-		port->peer_cn = pstrdup(CFStringGetCStringPtr(usercert_cn, kCFStringEncodingUTF8));
-
-		CFRelease(usercert_cn);
-
-		CFRelease(trust);
-	}
-	else
-		status = SSLHandshake((SSLContextRef) port->ssl);
-
-#endif
-
 	if (status != noErr)
 		return -1;
 
@@ -612,7 +529,6 @@ SSLLoadCertificate(Port *port)
 	OSStatus			status;
 	CFArrayRef			certificate;
 	CFArrayRef			key;
-	CFArrayRef			rootcert;
 	SecIdentityRef		identity;
 	SecCertificateRef	cert_ref;
 	SecKeyRef			key_ref;
@@ -623,7 +539,7 @@ SSLLoadCertificate(Port *port)
 	CFArrayRef			chain;
 	CFMutableArrayRef	chain_copy;
 
-	status = load_certificate(port, ssl_cert_file, &certificate);
+	status = load_certificate(ssl_cert_file, &certificate, false);
 	if (status != noErr)
 	{
 		ereport(FATAL,
@@ -657,16 +573,8 @@ SSLLoadCertificate(Port *port)
 	 * certificates, in order to use the ssl_ca_file provided we must
 	 * add it to the chain before evaluating.
 	 */
-	if (ssl_ca_file[0])
+	if (ssl_loaded_verify_locations && rootcert)
 	{
-		status = load_certificate(port, ssl_ca_file, &rootcert);
-		if (status != noErr)
-		{
-			ereport(FATAL,
-					(errmsg("could not load root certificate: \"%s\"",
-					 SSLerrmessage(status))));
-		}
-
 		status = SecTrustSetAnchorCertificates(trust, rootcert);
 		if (status != noErr)
 		{
@@ -675,7 +583,7 @@ SSLLoadCertificate(Port *port)
 					 SSLerrmessage(status))));
 		}
 		SecTrustSetAnchorCertificatesOnly(trust, false);
-		ssl_loaded_verify_locations = true;
+		SecTrustSetKeychains(trust, keychain);
 	}
 
 	status = SecTrustEvaluate(trust, &trust_status);
@@ -737,9 +645,6 @@ SSLLoadCertificate(Port *port)
 				(errmsg("could not set certificate for connection: \"%s\"",
 				 SSLerrmessage(status))));
 	}
-
-	if (rootcert)
-		port->rootcert = (void *) CFRetain(rootcert);
 }
 
 /*
@@ -1077,9 +982,9 @@ load_key(Port *port, char *filename, CFArrayRef *key)
 		 * trusted, let's read it.
 		 */
 		if (strstr(filename, ".p12") != NULL)
-			status = load_pkcs12_file(port, filename, key);
+			status = load_pkcs12_file(filename, key);
 		else
-			status = load_pem_file(port, filename, stat_buf.st_size, key);
+			status = load_pem_file(filename, stat_buf.st_size, key, false);
 	}
 
 	return status;
@@ -1087,12 +992,14 @@ load_key(Port *port, char *filename, CFArrayRef *key)
 
 /*
  *	load_certificate
+ *		Extracts a certificate from either a file on the filesystem or
+ *		a keychain.
  *
- * Extracts a certificate from either a file on the filesystem or the
- * keychain. The certificate is returned in the "certificate" ArrayRef.
+ * The certificate is returned in the "certificate" ArrayRef. If import is
+ * true then the certificate is imported into the backend keychain.
  */
 static OSStatus
-load_certificate(Port *port, char *filename, CFArrayRef *certificate)
+load_certificate(char *filename, CFArrayRef *certificate, bool import)
 {
 	OSStatus	status;
 	struct stat	stat_buf;
@@ -1105,9 +1012,9 @@ load_certificate(Port *port, char *filename, CFArrayRef *certificate)
 	 * implementation is intended as a drop-in replacement for the current
 	 * OpenSSL based implementation so let's keep it file-first.
 	 */
-	if (stat(ssl_cert_file, &stat_buf) != 0 && errno == ENOENT)
+	if (stat(filename, &stat_buf) != 0 && errno == ENOENT)
 	{
-		status = load_certificate_keychain(port, ssl_cert_file, certificate);
+		status = load_certificate_keychain(filename, certificate);
 	}
 	else if (S_ISREG(stat_buf.st_mode))
 	{
@@ -1116,23 +1023,23 @@ load_certificate(Port *port, char *filename, CFArrayRef *certificate)
 		 * else try to load as PEM file.
 		 */
 		if (strstr(filename, ".p12") != NULL)
-			status = load_pkcs12_file(port, filename, certificate);
+			status = load_pkcs12_file(filename, certificate);
 		else
-			status = load_pem_file(port, ssl_cert_file, stat_buf.st_size, certificate);
+			status = load_pem_file(filename, stat_buf.st_size, certificate, import);
 	}
 	else
 	{
 		ereport(FATAL,
 				(errcode_for_file_access(),
 				 errmsg("could not load server certificate file \"%s\": %m",
-				 ssl_cert_file)));
+				 filename)));
 	}
 
 	return status;
 }
 
 static OSStatus
-load_certificate_keychain(Port *port, char *cert_name, CFArrayRef *certificate)
+load_certificate_keychain(char *cert_name, CFArrayRef *certificate)
 {
 	/* TODO: use SecItemCopyMatching */
 	return errSSLInternal;
@@ -1145,7 +1052,7 @@ load_certificate_keychain(Port *port, char *cert_name, CFArrayRef *certificate)
  * currently doesn't handle passphrase protected files which is a TODO.
  */
 static OSStatus
-load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef *items)
+load_pkcs12_file(char *p12_fname, CFArrayRef *items)
 {
 	OSStatus		status;
 	CFURLRef		p12_ref;
@@ -1172,7 +1079,7 @@ load_pkcs12_file(Port *port, char *p12_fname, CFArrayRef *items)
 }
 
 static OSStatus
-load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
+load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import)
 {
 	OSStatus							status;
 	FILE							   *cert_fd;
@@ -1180,9 +1087,9 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
 	int									ret;
 	CFDataRef							data_ref;
 	SecItemImportExportKeyParameters	params;
-	CFStringRef							cert_path;
+	CFStringRef							path;
 	SecExternalFormat					format;
-	SecExternalItemType					item_type;
+	SecExternalItemType					item_type = kSecItemTypeCertificate;
 
 	cert_buf = palloc(size);
 
@@ -1215,28 +1122,20 @@ load_pem_file(Port *port, char *pem_fname, int size, CFArrayRef *items)
 
 	/*
 	 * SecItemImport takes two optional hints for interpreting the type of
-	 * certificate loaded. format holds a constant identifying the format
-	 * or NULL if unknown, the format variable will contain the format which
-	 * SecItemImport decided to imoprt the certificate as regardless of
-	 * initial value. cert_path either contains the full filename from which
-	 * the certificate data was read or the file extension.
+	 * certificate loaded. format holds a constant identifying the format, or
+	 * NULL if unknown. The format variable will on return contain the format
+	 * which SecItemImport decided to import the certificate as regardless of
+	 * initial value. path can either contain the full filename from which
+	 * the certificate data was read or the file extension, we pass the full
+	 * filename.
 	 */
 	format = kSecFormatPEMSequence;
-	cert_path = CFStringCreateWithCString(NULL, pem_fname,
-										  kCFStringEncodingUTF8);
+	path = CFStringCreateWithCString(NULL, pem_fname, kCFStringEncodingUTF8);
 
-	item_type = kSecItemTypeCertificate;
+	status = SecItemImport(data_ref, path, &format, &item_type, 0 /* flags */,
+						   &params, (import ? keychain : NULL), items);
 
-	/*
-	 * We are currently not importing the certificate into a keychain but
-	 * a future TODO is to create a transient keychain which exists for
-	 * the duration of the server process for holding the certificates.
-	 */
-	status = SecItemImport(data_ref, cert_path, &format, &item_type,
-						   0 /* flags */, &params, NULL /* keychain */,
-						   items);
-
-	CFRelease(cert_path);
+	CFRelease(path);
 	CFRelease(data_ref);
 
 	return status;
@@ -2097,8 +1996,7 @@ insert:
 	if (status == CSSMERR_DL_INVALID_RECORDTYPE && !upgraded)
 	{
 		if (ssl_certstorage)
-			ereport(FATAL,
-					(errmsg("CRL schema missing from Keychain")));
+			ereport(FATAL, (errmsg("CRL schema missing from Keychain")));
 
 		status = CSSM_DL_CreateRelation(dldb,
 							   CSSM_DL_DB_RECORD_X509_CRL,
@@ -2108,15 +2006,13 @@ insert:
 							   sizeof(x509_crl_index) / sizeof(x509_crl_index[0]),
 							   &x509_crl_index[0]);
 		if (status != CSSM_OK)
-			ereport(FATAL,
-					(errmsg("adding CRL schema to Keychain failed")));
+			ereport(FATAL, (errmsg("adding CRL schema to Keychain failed")));
 		upgraded = true;
 		goto insert;
 	}
 	else if (status == CSSMERR_DL_INVALID_UNIQUE_INDEX_DATA)
 	{
-		ereport(LOG,
-				(errmsg("CRL already added to Keychain")));
+		ereport(LOG, (errmsg("CRL already added to Keychain")));
 	}
 	else if (status != CSSM_OK)
 	{
@@ -2126,8 +2022,7 @@ insert:
 		 * errormessage. While this is the only consumer, it would still
 		 * be good to cover at least the ones that can be expected. TODO
 		 */
-		ereport(FATAL,
-				(errmsg("adding CRL schema to Keychain failed")));
+		ereport(FATAL, (errmsg("adding CRL schema to Keychain failed")));
 	}
 
 	CSSM_DL_FreeUniqueRecord(dldb, rec_ptr);
