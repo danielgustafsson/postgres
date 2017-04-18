@@ -35,6 +35,7 @@
 #include <arpa/inet.h>
 #endif
 
+#include "common/base64.h"
 #include "libpq/libpq.h"
 #include "miscadmin.h"
 #include "storage/fd.h"
@@ -58,21 +59,28 @@
 #define pg_uint64 uint64
 #define pg_bool bool
 
+extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator, SecCertificateRef certificate, SecKeyRef privateKey);
+ 
 static void SSLLoadCertificate(Port *port);
-static OSStatus load_key(Port *port, char *filename, CFArrayRef *key);
-static OSStatus load_certificate(char *filename, CFArrayRef *certificate, bool import);
-static OSStatus load_certificate_keychain(char *cert_name, CFArrayRef *certificate);
-static OSStatus load_pkcs12_file(char *p12_fname, CFArrayRef *items);
-static OSStatus load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import);
+static OSStatus load_certificate(char *name, CFMutableArrayRef *cert_array);
+static OSStatus load_key(char *name, SecKeychainRef *keychain, CFArrayRef *out);
+
+//static OSStatus load_key(Port *port, char *filename, CFArrayRef *key, bool import);
+//static OSStatus load_certificate(char *filename, CFArrayRef *certificate, bool import);
+
+//static OSStatus load_certificate_keychain(char *cert_name, CFArrayRef *certificate);
+//static OSStatus load_pkcs12_file(char *p12_fname, CFArrayRef *items);
+//static OSStatus load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import);
 static char * SSLerrmessage(OSStatus status);
 static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
 static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
 static char * SSLerrmessage(OSStatus status);
 static const char * SSLciphername(SSLCipherSuite cipher);
 static bool make_db_attribute(uint32_t att_type, CSSM_DB_ATTRIBUTE_DATA *att, void *data);
-static void import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl);
+static int import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl);
 static CSSM_CL_HANDLE cssm_cl_startup(void);
 
+static UInt8 *pem_to_der(const char *in, int *offset);
 /*
  * Time can be in either rfc2459 UtcTime or GeneralizedTime for CRL entries,
  * but we need to insert in GeneralizedTime with the 'Z'. Copy the source time
@@ -105,21 +113,8 @@ static CSSM_CL_HANDLE cssm_cl_startup(void);
 #define KEYCHAIN_DIR "ssl_keychain"
 #define KEYCHAIN_PWD_LEN 64
 
-static SecKeychainRef keychain = NULL;
 static CFArrayRef rootcert = NULL;
-
-/*
- * Private API call used in the Webkit code for creating an identity from a
- * certificate with a key. While stable and used in many open source projects
- * it should be replaced with a published API call since private APIs aren't
- * subject to the same deprecation rules.
- *
- * Can be replaced with SecIdentityCreateWithCertificate() but that requires
- * the key to be loaded into a keychain object, it can't be just in memory.
- */
-extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator,
-										SecCertificateRef certificate,
-										SecKeyRef privateKey);
+static char keychain_path[MAXPGPATH];
 
 /*
  * Secure Transport doesn't support setting different keysizes for DH like
@@ -149,13 +144,13 @@ int
 be_tls_init(bool isServerStart)
 {
 	struct stat 		stat_buf;
-	char				keychain_path[MAXPGPATH];
-	char				keychain_pwd[KEYCHAIN_PWD_LEN];
+	//char				keychain_pwd[KEYCHAIN_PWD_LEN];
 	CSSM_DL_DB_HANDLE	dldb_handle = {0,0};
 	CSSM_CL_HANDLE      cl_handle;
 	OSStatus			status;
 	FILE			   *fp;
-	CFArrayRef			cert;
+	SecKeychainRef		keychain = NULL;
+	
 
 #ifndef __darwin__
 	/*
@@ -165,40 +160,6 @@ be_tls_init(bool isServerStart)
 	Assert(false);
 #endif
 
-	/*
-	 * If the keychain has been created and opened already, avoid doing so
-	 * again.
-	 */
-	if (keychain)
-		return 0;
-
-	/*
-	 * If the Keychain path has been configured in the ssl_certstorage GUC we
-	 * expect it to already exist and if not we error out rather than create
-	 * it.
-	 */
-	if (ssl_certstorage)
-	{
-		strlcpy(keychain_path, ssl_certstorage, sizeof(keychain_path));
-		if (stat(keychain_path, &stat_buf) != 0 || !S_ISREG(stat_buf.st_mode))
-			ereport(FATAL,
-				(errmsg("Keychain file \"%s\" does not exist", keychain_path)));
-
-		status = SecKeychainOpen(keychain_path, &keychain);
-		if (status != errSecSuccess)
-			ereport(FATAL,
-					(errmsg("could not open Keychain file: \"%s\"",
-					 SSLerrmessage(status))));
-	}
-	/*
-	 * No Keychain was configured by the user, create a temporary Keychain for
-	 * the duration of the server, which we can load certificates and CRLs etc
-	 * into.
-	 */
-	else
-	{
-		snprintf(keychain_path, MAXPGPATH, "%s/pg.keychain", KEYCHAIN_DIR);
-
 		if (stat(KEYCHAIN_DIR, &stat_buf) == 0)
 		{
 			/*
@@ -206,61 +167,131 @@ be_tls_init(bool isServerStart)
 			 * sure to avoid crashing on something so simple.
 			 */
 			if (!S_ISDIR(stat_buf.st_mode))
-				ereport(FATAL,
+			{
+				ereport(isServerStart ? FATAL : LOG,
 					(errmsg("Keychain directory \"%s\" is a file", KEYCHAIN_DIR)));
+				goto error;
+			}
 		}
 		else
 		{
 			if (mkdir(KEYCHAIN_DIR, S_IRWXU) < 0)
-				ereport(FATAL,
-					(errmsg("could not create Keychain directory \"%s\"",
+			{
+				ereport(isServerStart ? FATAL : LOG,
+				(errmsg("could not create Keychain directory \"%s\"",
 					 KEYCHAIN_DIR)));
+				goto error;
+			}
 		}
+#if 0
+	snprintf(keychain_path, MAXPGPATH, "%s/%s/pg_%d.keychain", DataDir, KEYCHAIN_DIR, MyProcPid);
 
-		/*
-		 * A Keychain cannot be created without a password, if one isn't
-		 * supplied in the SecKeychainCreate() call a popup dialog must be
-		 * presented to the user for manual entry. Since we are creating a
-		 * temporary Keychain (where temporary is defined by the runtime of
-		 * the server) for certificates which are readable to any user who
-		 * can read the Keychain file, set a dummy password.
-		 */
-		if (!pg_backend_random(keychain_pwd, KEYCHAIN_PWD_LEN))
-			ereport(FATAL,
-				(errmsg("could not generate Keychain password")));
-
-		/*
-		 * InitialAccess is not implemented and ignored in the API, passing
-		 * NULL is the documented correct behavior. Since we are supplying
-		 * a password the promptUser variable is FALSE to indicate that we
-		 * don't want to present a modal dialog to the user.
-		 */
-		status = SecKeychainCreate(keychain_path, KEYCHAIN_PWD_LEN,
-								   keychain_pwd, FALSE /* promptUser */,
-								   NULL /* InitialAccess */, &keychain);
-
-		if (status != errSecSuccess)
-			ereport(FATAL,
-					(errmsg("could not create Keychain file: \"%s\"",
-					 SSLerrmessage(status))));
+	if (stat(keychain_path, &stat_buf) == 0)
+	{
+		SecKeychainOpen(keychain_path, &keychain);
+		SecKeychainDelete(keychain);
+		CFRelease(keychain);
 	}
+	else
+	{
+		if (stat(KEYCHAIN_DIR, &stat_buf) == 0)
+		{
+			/*
+			 * This should be quite a rare cornercase but we might as well make
+			 * sure to avoid crashing on something so simple.
+			 */
+			if (!S_ISDIR(stat_buf.st_mode))
+			{
+				ereport(isServerStart ? FATAL : LOG,
+					(errmsg("Keychain directory \"%s\" is a file", KEYCHAIN_DIR)));
+				goto error;
+			}
+		}
+		else
+		{
+			if (mkdir(KEYCHAIN_DIR, S_IRWXU) < 0)
+			{
+				ereport(isServerStart ? FATAL : LOG,
+				(errmsg("could not create Keychain directory \"%s\"",
+					 KEYCHAIN_DIR)));
+				goto error;
+			}
+		}
+	}
+
+	/*
+	 * A Keychain cannot be created without a password, if one isn't
+	 * supplied in the SecKeychainCreate() call a popup dialog must be
+	 * presented to the user for manual entry. Since we are creating a
+	 * temporary Keychain (where temporary is defined by the runtime of
+	 * the server) for certificates which are readable to any user who
+	 * can read the Keychain file, set a dummy password.
+	 *
+	if (!pg_backend_random(keychain_pwd, KEYCHAIN_PWD_LEN))
+		ereport(FATAL,
+			(errmsg("could not generate Keychain password")));
+		*/
+
+	/*
+	 * InitialAccess is not implemented and ignored in the API, passing
+	 * NULL is the documented correct behavior. Since we are supplying
+	 * a password the promptUser variable is FALSE to indicate that we
+	 * don't want to present a modal dialog to the user.
+	 */
+	status = SecKeychainCreate(keychain_path, 10, //KEYCHAIN_PWD_LEN,
+							   "1234567890", FALSE /* promptUser */,
+							   NULL /* InitialAccess */, &keychain);
+
+	if (status != errSecSuccess)
+		ereport(FATAL,
+				(errmsg("could not create Keychain file: \"%s\"",
+				 SSLerrmessage(status))));
+	
+	char kcpath[MAXPGPATH];
+	uint32_t len = MAXPGPATH;
+
+	SecKeychainGetPath(keychain, &len, kcpath);
+	ereport(LOG, (errmsg("XXX: keychain path: \"%s\"", kcpath)));
+
+	SecKeychainStatus kcstatus;
+	status = SecKeychainGetStatus(keychain, &kcstatus);
+	if (status == noErr)
+	{
+		if (kcstatus & kSecWritePermStatus)
+			ereport(LOG, (errmsg("XXX: keychain status: writeable")));
+		if (kcstatus & kSecReadPermStatus)
+			ereport(LOG, (errmsg("XXX: keychain status: readable")));
+		if (kcstatus & kSecUnlockStateStatus)
+			ereport(LOG, (errmsg("XXX: keychain status: unlocked")));
+	}
+	else
+		ereport(FATAL,
+				(errmsg("could not status Keychain file: \"%s\"",
+				 SSLerrmessage(status))));
+
 
 	/*
 	 * Load the CA store for verifying client certificates.
 	 */
 	if (ssl_ca_file[0])
 	{
-		status = load_certificate(ssl_ca_file, &cert, true);
+		CFMutableArrayRef certificates;
+
+		certificates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+		status = load_certificate(ssl_ca_file, &certificates);
 		if (status != noErr)
 		{
-			ereport(FATAL,
-					(errmsg("could not load root certificate: \"%s\"",
-					 SSLerrmessage(status))));
+			ereport(isServerStart ? FATAL : LOG,
+					(errmsg("could not load root certificate (%d): \"%s\"",
+					 status, SSLerrmessage(status))));
+			goto error;
 		}
 
-		rootcert = CFRetain(cert);
+		rootcert = CFRetain(certificates);
 		ssl_loaded_verify_locations = true;
 	}
+	else
+		ssl_loaded_verify_locations = false;
 
 	/*
 	 * Load the Certificate Revocation List in case configured.
@@ -274,21 +305,30 @@ be_tls_init(bool isServerStart)
 
 		status = SecKeychainGetDLDBHandle(keychain, &dldb_handle);
 		if (status != errSecSuccess)
-			ereport(FATAL,
+		{
+			ereport(isServerStart ? FATAL : LOG,
 					(errmsg("could not get DLDB handle for Keychain: \"%s\"",
 					 SSLerrmessage(status))));
+			goto error;
+		}
 
 		cl_handle = cssm_cl_startup();
 		if (!cl_handle)
-			ereport(FATAL,
+		{
+			ereport(isServerStart ? FATAL : LOG,
 					(errmsg("could not get CL handle for Keychain: \"%s\"",
 					 SSLerrmessage(status))));
+			goto error;
+		}
 
 		fp = fopen(ssl_crl_file, "r");
 		if (fp == NULL)
-			ereport(FATAL,
+		{
+			ereport(isServerStart ? FATAL : LOG,
 					(errmsg("unable to read CRL file \"%s\": %m",
 					 ssl_crl_file)));
+			goto error;
+		}
 
 		fseek(fp, 0, SEEK_END);
 		fp_size = ftell(fp);
@@ -296,38 +336,54 @@ be_tls_init(bool isServerStart)
 		rewind(fp);
 
 		if ((result = fread(crl, 1, fp_size, fp)) != fp_size)
-			ereport(FATAL,
+		{
+			ereport(isServerStart ? FATAL : LOG,
 					(errmsg("unable to read CRL file \"%s\": %m",
 					 ssl_crl_file)));
+			goto error;
+		}
 		
 		crldata.Data = crl;
 		crldata.Length = fp_size;
 
-		import_crl(dldb_handle, cl_handle, &crldata);
+		int s = import_crl(dldb_handle, cl_handle, &crldata);
+		if (s != 0)
+		{
+			ereport(isServerStart ? FATAL : LOG, (errmsg("import CRL failed")));
+			goto error;
+		}
+			
+		CSSM_ModuleDetach(cl_handle);
+		CSSM_ModuleUnload(&gGuidAppleX509CL, NULL, NULL);
 	}
 
+	CFRelease(keychain);
+
+#endif
 	return 0;
+
+error:
+	return -1;
 }
 
 /*
  * be_tls_destroy
  *		Tear down global Secure Transport structures and return resources.
- *
- * If we have a configured Keychain path it means that we have been using a
- * usersupplied Keychain rather than our own. Refrain from deleting it in that
- * case. If not, we remove the Keychain file upon server closure.
  */
 void
 be_tls_destroy(void)
 {
-	if (!keychain)
-		return;
+	struct stat stat_buf;
+	SecKeychainRef keychain;
 
-	if (!ssl_certstorage)
+	if (stat(keychain_path, &stat_buf) == 0)
 	{
+		SecKeychainOpen(keychain_path, &keychain);
 		SecKeychainDelete(keychain);
 		CFRelease(keychain);
 	}
+
+	ssl_loaded_verify_locations = false;
 }
 
 /*
@@ -340,20 +396,144 @@ be_tls_open_server(Port *port)
 	OSStatus			status;
 	SecTrustRef			trust;
 	SecTrustResultType	trust_eval = 0;
+	SecKeychainRef		keychain;
 
+	CSSM_DL_DB_HANDLE	dldb_handle = {0,0};
+	CSSM_CL_HANDLE      cl_handle;
+	FILE			   *fp;
 	Assert(!port->ssl);
 
 	port->ssl = (void *) SSLCreateContext(NULL, kSSLServerSide, kSSLStreamType);
 	if (!port->ssl)
-	{
 		ereport(FATAL,
 				(errmsg("could not create SSL context")));
-	}
 
 	port->ssl_in_use = true;
 	port->ssl_buffered = 0;
 
+	/*---
+	 * Keychains are internally backed by sqlite3 databases which in turn
+	 * doesn't allow access across fork()s. https://sqlite.org/faq.html#q6 :
+	 * 
+	 *		"Under Unix, you should not carry an open SQLite database across
+	 *		 a fork() system call into the child process."
+	 *
+	 * Usage across fork() will cause the sqlite3 initialization to segfault
+	 * so we must make our Keychain per-process by adding MyProcPid to the
+	 * Keychain filename. Since we only really need the Keychain for setting
+	 * up the identity for opening the connection this limitation is fine.
+	 *
+	 * The InitialAccess parameter is not implemented and ignored in the API,
+	 * passing NULL is the documented correct behavior. Since we are supplying
+	 * a password the promptUser variable is FALSE to indicate that we
+	 * don't want to present a modal dialog to the user.
+	 *---
+	 */
+	snprintf(keychain_path, MAXPGPATH, "%s/%s/pg_%d.keychain", DataDir, KEYCHAIN_DIR, MyProcPid);
+	status = SecKeychainCreate(keychain_path, 10, //KEYCHAIN_PWD_LEN,
+							   "1234567890", FALSE /* promptUser */,
+							   NULL /* InitialAccess */, &keychain);
+
+	if (status != errSecSuccess)
+		ereport(FATAL,
+				(errmsg("could not create Keychain file: \"%s\"",
+				 SSLerrmessage(status))));
+	
+	char kcpath[MAXPGPATH];
+	uint32_t len = MAXPGPATH;
+
+	SecKeychainGetPath(keychain, &len, kcpath);
+	ereport(LOG, (errmsg("XXX: keychain path: \"%s\"", kcpath)));
+
+	SecKeychainStatus kcstatus;
+	status = SecKeychainGetStatus(keychain, &kcstatus);
+	if (status != noErr ||
+		!(kcstatus & (kSecWritePermStatus | kSecReadPermStatus | kSecUnlockStateStatus)))
+			ereport(FATAL, (errmsg("incorrect keychain status")));
+
+	/*
+	 * Load the CA store for verifying client certificates.
+	 */
 	if (ssl_ca_file[0])
+	{
+		CFMutableArrayRef certificates;
+
+		certificates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+		status = load_certificate(ssl_ca_file, &certificates);
+		if (status != noErr)
+		{
+			ereport(FATAL,
+					(errmsg("could not load root certificate (%d): \"%s\"",
+					 status, SSLerrmessage(status))));
+		}
+
+		rootcert = CFRetain(certificates);
+		ssl_loaded_verify_locations = true;
+	}
+	else
+		ssl_loaded_verify_locations = false;
+
+	/*
+	 * Load the Certificate Revocation List in case configured.
+	 */
+	if (ssl_crl_file[0])
+	{
+		CSSM_DATA	crldata;
+		UInt8	   *crl;
+		int			result;
+		int			fp_size;
+
+		status = SecKeychainGetDLDBHandle(keychain, &dldb_handle);
+		if (status != errSecSuccess)
+		{
+			ereport(FATAL,
+					(errmsg("could not get DLDB handle for Keychain: \"%s\"",
+					 SSLerrmessage(status))));
+		}
+
+		cl_handle = cssm_cl_startup();
+		if (!cl_handle)
+		{
+			ereport(FATAL,
+					(errmsg("could not get CL handle for Keychain: \"%s\"",
+					 SSLerrmessage(status))));
+		}
+
+		fp = fopen(ssl_crl_file, "r");
+		if (fp == NULL)
+		{
+			ereport(FATAL,
+					(errmsg("unable to read CRL file \"%s\": %m",
+					 ssl_crl_file)));
+		}
+
+		fseek(fp, 0, SEEK_END);
+		fp_size = ftell(fp);
+		crl = palloc(fp_size);
+		rewind(fp);
+
+		if ((result = fread(crl, 1, fp_size, fp)) != fp_size)
+		{
+			ereport(FATAL,
+					(errmsg("unable to read CRL file \"%s\": %m",
+					 ssl_crl_file)));
+		}
+		
+		crldata.Data = crl;
+		crldata.Length = fp_size;
+
+		int s = import_crl(dldb_handle, cl_handle, &crldata);
+		if (s != 0)
+		{
+			ereport(FATAL, (errmsg("import CRL failed")));
+		}
+			
+		CSSM_ModuleDetach(cl_handle);
+		CSSM_ModuleUnload(&gGuidAppleX509CL, NULL, NULL);
+	}
+
+	/* XXX: correct? */
+	if (ssl_loaded_verify_locations)
 		SSLSetClientSideAuthenticate((SSLContextRef) port->ssl, kAlwaysAuthenticate);
 
 	/*
@@ -410,23 +590,33 @@ be_tls_open_server(Port *port)
 		if (status == errSSLWouldBlock || status == -1)
 			continue;
 
+		if (status == errSSLClosedAbort || status == errSSLClosedGraceful)
+			return -1;
+
+		ereport(LOG, (errmsg("XXX: handshake status: %d", status)));
+
 		if (status == errSSLPeerAuthCompleted)
 		{
+			ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted logic")));
 			status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
 			if (status != noErr || trust == NULL)
 			{
+			ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 1")));
 				ereport(WARNING,
 					(errmsg("SSLCopyPeerTrust returned: \"%s\"",
 					 SSLerrmessage(status))));
 				return -1;
 			}
 
-			if (ssl_loaded_verify_locations && rootcert != NULL)
+			if (ssl_loaded_verify_locations)
 			{
+				ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 2")));
+				SecKeychainOpen(keychain_path, &keychain);
 				SecTrustSetKeychains(trust, keychain);
 				status = SecTrustSetAnchorCertificates(trust, rootcert);
 				if (status != noErr)
 				{
+					ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 3")));
 					ereport(WARNING,
 						(errmsg("SecTrustSetAnchorCertificates returned: \"%s\"",
 						 SSLerrmessage(status))));
@@ -436,6 +626,7 @@ be_tls_open_server(Port *port)
 				status = SecTrustSetAnchorCertificatesOnly(trust, false);
 				if (status != noErr)
 				{
+					ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 4")));
 					ereport(WARNING,
 						(errmsg("SecTrustSetAnchorCertificatesOnly returned: \"%s\"",
 						 SSLerrmessage(status))));
@@ -446,6 +637,7 @@ be_tls_open_server(Port *port)
 			status = SecTrustEvaluate(trust, &trust_eval);
 			if (status != noErr)
 			{
+				ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 5")));
 				ereport(WARNING,
 					(errmsg("SecTrustEvaluate failed, returned: \"%s\"",
 					 SSLerrmessage(status))));
@@ -483,8 +675,8 @@ be_tls_open_server(Port *port)
 				 */
 				case kSecTrustResultRecoverableTrustFailure:
 					/* XXX TODO */
-					//port->peer_cert_valid = true;
-					//break;
+					port->peer_cert_valid = true;
+					break;
 				/*
 				 * Treat all other cases as rejection without further questioning.
 				 */
@@ -495,6 +687,7 @@ be_tls_open_server(Port *port)
 
 			if (port->peer_cert_valid)
 			{
+				ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 6")));
 				SecCertificateRef usercert = SecTrustGetCertificateAtIndex(trust, 0L);
 
 				CFStringRef usercert_cn;
@@ -507,7 +700,10 @@ be_tls_open_server(Port *port)
 	}
 
 	if (status != noErr)
+	{
+		ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 7")));
 		return -1;
+	}
 
 	return 0;
 }
@@ -527,19 +723,430 @@ static void
 SSLLoadCertificate(Port *port)
 {
 	OSStatus			status;
+	CFMutableArrayRef	keychains;
+	SecKeychainRef		pg_keychain;
+	SecKeychainRef		def_keychain;
+	CFMutableArrayRef	certificates;
+	SecCertificateRef	certificate;
+	SecIdentityRef		identity;
+	SecTrustRef			trust;
+	SecTrustResultType	trust_status;
+	CFArrayRef			chain;
+	CFMutableArrayRef	chain_copy;
+	SecPolicyRef		policy;
+	CSSM_TP_APPLE_EVIDENCE_INFO *status_chain;
+
+	/*
+	 * We need to inject the private key into our Keychain, but we can hold
+	 * the certificate in memory. On top of that, we add the user default
+	 * keychain to the searchlist. This allows the user to keep private keys
+	 * in a secure location without allowing the PostgreSQL process filesystem
+	 * access to them.
+	 */
+	keychains = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+	status = SecKeychainOpen(keychain_path, &pg_keychain);
+	if (status != noErr)
+		ereport(FATAL,
+				(errmsg("could not open keychain: \"%s\"",
+				 SSLerrmessage(status))));
+	CFArrayAppendValue(keychains, pg_keychain);
+	status = SecKeychainCopyDefault(&def_keychain);
+	if (status != noErr)
+		ereport(FATAL,
+				(errmsg("could reference default keychain: \"%s\"",
+				 SSLerrmessage(status))));
+	CFArrayAppendValue(keychains, def_keychain);
+
+	SecKeychainStatus kcstatus;
+	status = SecKeychainGetStatus(pg_keychain, &kcstatus);
+	if (status == noErr)
+	{
+		if (kcstatus & kSecWritePermStatus)
+			ereport(LOG, (errmsg("XXX: keychain status: writeable")));
+		if (kcstatus & kSecReadPermStatus)
+			ereport(LOG, (errmsg("XXX: keychain status: readable")));
+		if (kcstatus & kSecUnlockStateStatus)
+			ereport(LOG, (errmsg("XXX: keychain status: unlocked")));
+	}
+	else
+		ereport(FATAL,
+				(errmsg("could not status Keychain file: \"%s\"",
+				 SSLerrmessage(status))));
+
+	/*
+	 * An identity in Secure Transport is a container consisting of a private
+	 * key, a public key and a certificate. The preferred way to transport an
+	 * identity in macOS is to either use a PKCS12 file or a Keychain. Since
+	 * we want to maintain drop-in replacement compatability with the OpenSSL
+	 * implementation we however need to support reading the certificate and
+	 * key files separately and creating the identity from that. A future TODO
+	 * is to support reading PKCS12 files directly.
+	 */
+	certificates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+	status = load_certificate(ssl_cert_file, &certificates);
+	if (status != noErr)
+		ereport(FATAL, (errmsg("certificate load failed: \"%s\"", SSLerrmessage(status))));
+
+	if (CFArrayGetCount(certificates) > 1)
+		ereport(FATAL, (errmsg("certificate bundle found")));
+
+	certificate = (SecCertificateRef) CFArrayGetValueAtIndex(certificates, 0);
+
+	/*
+	 * When creating the identity, the private key cannot be referenced in
+	 * memory, it needs to be in a keychain.
+	 */
+	CFArrayRef keys;
+	status = load_key(ssl_key_file, &pg_keychain, &keys);
+	if (status != noErr)
+		ereport(FATAL, (errmsg("key load failed: \"%s\"", SSLerrmessage(status))));
+
+
+	/*
+	 * We now have a certificate and either a private key, or a search path
+	 * which should contain it.
+	 */
+	/*status = SecIdentityCreateWithCertificate(keychains, certificate, &identity);
+	if (status != noErr)
+		ereport(FATAL,
+				(errmsg("could not create identity: \"%s\"",
+				 SSLerrmessage(status))));
+		*/
+	identity = SecIdentityCreate(NULL, certificate, (SecKeyRef) CFArrayGetValueAtIndex(keys, 0));
+	if (identity == NULL)
+		ereport(FATAL,
+				(errmsg("could not create identity: \"%s\"",
+				 SSLerrmessage(status))));
+
+#if 0
+	/* XXX */
+	policy = SecPolicyCreateSSL(true, NULL);
+	status = SecTrustCreateWithCertificates(certificates, policy, &trust);
+	if (status != noErr || !trust)
+	{
+		ereport(FATAL,
+				(errmsg("XXX: could not create trust for connection: \"%s\"",
+				 (trust ? SSLerrmessage(status) : "trust creation returned NULL"))));
+	}
+	CFRetain(trust);
+	CFRetain(certificate);
+	CFRetain(policy);
+
+	/*
+	 * SecTrustEvaluate searches the user keychain for intermediate
+	 * certificates, in order to use the ssl_ca_file provided we must
+	 * add it to the chain before evaluating.
+	 */
+	if (ssl_loaded_verify_locations)
+	{
+		ereport(LOG, (errmsg("XXX: we have a rootcert")));
+		status = SecTrustSetAnchorCertificates(trust, rootcert);
+		if (status != noErr)
+		{
+			ereport(FATAL,
+					(errmsg("unable to add root certificate to chain: \"%s\"",
+					 SSLerrmessage(status))));
+		}
+		SecTrustSetAnchorCertificatesOnly(trust, false);
+		SecTrustSetKeychains(trust, keychains);
+	}
+
+	status = SecTrustEvaluate(trust, &trust_status);
+	if (status != noErr)
+	{
+		ereport(FATAL,
+				(errmsg("could not verify certificate chain 0: \"%s\"",
+				 SSLerrmessage(status))));
+	}
+
+	switch (trust_status)
+	{
+		/*
+		 * Although strangely named, unspecified is the "everything worked"
+		 * returnvalue where the certificate was trusted. proceed means that
+		 * the user has explicitly trusted a certificate in the chain by
+		 * clicking Ok in the keychain.
+		 */
+		case (kSecTrustResultProceed):
+		case (kSecTrustResultUnspecified):
+			break;
+
+		/*
+		 * recoverableTrustFailure means that the chain shouldn't be trusted
+		 * as-is due to potentially fixable reasons, such an expired cert in
+		 * the chain. Include an errhint to highlight.
+		 */
+		case (kSecTrustResultRecoverableTrustFailure):
+			ereport(FATAL,
+					(errmsg("could not verify certificate chain 1"),
+					 errhint("has the root certificate expired?")));
+			break;
+
+		/*
+		 * Treat all unrecoverable errors in the same manner by erroring
+		 * out. The potential errors are kSecTrustResultFatalTrustFailure,
+		 * kSecTrustResultDeny and kSecTrustResultOtherError.
+		 */
+		default:
+			ereport(FATAL,
+					(errmsg("could not verify certificate chain 2: %d", trust_status)));
+			break;
+	}
+
+	status = SecTrustGetResult(trust, &trust_status, &chain, &status_chain);
+
+	chain_copy = CFArrayCreateMutable(NULL, CFArrayGetCount(chain), &kCFTypeArrayCallBacks);
+
+	CFArrayAppendValue(chain_copy, identity);
+	if (CFArrayGetCount(chain) > 1)
+		CFArrayAppendArray(chain_copy, chain, CFRangeMake(1, CFArrayGetCount(chain) - 1));
+
+	CFRelease(chain);
+
+	/* XXX */
+#endif
+
+	/*
+	 * SSLSetCertificates set the certificate(s) to use for the connection.
+	 * The first element in the passed array is required to be the identity
+	 * with elements 1..n being certificates.
+	 */
+	CFArrayInsertValueAtIndex(certificates, 0, identity);
+	CFArrayAppendArray(certificates, rootcert, CFRangeMake(0, CFArrayGetCount(rootcert)));
+
+	status = SSLSetCertificate((SSLContextRef) port->ssl, certificates);
+	if (status != noErr)
+	{
+		ereport(FATAL,
+				(errmsg("could not set certificate for connection: \"%s\"",
+				 SSLerrmessage(status))));
+	}
+}
+
+/*
+ *
+ * TODO: figure out better returncodes
+ */
+static OSStatus
+load_key(char *name, SecKeychainRef *keychain, CFArrayRef *out)
+{
+	OSStatus			status;
+	struct stat			stat_buf;
+	int					ret;
+	UInt8			   *buf;
+	FILE			   *fd;
+	CFDataRef			data;
+	SecExternalFormat	format;
+	SecExternalItemType	type;
+	CFStringRef			path;
+
+	ret = stat(name, &stat_buf);
+	if (ret != 0)
+	{
+		/*
+		 * The key name is referencing a non-existing file, which we assume to
+		 * mean that it's referencing a Keychain label. We could search the
+		 * user default Keychain here to verify but since identity creation
+		 * will do just that anyways we might as well defer the key search to
+		 * that stage. Return to go ahead with identity creation.
+		 */
+		if (errno == ENOENT)
+			return errSecSuccess;
+
+		return errSecInternalError;
+	}
+
+	if (!S_ISREG(stat_buf.st_mode))
+		return errSecInternalError;
+
+	/*
+	 * Require no public access to key file. If the file is owned by us,
+	 * require mode 0600 or less. If owned by root, require 0640 or less
+	 * to allow read access through our gid, or a supplementary gid that
+	 * allows to read system-wide certificates.
+	 */
+	if ((stat_buf.st_uid == geteuid() && stat_buf.st_mode & (S_IRWXG | S_IRWXO)) ||
+		(stat_buf.st_uid == 0 && stat_buf.st_mode & (S_IWGRP | S_IXGRP | S_IRWXO)))
+		ereport(FATAL,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("private key file \"%s\" has group or world access",
+						name),
+				 errdetail("File must have permissions u=rw (0600) or less "
+						   "if owned by the database user, or permissions "
+						   "u=rw,g=r (0640) or less if owned by root.")));
+
+	if ((fd = fopen(name, "r")) < 0)
+		return errSecInternalError;
+
+	buf = palloc(stat_buf.st_size);
+
+	ret = fread(buf, 1, stat_buf.st_size, fd);
+	fclose(fd);
+
+	if (ret != stat_buf.st_size)
+		return errSecInternalError;
+
+	type = kSecItemTypePrivateKey;
+	format = kSecFormatPEMSequence;
+	path = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+	data = CFDataCreate(NULL, buf, stat_buf.st_size);
+
+	SecItemImportExportKeyParameters params;
+
+	memset(&params, 0, sizeof(params));
+	params.version = SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION;
+
+	/* TODO: set kSecKeyExtractable = false in params */
+
+	status = SecItemImport(data, path, &format, &type, 0, NULL, *keychain, out);
+
+	CFRelease(path);
+	CFRelease(data);
+
+	return status;
+}
+
+/*
+ *	load_certificate
+ *		Extracts a certificate from either a file on the filesystem or
+ *		a keychain.
+ *
+ * The certificate is returned in the "certificate" ArrayRef. If import is
+ * true then the certificate is imported into the backend keychain.
+ *
+ * TODO: figure out better returncodes
+ */
+static OSStatus
+load_certificate(char *name, CFMutableArrayRef *cert_array)
+{
+	SecCertificateRef	certificate;
+	struct stat			stat_buf;
+	int					ret;
+	int					offset;
+	UInt8			   *buf;
+	FILE			   *fd;
+	CFDataRef			data;
+
+	/*
+	 * If the configured ssl_cert_file filename is set to a non-existing
+	 * file, assume it's referencing a Keychain label and attempt to load
+	 * the certificate from the Keychain instead. 
+	 */
+	ret = stat(name, &stat_buf);
+	if (ret != 0 && errno == ENOENT)
+	{
+		/* XXX: Search for the certificate in keychains */
+		return errSecInternalError;
+	}
+	else if (ret == 0 && S_ISREG(stat_buf.st_mode))
+	{
+		if ((fd = fopen(name, "r")) < 0)
+			return errSecInternalError;
+
+		buf = palloc(stat_buf.st_size);
+		ret = fread(buf, 1, stat_buf.st_size, fd);
+		fclose(fd);
+
+		if (ret != stat_buf.st_size)
+			return errSecInternalError;
+
+		/*
+		 * If the file extension isn't .der we assume that the loaded file is
+		 * in pem format. Secure Transport require the individual certificates
+		 * in the pem bundle in der format, so convert each.
+		 *
+		 * TODO: call SecItemImport() with an empty returnvalue and inspect
+		 * the returned format to see if Secure Transport considers it to be
+		 * a PEM file?
+		 */
+		if (pg_strncasecmp(name + (strlen(name) - 4), ".crt", 4) == 0)
+		{
+	CFDataRef			data;
+	SecExternalFormat	format;
+	SecExternalItemType	type;
+	CFStringRef			path;
+
+			type = kSecItemTypeCertificate;
+			format = kSecFormatPEMSequence;
+			path = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+			data = CFDataCreate(NULL, buf, stat_buf.st_size);
+			return SecItemImport(data, path, &format, &type, 0, NULL, NULL, cert_array);
+		}
+		else if (pg_strncasecmp(name + (strlen(name) - 4), ".der", 4) != 0)
+		{
+			offset = 0;
+			while (offset < stat_buf.st_size)
+			{
+				UInt8 *der = pem_to_der((const char *) buf + offset, &offset);
+				if (!der)
+				{
+					if (offset < (stat_buf.st_size - 1))
+						return errSSLBadCert;
+					break;
+				}
+
+				data = CFDataCreate(NULL, der, sizeof(der));
+
+				CSSM_DATA d;
+
+				d.Data = (unsigned char *) &der;
+				d.Length = sizeof(der);
+
+				OSStatus status = SecCertificateCreateFromData(&d, CSSM_CERT_X_509v3, CSSM_CERT_ENCODING_DER, &certificate);
+				if (status != noErr || !certificate)
+					return errSSLBadCert;
+
+				/*
+				certificate = SecCertificateCreateWithData(NULL, data);
+				if (!certificate)
+					return errSSLBadCert;
+				*/
+				CFArrayAppendValue(*cert_array, certificate);
+				CFRelease(data);
+				CFRelease(certificate);
+				pfree(der);
+			}
+		}
+		else
+		{
+			/* Certificate is assumed to be in DER format */
+			data = CFDataCreate(NULL, buf, stat_buf.st_size);
+			certificate = SecCertificateCreateWithData(NULL, data);
+			if (!certificate)
+				return errSSLBadCert;
+			CFArrayAppendValue(*cert_array, certificate);
+			CFRelease(data);
+			CFRelease(certificate);
+		}
+	}
+	else
+		return errSecInternalError;
+
+	return errSecSuccess;
+}
+
+
+/* XXX -------------------------------------------------------------------- */
+
+
+#if 0
+static void
+SSLLoadCertificate(Port *port)
+{
+	OSStatus			status;
 	CFArrayRef			certificate;
 	CFArrayRef			key;
-	SecIdentityRef		identity;
-	SecCertificateRef	cert_ref;
+	SecIdentityRef		identity = NULL;
+	SecCertificateRef	cert_ref = NULL;
 	SecKeyRef			key_ref;
-	SecPolicyRef		policy;
-	SecTrustRef			trust;
+	SecPolicyRef		policy = NULL;
+	SecTrustRef			trust = NULL;
 	SecTrustResultType	trust_status;
 	CSSM_TP_APPLE_EVIDENCE_INFO *status_chain;
 	CFArrayRef			chain;
 	CFMutableArrayRef	chain_copy;
 
-	status = load_certificate(ssl_cert_file, &certificate, false);
+	status = load_certificate(ssl_cert_file, &certificate, true);
 	if (status != noErr)
 	{
 		ereport(FATAL,
@@ -547,7 +1154,7 @@ SSLLoadCertificate(Port *port)
 				 SSLerrmessage(status))));
 	}
 
-	status = load_key(port, ssl_key_file, &key);
+	status = load_key(port, ssl_key_file, &key, true);
 	if (status != noErr)
 	{
 		ereport(FATAL,
@@ -555,26 +1162,35 @@ SSLLoadCertificate(Port *port)
 				 SSLerrmessage(status))));
 	}
 
+	SecKeychainOpen(keychain_path, &keychain);
 	cert_ref = (SecCertificateRef) CFArrayGetValueAtIndex(certificate, 0);
 	key_ref = (SecKeyRef) CFArrayGetValueAtIndex(key, 0);
 	policy = SecPolicyCreateSSL(true, NULL);
-	identity = SecIdentityCreate(NULL, cert_ref, key_ref);
+	status = SecIdentityCreateWithCertificate(keychain, cert_ref, &identity);
+	if (status != noErr)
+		ereport(FATAL,
+				(errmsg("XXX: could not create identity: \"%s\"",
+				 SSLerrmessage(status))));
 
 	status = SecTrustCreateWithCertificates(certificate, policy, &trust);
-	if (status != noErr)
+	if (status != noErr || !trust)
 	{
 		ereport(FATAL,
-				(errmsg("could not create trust for connection: \"%s\"",
-				 SSLerrmessage(status))));
+				(errmsg("XXX: could not create trust for connection: \"%s\"",
+				 (trust ? SSLerrmessage(status) : "trust creation returned NULL"))));
 	}
+	CFRetain(trust);
+	CFRetain(certificate);
+	CFRetain(policy);
 
 	/*
 	 * SecTrustEvaluate searches the user keychain for intermediate
 	 * certificates, in order to use the ssl_ca_file provided we must
 	 * add it to the chain before evaluating.
 	 */
-	if (ssl_loaded_verify_locations && rootcert)
+	if (ssl_loaded_verify_locations)
 	{
+		ereport(LOG, (errmsg("XXX: we have a rootcert")));
 		status = SecTrustSetAnchorCertificates(trust, rootcert);
 		if (status != noErr)
 		{
@@ -646,6 +1262,7 @@ SSLLoadCertificate(Port *port)
 				 SSLerrmessage(status))));
 	}
 }
+#endif
 
 /*
  *	Close SSL connection.
@@ -939,8 +1556,9 @@ be_tls_get_compression(Port *port)
 /*			Internal functions - Certificate Management			*/
 /* ------------------------------------------------------------ */
 
+#if 0
 static OSStatus
-load_key(Port *port, char *filename, CFArrayRef *key)
+load_key(Port *port, char *filename, CFArrayRef *key, bool import)
 {
 	OSStatus	status;
 	struct stat	stat_buf;
@@ -984,7 +1602,7 @@ load_key(Port *port, char *filename, CFArrayRef *key)
 		if (strstr(filename, ".p12") != NULL)
 			status = load_pkcs12_file(filename, key);
 		else
-			status = load_pem_file(filename, stat_buf.st_size, key, false);
+			status = load_pem_file(filename, stat_buf.st_size, key, import);
 	}
 
 	return status;
@@ -1037,7 +1655,9 @@ load_certificate(char *filename, CFArrayRef *certificate, bool import)
 
 	return status;
 }
+#endif
 
+#if 0
 static OSStatus
 load_certificate_keychain(char *cert_name, CFArrayRef *certificate)
 {
@@ -1077,6 +1697,13 @@ load_pkcs12_file(char *p12_fname, CFArrayRef *items)
 
 	return status;
 }
+#endif
+
+#if 0
+static OSStatus
+load_certificate_file(char *fname, int size)
+{
+}
 
 static OSStatus
 load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import)
@@ -1113,7 +1740,13 @@ load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import)
 
 	fclose(cert_fd);
 
-	data_ref = CFDataCreate(NULL, cert_buf, size);
+	char *der_buf = pem_to_der((const char *)cert_buf);
+	if (!der_buf)
+		ereport(FATAL, (errmsg("XXX: Unable to perform DER conversion on \"%s\"", pem_fname)));
+
+
+	//data_ref = CFDataCreate(NULL, cert_buf, size);
+	data_ref = CFDataCreate(NULL, (const UInt8 *)der_buf, size);
 
 	memset(&params, 0, sizeof(SecItemImportExportKeyParameters));
 	params.version = SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION;
@@ -1129,17 +1762,22 @@ load_pem_file(char *pem_fname, int size, CFArrayRef *items, bool import)
 	 * the certificate data was read or the file extension, we pass the full
 	 * filename.
 	 */
-	format = kSecFormatPEMSequence;
-	path = CFStringCreateWithCString(NULL, pem_fname, kCFStringEncodingUTF8);
+	//format = kSecFormatPEMSequence;
+	//path = CFStringCreateWithCString(NULL, pem_fname, kCFStringEncodingUTF8);
+	path = NULL;
+
+	if (import)
+		SecKeychainOpen(keychain_path, &keychain);
 
 	status = SecItemImport(data_ref, path, &format, &item_type, 0 /* flags */,
 						   &params, (import ? keychain : NULL), items);
 
-	CFRelease(path);
-	CFRelease(data_ref);
+	//CFRelease(path);
+	//CFRelease(data_ref);
 
 	return status;
 }
+#endif
 
 /* ------------------------------------------------------------ */
 /*				Internal functions - Translation				*/
@@ -1158,6 +1796,10 @@ SSLerrmessage(OSStatus status)
 {
 	CFStringRef		err_msg;
 	char		   *err_buf;
+
+	/* errSecUnknownFormat */
+	if (status == -25257)
+		return pstrdup(_("The item you are trying to import has an unknown format."));
 
 	err_msg = SecCopyErrorMessageString(status, NULL);
 
@@ -1840,7 +2482,7 @@ cssm_cl_startup(void)
 	return cl_handle;
 }
 
-static void
+static int
 import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl)
 {
 	CSSM_RETURN						status;
@@ -1865,8 +2507,7 @@ import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl)
 	/* Extract CRL */
 	status = CSSM_CL_CrlGetFirstFieldValue(cl, crl, &CSSMOID_X509V2CRLSignedCrlCStruct, &result, &num, &crlstruct);
 	if (status != CSSM_OK || crlstruct == NULL || crlstruct->Length != sizeof(CSSM_X509_SIGNED_CRL))
-		ereport(FATAL,
-			(errmsg("unable to read CRL")));
+		return -1; /* ereport(FATAL, (errmsg("unable to read CRL"))); */
 	CSSM_CL_CrlAbortQuery(cl, result);
 
 	cert_list = &((const CSSM_X509_SIGNED_CRL *) crlstruct->Data)->tbsCertList;
@@ -1883,8 +2524,7 @@ import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl)
 				type = CSSM_CRL_TYPE_X_509v2;
 				break;
 			default:
-				ereport(FATAL,
-						(errmsg("incorrect CRL version detected")));
+				return -1; /* ereport(FATAL, (errmsg("incorrect CRL version detected"))); */
 				break;
 		}
 	}
@@ -1995,8 +2635,8 @@ insert:
 	status = CSSM_DL_DataInsert(dldb, CSSM_DL_DB_RECORD_X509_CRL, &rec_attr, crl, &rec_ptr);
 	if (status == CSSMERR_DL_INVALID_RECORDTYPE && !upgraded)
 	{
-		if (ssl_certstorage)
-			ereport(FATAL, (errmsg("CRL schema missing from Keychain")));
+		if (ssl_certstorage[0])
+			return -1; /* ereport(FATAL, (errmsg("CRL schema missing from Keychain"))); */
 
 		status = CSSM_DL_CreateRelation(dldb,
 							   CSSM_DL_DB_RECORD_X509_CRL,
@@ -2006,13 +2646,13 @@ insert:
 							   sizeof(x509_crl_index) / sizeof(x509_crl_index[0]),
 							   &x509_crl_index[0]);
 		if (status != CSSM_OK)
-			ereport(FATAL, (errmsg("adding CRL schema to Keychain failed")));
+			return -1; /* ereport(FATAL, (errmsg("adding CRL schema to Keychain failed"))); */
 		upgraded = true;
 		goto insert;
 	}
 	else if (status == CSSMERR_DL_INVALID_UNIQUE_INDEX_DATA)
 	{
-		ereport(LOG, (errmsg("CRL already added to Keychain")));
+		return 0; /* ereport(LOG, (errmsg("CRL already added to Keychain"))); */
 	}
 	else if (status != CSSM_OK)
 	{
@@ -2022,8 +2662,60 @@ insert:
 		 * errormessage. While this is the only consumer, it would still
 		 * be good to cover at least the ones that can be expected. TODO
 		 */
-		ereport(FATAL, (errmsg("adding CRL schema to Keychain failed")));
+		return -1; /* ereport(FATAL, (errmsg("adding CRL schema to Keychain failed"))); */
 	}
 
 	CSSM_DL_FreeUniqueRecord(dldb, rec_ptr);
+
+	return 0;
 }
+
+static UInt8 *
+pem_to_der(const char *in, int *offset)
+{
+  char *sep_start, *sep_end, *cert_start, *cert_end;
+  size_t i, j, err;
+  size_t len;
+  unsigned char *b64;
+
+  /* Jump through the separators at the beginning of the certificate. */
+  sep_start = strstr(in, "-----");
+  if(sep_start == NULL)
+    return NULL;
+  cert_start = strstr(sep_start + 1, "-----");
+  if(cert_start == NULL)
+    return NULL;
+
+  cert_start += 5;
+
+  /* Find separator after the end of the certificate. */
+  cert_end = strstr(cert_start, "-----");
+  if(cert_end == NULL)
+    return NULL;
+
+  sep_end = strstr(cert_end + 1, "-----");
+  if(sep_end == NULL)
+    return NULL;
+  sep_end += 5;
+
+  len = cert_end - cert_start;
+  b64 = palloc(len + 1);
+  if(!b64)
+    return NULL;
+
+  /* Create base64 string without linefeeds. */
+  for(i = 0, j = 0; i < len; i++) {
+    if(cert_start[i] != '\r' && cert_start[i] != '\n')
+      b64[j++] = cert_start[i];
+  }
+  b64[j] = '\0';
+
+	UInt8 *out = palloc(len);	
+
+  err = pg_b64_decode((const char *)b64, len, (char *) out);
+  pfree(b64);
+
+  *offset += sep_end - in;
+  return out;
+}
+
