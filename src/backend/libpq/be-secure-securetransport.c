@@ -71,15 +71,13 @@
  */
 typedef struct SSL_Context
 {
-	/* Keychain */
-	char				keychain_path[MAXPGPATH];	/* Path of Keychain file */
-	SecKeychainRef		keychain;					/* Handle to opened Keychain */
-	SecKeychainRef		default_keychain;			/* Handle to default Keychain */
-	
 	/* Certificates */
-	CFMutableArrayRef	root_certificates;
-	CFMutableArrayRef	certificates;
-	CFMutableArrayRef	keys;
+	CFArrayRef			root_certificates;
+	CFArrayRef			certificates;
+	CFArrayRef			keys;
+	CFArrayRef			crl;
+
+	CFMutableArrayRef	chain;
 } SSL_Context;
 
 static SSL_Context *ssl_context;
@@ -102,50 +100,16 @@ extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator, SecCertificate
  
 static OSStatus SSLLoadCertificate(SSL_Context **context, bool isServerStart);
 static void SSL_context_free(SSL_Context *c);
-static OSStatus load_certificate(char *name, SecKeychainRef *keychain, CFMutableArrayRef *cert_array);
-static OSStatus load_key(char *name, SecKeychainRef *keychain, CFArrayRef *out);
+static OSStatus load_certificate(char *name, CFArrayRef *cert_array);
+static OSStatus load_key(char *name, CFArrayRef *out);
 
 static char * SSLerrmessage(OSStatus status);
 static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
 static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
 static char * SSLerrmessage(OSStatus status);
 static const char * SSLciphername(SSLCipherSuite cipher);
-static bool make_db_attribute(uint32_t att_type, CSSM_DB_ATTRIBUTE_DATA *att, void *data);
-static OSStatus import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl);
-static CSSM_CL_HANDLE cssm_cl_startup(void);
 
 static UInt8 *pem_to_der(const char *in, int *offset);
-/*
- * Time can be in either rfc2459 UtcTime or GeneralizedTime for CRL entries,
- * but we need to insert in GeneralizedTime with the 'Z'. Copy the source time
- * into the destination and fix up the format in the process.
- * https://tools.ietf.org/html/rfc2459#section-4.1.2.5.2
- */
-#define UTCTIME			13	/* YYMMDDHHMMSSZ */
-#define GENERALIZEDTIME	15	/* YYYYMMDDHHMMSSZ */
-#define STRLENTIME		15	/* YYYYMMDDHHMMSS\0 */
-#define PKIX_TIME(s, t, l) \
-	do { \
-		if (l == UTCTIME) \
-		{ \
-			memcpy(t + (STRLENTIME - UTCTIME), s, l - 1); \
-			if (t[2] <= '5') \
-			{ \
-				t[0] = '2'; t[1] = '0'; \
-			} \
-			else \
-			{ \
-				t[0] = '1'; t[1] = '9'; \
-			} \
-		} \
-		else if (l == GENERALIZEDTIME) \
-			memcpy(t, s, l - 1); \
-		else \
-			memcpy(t, s, l); \
-	} while (0)
-
-#define KEYCHAIN_DIR "ssl_keychain"
-
 
 /* ------------------------------------------------------------ */
 /*					Hardcoded DH parameters						*/
@@ -190,19 +154,9 @@ static const uint8_t file_dh2048[] =
 int
 be_tls_init(bool isServerStart)
 {
-	CSSM_DL_DB_HANDLE	dldb_handle = {0,0};
-	CSSM_CL_HANDLE      cl_handle;
 	OSStatus			status;
-	FILE			   *fp;
-	int					kcflags;
-	//SecKeychainRef		keychain;
-	//SecKeychainRef		default_keychain;
-	SecKeychainStatus	kcstatus;
 	SSL_Context		   *context;
-	CSSM_DATA			crldata;
-	UInt8			   *crl = NULL;
-	int					result;
-	int					fp_size;
+	SecIdentityRef		identity;
 
 	memset(internal_err, '\0', sizeof(internal_err));
 
@@ -216,72 +170,43 @@ be_tls_init(bool isServerStart)
 
 	context = palloc(sizeof(SSL_Context));
 
-	/*---
-	 * Keychains are internally backed by sqlite3 databases which in turn
-	 * doesn't allow access across fork()s. https://sqlite.org/faq.html#q6 :
-	 * 
-	 *		"Under Unix, you should not carry an open SQLite database across
-	 *		 a fork() system call into the child process."
-	 *
-	 * Usage across fork() will cause the sqlite3 initialization to segfault
-	 * so we must make our Keychain per-process by adding MyProcPid to the
-	 * Keychain filename. Since we only really need the Keychain for setting
-	 * up the identity for opening the connection this limitation is fine.
-	 *
-	 * The InitialAccess parameter is not implemented and ignored in the API,
-	 * passing NULL is the documented correct behavior. Since we are supplying
-	 * a password the promptUser variable is FALSE to indicate that we
-	 * don't want to present a modal dialog to the user.
-	 *---
-	 */
-	snprintf(context->keychain_path, MAXPGPATH, "%s/%s/pg_%d_%ld.keychain",
-			 DataDir, KEYCHAIN_DIR, MyProcPid, time(NULL));
-	status = SecKeychainCreate(context->keychain_path, 10,
-							   "1234567890", FALSE /* promptUser */,
-							   NULL /* InitialAccess */, &context->keychain);
-	if (status != errSecSuccess)
-	{
-		ereport(isServerStart ? FATAL : LOG,
-				(errmsg("could not create Keychain file: \"%s\"",
-				 SSLerrmessage(status))));
-		goto error;
-	}
-
-	/*
-	 * Test the status of the newly created Keychain just to ensure that we 
-	 * can access it properly.
-	 */
-	kcflags = (kSecWritePermStatus | kSecReadPermStatus | kSecUnlockStateStatus);
-	status = SecKeychainGetStatus(context->keychain, &kcstatus);
-	if (status != noErr || !(kcstatus & kcflags))
-	{
-		ereport(isServerStart ? FATAL : LOG,
-				(errmsg("incorrect status of Keychain file: \"%s\"",
-				status != noErr ? SSLerrmessage(status) : "incorrect permissions")));
-		goto error;
-	}
-
-	/*
-	 * We add the user default Keychain to our searchlist as well, but in case
-	 * we can't we don't treat it as an error
-	 */
-	status = SecKeychainCopyDefault(&context->default_keychain);
-	if (status != noErr)
-		ereport(LOG,
-				(errmsg("could reference default keychain: \"%s\"",
-				 SSLerrmessage(status))));
-
 	status = SSLLoadCertificate(&context, isServerStart);
 	if (status != noErr)
 		goto error;
+
+return 0;
+	/*
+	 * We now have a certificate and either a private key, or a search path
+	 * which should contain it.
+	 */
+	identity = SecIdentityCreate(NULL, (SecCertificateRef) CFArrayGetValueAtIndex(context->certificates, 0),
+								 (SecKeyRef) CFArrayGetValueAtIndex(context->keys, 0));
+	if (identity == NULL)
+	{
+		ereport(isServerStart ? FATAL : LOG,
+				(errmsg("could not create identity: \"%s\"",
+				 SSLerrmessage(status))));
+	}
+	CFRetain(identity);
+
+	context->chain = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+
+	/*
+	 * SSLSetCertificates set the certificate(s) to use for the connection.
+	 * The first element in the passed array is required to be the identity
+	 * with elements 1..n being certificates.
+	 */
+	CFArrayInsertValueAtIndex(context->chain, 0, identity);
+
+	CFArrayAppendArray(context->chain, context->certificates,
+					   CFRangeMake(0, CFArrayGetCount(context->certificates)));
 
 	/*
 	 * Load the Certificate Authority if configured
 	 */
 	if (ssl_ca_file[0])
 	{
-		context->root_certificates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
-		status = load_certificate(ssl_ca_file, &context->keychain, &context->root_certificates);
+		status = load_certificate(ssl_ca_file, &context->root_certificates);
 		if (status != noErr)
 		{
 			ereport(isServerStart ? FATAL : LOG,
@@ -289,8 +214,8 @@ be_tls_init(bool isServerStart)
 					 status, SSLerrmessage(status))));
 			goto error;
 		}
-	
-		CFArrayAppendArray(context->certificates, context->root_certificates,
+		
+		CFArrayAppendArray(context->chain, context->root_certificates,
 						   CFRangeMake(0, CFArrayGetCount(context->root_certificates)));
 	}
 
@@ -299,58 +224,9 @@ be_tls_init(bool isServerStart)
 	 */
 	if (ssl_crl_file[0])
 	{
-		status = SecKeychainGetDLDBHandle(context->keychain, &dldb_handle);
-		if (status != errSecSuccess)
-		{
-			ereport(isServerStart ? FATAL : LOG,
-					(errmsg("could not get DLDB handle for Keychain: \"%s\"",
-					 SSLerrmessage(status))));
-			goto error;
-		}
-
-		cl_handle = cssm_cl_startup();
-		if (!cl_handle)
-		{
-			ereport(isServerStart ? FATAL : LOG,
-					(errmsg("could not get CSSM CL handle")));
-			goto error;
-		}
-
-		if ((fp = fopen(ssl_crl_file, "r")) == NULL)
-		{
-			ereport(isServerStart ? FATAL : LOG,
-					(errmsg("unable to read CRL file \"%s\": %m",
-					 ssl_crl_file)));
-			goto error;
-		}
-
-		fseek(fp, 0, SEEK_END);
-		fp_size = ftell(fp);
-		crl = palloc(fp_size);
-		rewind(fp);
-
-		if ((result = fread(crl, fp_size, 1, fp)) != 1)
-		{
-			ereport(isServerStart ? FATAL : LOG,
-					(errmsg("unable to read CRL file \"%s\": %m",
-					 ssl_crl_file)));
-			goto error;
-		}
-		
-		crldata.Data = crl;
-		crldata.Length = fp_size;
-
-		status = import_crl(dldb_handle, cl_handle, &crldata);
-		if (status != noErr)
-		{
-			ereport(isServerStart ? FATAL : LOG,
-					(errmsg("import CRL failed: \"%s\"", SSLerrmessage(status))));
-			goto error;
-		}
-			
-		pfree(crl);
-		CSSM_ModuleDetach(cl_handle);
-		CSSM_ModuleUnload(&gGuidAppleX509CL, NULL, NULL);
+		ereport(isServerStart ? FATAL : LOG,
+				(errmsg("CRL files not supported yet")));
+		goto error;
 	}
 
 	/*
@@ -369,8 +245,6 @@ be_tls_init(bool isServerStart)
 
 error:
 
-	if (crl)
-		pfree(crl);
 	SSL_context_free(context);
 	return -1;
 }
@@ -388,18 +262,8 @@ SSL_context_free(SSL_Context *c)
 void
 be_tls_destroy(void)
 {
-	struct stat stat_buf;
-	SecKeychainRef keychain;
-
 	if (!ssl_context)
 		return;
-
-	if (stat(ssl_context->keychain_path, &stat_buf) == 0)
-	{
-		SecKeychainOpen(ssl_context->keychain_path, &keychain);
-		SecKeychainDelete(keychain);
-		CFRelease(keychain);
-	}
 
 	SSL_context_free(ssl_context);
 	ssl_loaded_verify_locations = false;
@@ -415,7 +279,6 @@ be_tls_open_server(Port *port)
 	OSStatus			status;
 	SecTrustRef			trust;
 	SecTrustResultType	trust_eval = 0;
-	//SecKeychainRef		keychain;
 
 	Assert(!port->ssl);
 
@@ -446,7 +309,7 @@ be_tls_open_server(Port *port)
 	 */
 	SSLSetProtocolVersionEnabled((SSLContextRef) port->ssl, kTLSProtocol12, true);
 
-	status = SSLSetCertificate((SSLContextRef) port->ssl, ssl_context->certificates);
+	status = SSLSetCertificate((SSLContextRef) port->ssl, (CFArrayRef) ssl_context->chain);
 	if (status != noErr)
 	{
 		ereport(FATAL,
@@ -511,9 +374,6 @@ be_tls_open_server(Port *port)
 			if (ssl_loaded_verify_locations)
 			{
 				ereport(LOG, (errmsg("XXX: in errSSLPeerAuthCompleted 2")));
-				//SecKeychainOpen(ssl_context->keychain_path, &keychain);
-				/* TODO: Add trust to default keychain ? */
-				SecTrustSetKeychains(trust, ssl_context->keychain);
 				status = SecTrustSetAnchorCertificates(trust, ssl_context->root_certificates);
 				if (status != noErr)
 				{
@@ -624,7 +484,6 @@ static OSStatus
 SSLLoadCertificate(SSL_Context **context, bool isServerStart)
 {
 	OSStatus			status;
-	SecIdentityRef		identity;
 	SSL_Context		   *c = *context;
 
 	/*
@@ -636,8 +495,7 @@ SSLLoadCertificate(SSL_Context **context, bool isServerStart)
 	 * key files separately and creating the identity from that. A future TODO
 	 * is to support reading PKCS12 files directly.
 	 */
-	c->certificates = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
-	status = load_certificate(ssl_cert_file, &c->keychain, &c->certificates);
+	status = load_certificate(ssl_cert_file, &c->certificates);
 	if (status != noErr)
 	{
 		if (status == errSecDuplicateItem)
@@ -657,37 +515,13 @@ SSLLoadCertificate(SSL_Context **context, bool isServerStart)
 		return errSecInternalError;
 	}
 
-	/*
-	 * When creating the identity, the private key cannot be referenced in
-	 * memory, it needs to be in a keychain.
-	 */
-	c->keys = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
-	status = load_key(ssl_key_file, &c->keychain, (CFArrayRef *) &c->keys);
+	status = load_key(ssl_key_file, &c->keys);
 	if (status != noErr)
 	{
 		ereport(isServerStart ? FATAL : LOG,
 				(errmsg("key load failed: \"%s\"", SSLerrmessage(status))));
 		return status;
 	}
-
-	/*
-	 * We now have a certificate and either a private key, or a search path
-	 * which should contain it. TODO: create identity based on the key in the
-	 * keychain with SecIdentityCreateWithCertificate()
-	 */
-	identity = SecIdentityCreate(NULL, (SecCertificateRef) CFArrayGetValueAtIndex(c->certificates, 0),
-								 (SecKeyRef) CFArrayGetValueAtIndex(c->keys, 0));
-	if (identity == NULL)
-		ereport(FATAL,
-				(errmsg("could not create identity: \"%s\"",
-				 SSLerrmessage(status))));
-
-	/*
-	 * SSLSetCertificates set the certificate(s) to use for the connection.
-	 * The first element in the passed array is required to be the identity
-	 * with elements 1..n being certificates.
-	 */
-	CFArrayInsertValueAtIndex(c->certificates, 0, identity);
 
 	return noErr;
 }
@@ -697,7 +531,7 @@ SSLLoadCertificate(SSL_Context **context, bool isServerStart)
  * TODO: figure out better returncodes
  */
 static OSStatus
-load_key(char *name, SecKeychainRef *keychain, CFArrayRef *out)
+load_key(char *name, CFArrayRef *out)
 {
 	OSStatus			status;
 	struct stat			stat_buf;
@@ -765,13 +599,12 @@ load_key(char *name, SecKeychainRef *keychain, CFArrayRef *out)
 	data = CFDataCreate(NULL, buf, stat_buf.st_size);
 
 	SecItemImportExportKeyParameters params;
-
-	memset(&params, 0, sizeof(params));
+	memset(&params, 0, sizeof(SecItemImportExportKeyParameters));
 	params.version = SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION;
+	/* Set OS default access control on the imported key */
+	params.flags = kSecKeyNoAccessControl;
 
-	/* TODO: set kSecKeyExtractable = false in params */
-
-	status = SecItemImport(data, path, &format, &type, 0, NULL, *keychain, out);
+	status = SecItemImport(data, path, &format, &type, 0, &params, NULL, out);
 
 	CFRelease(path);
 	CFRelease(data);
@@ -787,7 +620,7 @@ load_key(char *name, SecKeychainRef *keychain, CFArrayRef *out)
  * TODO: figure out better returncodes
  */
 static OSStatus
-load_certificate(char *name, SecKeychainRef *keychain, CFMutableArrayRef *cert_array)
+load_certificate(char *name, CFArrayRef *cert_array)
 {
 	SecCertificateRef	certificate;
 	struct stat			stat_buf;
@@ -824,25 +657,8 @@ load_certificate(char *name, SecKeychainRef *keychain, CFMutableArrayRef *cert_a
 		 * If the file extension isn't .der we assume that the loaded file is
 		 * in pem format. Secure Transport require the individual certificates
 		 * in the pem bundle in der format, so convert each.
-		 *
-		 * TODO: call SecItemImport() with an empty returnvalue and inspect
-		 * the returned format to see if Secure Transport considers it to be
-		 * a PEM file?
 		 */
-		if (pg_strncasecmp(name + (strlen(name) - 4), ".crt", 4) == 0)
-		{
-			CFDataRef			data;
-			SecExternalFormat	format;
-			SecExternalItemType	type;
-			CFStringRef			path;
-
-			type = kSecItemTypeCertificate;
-			format = kSecFormatPEMSequence;
-			path = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
-			data = CFDataCreate(NULL, buf, stat_buf.st_size);
-			return SecItemImport(data, path, &format, &type, 0, NULL, *keychain, (CFArrayRef *) cert_array);
-		}
-		else if (pg_strncasecmp(name + (strlen(name) - 4), ".der", 4) != 0)
+		if (pg_strncasecmp(name + (strlen(name) - 4), ".der", 4) != 0)
 		{
 			offset = 0;
 			while (offset < stat_buf.st_size)
@@ -871,7 +687,7 @@ load_certificate(char *name, SecKeychainRef *keychain, CFMutableArrayRef *cert_a
 				if (!certificate)
 					return errSSLBadCert;
 				*/
-				CFArrayAppendValue(*cert_array, certificate);
+				*cert_array = CFArrayCreate(NULL, (const void **) &certificate, 1, &kCFTypeArrayCallBacks);
 				CFRelease(data);
 				CFRelease(certificate);
 				pfree(der);
@@ -884,7 +700,7 @@ load_certificate(char *name, SecKeychainRef *keychain, CFMutableArrayRef *cert_a
 			certificate = SecCertificateCreateWithData(NULL, data);
 			if (!certificate)
 				return errSSLBadCert;
-			CFArrayAppendValue(*cert_array, certificate);
+			*cert_array = CFArrayCreate(NULL, (const void **) &certificate, 1, &kCFTypeArrayCallBacks);
 			CFRelease(data);
 			CFRelease(certificate);
 		}
@@ -1754,362 +1570,6 @@ SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 
 	//ereport(NOTICE, (errmsg("SSLSocketWrite wrote: %d bytes", res)));
 	return status;
-}
-
-/* ------------------------------------------------------------ */
-/*					Internal functions - CRL					*/
-/* ------------------------------------------------------------ */
-
-/*
- * There are no Secure Transport APIs for working with Certificate Revocation
- * Lists for some reason. Instead, we need to implement the CRL management
- * using the underlying CDSA framework. This makes the implementation a lot
- * longer and more cumbersome, but not supporting CRL is a worse tradeoff so
- * below is the code required to load CRL files into a Keychain.
- */
-
-/*
- * For some reason these enums are not in any of Apples public headerfiles
- * so we need to include them here.
- */
-enum
-{
-	kSecCrlEncodingItemAttr = 'cren',
-	kSecCrlThisUpdateItemAttr = 'crtu',
-	kSecCrlNextUpdateItemAttr = 'crnu',
-};
-
-/*
- * The CRL schema and required indexes for the CSSM database in case we need to
- * create that in our Keychain. Keychain version 2.0 files are not created with
- * the schema, it is only created on the first insertion, and since insert the
- * CRL here we also need to be able to create it.
- */
-static const CSSM_DB_SCHEMA_ATTRIBUTE_INFO x509_crl_schema[] =
-{
-	{kSecCrlType, "CrlType", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
-	{kSecCrlEncodingItemAttr, "CrlEncoding", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
-	{kSecLabelItemAttr, "PrintName", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{kSecIssuerItemAttr, "Issuer", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{kSecCrlThisUpdateItemAttr,	"ThisUpdate", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{kSecCrlNextUpdateItemAttr,	"NextUpdate", {0, NULL}, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-};
-
-static const CSSM_DB_SCHEMA_INDEX_INFO x509_crl_index[] =
-{
-    {kSecCrlType, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
-    {kSecIssuerItemAttr, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
-    {kSecCrlThisUpdateItemAttr, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
-    {kSecCrlNextUpdateItemAttr, 0, CSSM_DB_INDEX_UNIQUE, CSSM_DB_INDEX_ON_ATTRIBUTE},
-};
-
-struct attribute_data_entry
-{
-	uint32_t						type;
-	CSSM_DB_ATTRIBUTE_NAME_FORMAT	name_format;
-	char						   *name;
-	uint32							values;
-	CSSM_DB_ATTRIBUTE_FORMAT		format;
-};
-
-static struct attribute_data_entry cssm_db_attribute_data_entries[] =
-{
-	{kSecCrlType, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "CrlType", 1, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
-	{kSecCrlEncodingItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "CrlEncoding", 1, CSSM_DB_ATTRIBUTE_FORMAT_UINT32},
-	{kSecLabelItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "PrintName", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{kSecIssuerItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "Issuer", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{kSecCrlThisUpdateItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "ThisUpdate", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{kSecCrlNextUpdateItemAttr, CSSM_DB_ATTRIBUTE_NAME_AS_STRING, (char *) "NextUpdate", 1, CSSM_DB_ATTRIBUTE_FORMAT_BLOB},
-	{0},
-};
-
-/*
- * make_db_attribute
- *		Populate a CSSM_DB_ATTRIBUTE_DATA structure
- *
- * Helper function to populate the required strcts in order to avoid repetetive
- * boilerplate in import_crl()
- */
-static bool
-make_db_attribute(uint32_t att_type, CSSM_DB_ATTRIBUTE_DATA *att, void *data)
-{
-	struct attribute_data_entry *i = cssm_db_attribute_data_entries;
-
-	while (i->type && i->type != att_type)
-		i++;
-
-	if (!i->type)
-		return false;
-
-	att->Info.AttributeNameFormat = i->name_format;
-	att->Info.Label.AttributeName = strdup(i->name);
-	att->Info.AttributeFormat = i->format;
-	att->NumberOfValues = i->values;
-	att->Value = data;
-
-	return true;
-}
-
-static void *
-_malloc(CSSM_SIZE size, void *ref)
-{
-	return malloc(size);
-}
-
-static void
-_free(void *ptr, void *ref)
-{
-	free(ptr);
-}
-
-static void *
-_realloc(void *ptr, CSSM_SIZE size, void *ref)
-{
-	return realloc(ptr, size);
-}
-
-static void *
-_calloc(uint32 num, CSSM_SIZE size, void *ref)
-{
-	return calloc(num, size);
-}
-
-static CSSM_API_MEMORY_FUNCS mem_func = {
-	_malloc,
-	_free,
-	_realloc,
-	_calloc,
-	NULL
-};
-
-static CSSM_CL_HANDLE
-cssm_cl_startup(void)
-{
-	CSSM_VERSION	version = {2,0};
-	CSSM_GUID		guid = {0x1234, 0,0, {1,2,3,4,5,6,7,0}}; /* TODO: explain dummy guid */
-	CSSM_PVC_MODE	policy = CSSM_PVC_NONE;
-	CSSM_RETURN		status;
-	CSSM_CL_HANDLE	cl_handle;
-
-	status = CSSM_Init(&version, CSSM_PRIVILEGE_SCOPE_NONE, &guid, CSSM_KEY_HIERARCHY_NONE, &policy, NULL);
-	if (status == CSSM_OK)
-	{
-		status = CSSM_ModuleLoad(&gGuidAppleX509CL, CSSM_KEY_HIERARCHY_NONE, NULL, NULL);
-		if (status == CSSM_OK)
-		{
-			status = CSSM_ModuleAttach(&gGuidAppleX509CL, &version, &mem_func, 0,
-									   CSSM_SERVICE_CL, 0, CSSM_KEY_HIERARCHY_NONE,
-									   NULL, 0, NULL, &cl_handle);
-		}
-	}
-
-	if (status != CSSM_OK)
-		return 0;
-
-	return cl_handle;
-}
-
-/*
- * import_crl
- *		Import a CRL list into a Keychain
- *
- * In case of error, err_msg will be populated with a palloc'd human readable
- * error message. The caller is responsible for freeing.
- */
-static OSStatus
-import_crl(CSSM_DL_DB_HANDLE dldb, CSSM_CL_HANDLE cl, CSSM_DATA *crl)
-{
-	CSSM_RETURN						status;
-	CSSM_DATA_PTR					issuer;
-	CSSM_DATA_PTR					crlstruct;
-	CSSM_HANDLE						result;
-	uint32							num;
-	CSSM_CRL_TYPE					type;
-	CSSM_DB_ATTRIBUTE_DATA			att[9];	/* TODO 9 == MAX_CRL_ATTRS */
-	CSSM_DB_RECORD_ATTRIBUTE_DATA	rec_attr;
-	CSSM_DB_UNIQUE_RECORD_PTR		rec_ptr;
-	CSSM_DATA						type_data;
-	char							thisupdate[STRLENTIME];
-	char							nextupdate[STRLENTIME];
-	CSSM_DATA						thisupdate_data;
-	CSSM_DATA						nextupdate_data;
-	CSSM_DATA						printname_data;
-	char						   *printname;
-	const CSSM_X509_TBS_CERTLIST   *cert_list;
-	bool							found = false;
-
-	/* Extract CRL */
-	status = CSSM_CL_CrlGetFirstFieldValue(cl, crl, &CSSMOID_X509V2CRLSignedCrlCStruct, &result, &num, &crlstruct);
-	if (status != CSSM_OK || crlstruct == NULL || crlstruct->Length != sizeof(CSSM_X509_SIGNED_CRL))
-	{
-		strlcpy(internal_err, _("unable to read CRL"), sizeof(internal_err));
-		return errSecInternalError;
-	}
-	CSSM_CL_CrlAbortQuery(cl, result);
-
-	cert_list = &((const CSSM_X509_SIGNED_CRL *) crlstruct->Data)->tbsCertList;
-	if (cert_list->version.Length == 0)
-		type = CSSM_CRL_TYPE_X_509v1;
-	else
-	{
-		switch(cert_list->version.Data[cert_list->version.Length - 1])
-		{
-			case 0:
-				type = CSSM_CRL_TYPE_X_509v1;
-				break;
-			case 1:
-				type = CSSM_CRL_TYPE_X_509v2;
-				break;
-			default:
-				strlcpy(internal_err, _("incorrect CRL version detected"), sizeof(internal_err));
-				return errSecInternalError;
-				break; /* not reached */
-		}
-	}
-
-	/* CRL Type */
-	type_data.Data = (uint8 *) &type;
-	type_data.Length = sizeof(CSSM_CRL_TYPE);
-	make_db_attribute(kSecCrlType, &att[0], &type_data);
-
-	/* CRL Encoding */
-	CSSM_CRL_ENCODING encoding = CSSM_CRL_ENCODING_DER;
-	CSSM_DATA encoding_data;
-	encoding_data.Data = (uint8 *) &encoding;
-	encoding_data.Length = sizeof(CSSM_CRL_ENCODING);
-	make_db_attribute(kSecCrlEncodingItemAttr, &att[1], &encoding_data);
-
-	/*
-	 * CRL Printname
-	 *
-	 * CSSM_X509_NAME contains a pointer to a CSSM_X509_RDN struct and the
-	 * number of RDNs in the struct. CSSM_X509_RDN in turn contains a set
-	 * of key/value pairs making up the x509 distinguished name structure.
-	 * The key is a CSSM_OID which consist of a pointer to Data and a Length
-	 * (since Data can be (is?) non-NULL terminated). CSSM_OID is a typedef
-	 * of CSSM_DATA.
-	 *
-	 * Loop over the pairs in the RDNs in order to find the Common Name to
-	 * use for the Issuer.
-	 */
-	for (int i = 0; i < cert_list->issuer.numberOfRDNs && !found; i++)
-	{
-		const CSSM_X509_RDN rdn = cert_list->issuer.RelativeDistinguishedName[i];
-		for (int j = 0; j < rdn.numberOfPairs && !found; j++)
-		{
-			const CSSM_X509_TYPE_VALUE_PAIR kv = rdn.AttributeTypeAndValue[j];
-
-			if ((kv.type.Length == CSSMOID_CommonName.Length) &&
-				(memcmp(kv.type.Data, CSSMOID_CommonName.Data, kv.type.Length) == 0))
-			{
-				printname_data = kv.value;
-				found = true;
-			}
-		}
-	}
-
-	/*
-	 * If we cannot find a Common Name, we need to invent something as the
-	 * PrintName, set a dummy "PostgreSQL CRL" for now.
-	 */
-	if (!found)
-	{
-		printname = strdup("PostgreSQL CRL");
-		printname_data.Data = (uint8 *) printname;
-		printname_data.Length = strlen(printname);
-	}
-	make_db_attribute(kSecLabelItemAttr, &att[2], &printname_data);
-
-	/* CRL Issuer */
-	status = CSSM_CL_CrlGetFirstFieldValue(cl, crl, &CSSMOID_X509V1IssuerName, &result, &num, &issuer);
-	if (status != CSSM_OK)
-	{
-		strlcpy(internal_err, _("unable to read CRL"), sizeof(internal_err));
-		return errSecInternalError;
-	}
-	CSSM_CL_CrlAbortQuery(cl, result);
-	make_db_attribute(kSecIssuerItemAttr, &att[3], issuer);
-
-	/* CRL ThisUpdate */
-	PKIX_TIME(cert_list->thisUpdate.time.Data, thisupdate, cert_list->thisUpdate.time.Length);
-	thisupdate_data.Data = (uint8 *) thisupdate;
-	thisupdate_data.Length = STRLENTIME - 1;
-	make_db_attribute(kSecCrlThisUpdateItemAttr, &att[4], &thisupdate_data);
-
-	/* CRL NextUpdate */
-	if (cert_list->nextUpdate.time.Data == NULL)
-	{
-		/*
-		 * NextUpdate is missing from the cert entry in the CRL, set to the
-		 * synthetic value of ThisUpdate + 1000 years.
-		 */
-		memcpy(nextupdate, thisupdate, STRLENTIME);
-		nextupdate[0]++;
-	}
-	else
-		PKIX_TIME(cert_list->nextUpdate.time.Data, nextupdate, cert_list->nextUpdate.time.Length);
-
-	nextupdate_data.Data = (uint8 *) nextupdate;
-	nextupdate_data.Length = STRLENTIME - 1;
-	make_db_attribute(kSecCrlNextUpdateItemAttr, &att[5], &nextupdate_data);
-
-	rec_attr.DataRecordType = CSSM_DL_DB_RECORD_X509_CRL;
-	rec_attr.SemanticInformation = 0;
-	rec_attr.NumberOfAttributes = 6;
-	rec_attr.AttributeData = att;
-
-	bool upgraded = false;
-
-insert:
-
-	/*
-	 * Insert the CRL into the Keychain as referred to by the DLDB handle. If
-	 * the insertion fails with INVALID_RECORDTYPE, that means that the DLDB
-	 * database schema doesn't yet contain the CRL table. In that case we must
-	 * create the schema before retrying to add the CRL.
-	 */
-	status = CSSM_DL_DataInsert(dldb, CSSM_DL_DB_RECORD_X509_CRL, &rec_attr, crl, &rec_ptr);
-	if (status == CSSMERR_DL_INVALID_RECORDTYPE && !upgraded)
-	{
-		status = CSSM_DL_CreateRelation(dldb,
-							   CSSM_DL_DB_RECORD_X509_CRL,
-							   "CSSM_DL_DB_RECORD_X509_CRL",
-							   sizeof(x509_crl_schema) / sizeof(x509_crl_schema[0]),
-							   &x509_crl_schema[0],
-							   sizeof(x509_crl_index) / sizeof(x509_crl_index[0]),
-							   &x509_crl_index[0]);
-		if (status != CSSM_OK)
-		{
-			strlcpy(internal_err, _("adding CRL schema to Keychain failed"), sizeof(internal_err));
-			return errSecInternalError;
-		}
-		upgraded = true;
-		goto insert;
-	}
-	else if (status == CSSMERR_DL_INVALID_UNIQUE_INDEX_DATA)
-	{
-		/*
-		 * This is not really an error, but we might as well provide a message
-		 * for LOG as it shouldn't really happen with the current coding
-		 */
-		strlcpy(internal_err, _("CRL already present in Keychain"), sizeof(internal_err));
-		return noErr;
-	}
-	else if (status != CSSM_OK)
-	{
-		/*
-		 * We currently don't have support for translating CSSMERR_DL_ status
-		 * codes to human readable text for the err_msg. While this is the only
-		 * consumer, it would still be good to cover at least the ones that can
-		 * be expected. This is a TODO for future work.
-		 */
-		strlcpy(internal_err, _("adding CRL to Keychain failed"), sizeof(internal_err));
-		return errSecInternalError;
-	}
-
-	CSSM_DL_FreeUniqueRecord(dldb, rec_ptr);
-
-	return noErr;
 }
 
 static UInt8 *
