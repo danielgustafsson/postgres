@@ -57,4 +57,31 @@ SSL
          |
    Fail with unknown
 
+
+Secure Transport
+================
+
+
+Keychains
+---------
+
+It would be natural to create a temporary Keychain for the duration of the SSL
+connection for the purpose of CRL management, however there are some issues
+surrounding this.
+
+Keychains are internally backed by sqlite3 databases which in turn don't
+allow access across fork()s.
+
+	"Under Unix, you should not carry an open SQLite database across a fork()
+	 system call into the child process."
+	 - https://sqlite.org/faq.html#q6 
+
+Usage across fork() will cause the sqlite3 initialization to segfault when
+using the Keychain API, any Keychain would have to be contained to a single
+process. While this limitation could be managed, a second problem is that the
+Keychain API attach at least one thread in addition to the main thread, causing
+pthread_is_threaded_np() to return non-zero (regardless of locale setting).
+
+
+
 ---------------------------------------------------------------------------
