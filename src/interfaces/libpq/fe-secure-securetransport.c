@@ -1126,15 +1126,14 @@ PQsslInUse(PGconn *conn)
 	return conn->ssl_in_use;
 }
 
-/*
- *	Return pointer to the Secure Transport SSL Context object.
- */
 void *
 PQgetssl(PGconn *conn)
 {
-	if (!conn)
-		return NULL;
-	return conn->ssl;
+	/*
+	 * Always return NULL as this is legacy and defined to be equal to
+	 * PQsslStruct(conn, "OpenSSL");
+	 */
+	return NULL;
 }
 
 void *
