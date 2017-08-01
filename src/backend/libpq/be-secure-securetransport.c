@@ -98,10 +98,9 @@ extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator,
 static OSStatus load_certificate(char *name, CFArrayRef *cert_array);
 static void load_key(char *name, CFArrayRef *out);
 
-static char * SSLerrmessage(OSStatus status);
-static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
-static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
-static char * SSLerrmessage(OSStatus status);
+static char * pg_SSLerrmessage(OSStatus status);
+static OSStatus pg_SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
+static OSStatus pg_SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
 
 /* src/backend/libpq/securetransport_common.c */
 extern const char * SSLciphername(SSLCipherSuite cipher);
@@ -188,7 +187,7 @@ be_tls_open_server(Port *port)
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not load server certificate \"%s\": \"%s\"",
-						ssl_cert_file, SSLerrmessage(status))));
+						ssl_cert_file, pg_SSLerrmessage(status))));
 
 	load_key(ssl_key_file, &keys);
 
@@ -202,7 +201,7 @@ be_tls_open_server(Port *port)
 	if (identity == NULL)
 		ereport(COMMERROR,
 				(errmsg("could not create identity: \"%s\"",
-				 SSLerrmessage(status))));
+				 pg_SSLerrmessage(status))));
 
 	/*
 	 * SSLSetCertificate() sets the certificate(s) to use for the connection.
@@ -232,7 +231,7 @@ be_tls_open_server(Port *port)
 		{
 			ereport(LOG,
 					(errmsg("could not load root certificate \"%s\": \"%s\"",
-					 ssl_ca_file, SSLerrmessage(status))));
+					 ssl_ca_file, pg_SSLerrmessage(status))));
 
 			ssl_loaded_verify_locations = false;
 		}
@@ -288,28 +287,28 @@ be_tls_open_server(Port *port)
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not set certificate for connection: \"%s\"",
-				 SSLerrmessage(status))));
+				 pg_SSLerrmessage(status))));
 
 	status = SSLSetIOFuncs((SSLContextRef) port->ssl,
-						   SSLSocketRead,
-						   SSLSocketWrite);
+						   pg_SSLSocketRead,
+						   pg_SSLSocketWrite);
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not set SSL IO functions: \"%s\"",
-				 SSLerrmessage(status))));
+				 pg_SSLerrmessage(status))));
 
 	status = SSLSetSessionOption((SSLContextRef) port->ssl,
 								 kSSLSessionOptionBreakOnClientAuth, true);
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not set SSL certificate validation: \"%s\"",
-				 SSLerrmessage(status))));
+				 pg_SSLerrmessage(status))));
 
 	status = SSLSetConnection((SSLContextRef) port->ssl, port);
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not establish SSL connection: \"%s\"",
-				 SSLerrmessage(status))));
+				 pg_SSLerrmessage(status))));
 
 	/*
 	 * Perform handshake
@@ -333,7 +332,7 @@ be_tls_open_server(Port *port)
 			{
 				ereport(WARNING,
 					(errmsg("SSLCopyPeerTrust returned: \"%s\"",
-					 SSLerrmessage(status))));
+					 pg_SSLerrmessage(status))));
 				port->peer_cert_valid = false;
 				return 0;
 			}
@@ -345,7 +344,7 @@ be_tls_open_server(Port *port)
 				{
 					ereport(WARNING,
 						(errmsg("SecTrustSetAnchorCertificates returned: \"%s\"",
-						 SSLerrmessage(status))));
+						 pg_SSLerrmessage(status))));
 					return -1;
 				}
 
@@ -354,7 +353,7 @@ be_tls_open_server(Port *port)
 				{
 					ereport(WARNING,
 						(errmsg("SecTrustSetAnchorCertificatesOnly returned: \"%s\"",
-						 SSLerrmessage(status))));
+						 pg_SSLerrmessage(status))));
 					return -1;
 				}
 			}
@@ -364,7 +363,7 @@ be_tls_open_server(Port *port)
 			{
 				ereport(WARNING,
 					(errmsg("SecTrustEvaluate failed, returned: \"%s\"",
-					 SSLerrmessage(status))));
+					 pg_SSLerrmessage(status))));
 				return -1;
 			}
 
@@ -519,7 +518,7 @@ load_key(char *name, CFArrayRef *out)
 		ereport(ERROR,
 				(errcode(ERRCODE_CONFIG_FILE_ERROR),
 				 errmsg("could not load private key \"%s\": \"%s\"",
-						name, SSLerrmessage(status))));
+						name, pg_SSLerrmessage(status))));
 }
 
 /*
@@ -600,7 +599,7 @@ be_tls_close(Port *port)
 		ereport(COMMERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg("error in closing SSL connection: %s",
-						SSLerrmessage(ssl_status))));
+						pg_SSLerrmessage(ssl_status))));
 
 	CFRelease((SSLContextRef) port->ssl);
 
@@ -701,7 +700,7 @@ be_tls_read(Port *port, void *ptr, size_t len, int *waitfor)
 			ereport(COMMERROR,
 					(errcode(ERRCODE_PROTOCOL_VIOLATION),
 					 errmsg("SSL error: %s",
-							SSLerrmessage(read_status))));
+							pg_SSLerrmessage(read_status))));
 			break;
 	}
 
@@ -908,7 +907,7 @@ be_tls_get_compression(Port *port)
 /* ------------------------------------------------------------ */
 
 /*
- * SSLerrmessage
+ * pg_SSLerrmessage
  *		Create and return a human readable error message given
  *		the specified status code
  *
@@ -916,7 +915,7 @@ be_tls_get_compression(Port *port)
  * translation for non-error statuses as well like noErr and errSecSuccess.
  */
 static char *
-SSLerrmessage(OSStatus status)
+pg_SSLerrmessage(OSStatus status)
 {
 	CFStringRef		err_msg;
 	char		   *err_buf;
@@ -960,14 +959,14 @@ SSLerrmessage(OSStatus status)
 /* ------------------------------------------------------------ */
 
 /*
- *	SSLSocketRead
+ *	pg_SSLSocketRead
  *
  * Callback for reading data from the connection. When entering the function,
  * len is set to the number of bytes requested. Upon leaving, len should be
  * overwritten with the actual number of bytes read.
  */
 static OSStatus
-SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
+pg_SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 {
 	OSStatus	status;
 	int			res;
@@ -1008,7 +1007,7 @@ SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 }
 
 static OSStatus
-SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
+pg_SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 {
 	OSStatus	status;
 	int			res;

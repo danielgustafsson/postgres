@@ -62,16 +62,16 @@ extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator,
 										SecCertificateRef certificate,
 										SecKeyRef privateKey);
 
-static char *SSLerrmessage(OSStatus errcode);
-static void SSLerrfree(char *err_buf);
-static int SSLsessionstate(PGconn *conn, char *msg, size_t len);
+static char * pg_SSLerrmessage(OSStatus errcode);
+static void pg_SSLerrfree(char *err_buf);
+static int pg_SSLsessionstate(PGconn *conn, char *msg, size_t len);
 
-static OSStatus SSLSocketRead(SSLConnectionRef conn, void *data,
+static OSStatus pg_SSLSocketRead(SSLConnectionRef conn, void *data,
 							  size_t *len);
-static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data,
+static OSStatus pg_SSLSocketWrite(SSLConnectionRef conn, const void *data,
 							   size_t *len);
-static OSStatus SSLOpenClient(PGconn *conn);
-static OSStatus SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
+static OSStatus pg_SSLOpenClient(PGconn *conn);
+static OSStatus pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 								   CFArrayRef *key_array,
 								   CFArrayRef *rootcert_array);
 
@@ -155,7 +155,7 @@ pgtls_open_client(PGconn *conn)
 		/*
 		 * Set the low level functions for reading and writing off a socket
 		 */
-		open_status = SSLSetIOFuncs(conn->ssl, SSLSocketRead, SSLSocketWrite);
+		open_status = SSLSetIOFuncs(conn->ssl, pg_SSLSocketRead, pg_SSLSocketWrite);
 		if (open_status != noErr)
 			goto error;
 
@@ -164,7 +164,7 @@ pgtls_open_client(PGconn *conn)
 		 * conn->errorMessage will be populated by the certificate loading
 		 * so we can return without altering it in case of error.
 		 */
-		if (SSLLoadCertificate(conn, &certificate, &key, &rootcert) != noErr)
+		if (pg_SSLLoadCertificate(conn, &certificate, &key, &rootcert) != noErr)
 		{
 			pgtls_close(conn);
 			return PGRES_POLLING_FAILED;
@@ -192,7 +192,7 @@ pgtls_open_client(PGconn *conn)
 	/*
 	 * Perform handshake
 	 */
-	open_status = SSLOpenClient(conn);
+	open_status = pg_SSLOpenClient(conn);
 	if (open_status == noErr)
 	{
 		conn->ssl_in_use = true;
@@ -202,7 +202,7 @@ pgtls_open_client(PGconn *conn)
 error:
 	if (open_status != noErr)
 	{
-		char *err_msg = SSLerrmessage(open_status);
+		char *err_msg = pg_SSLerrmessage(open_status);
 		if (conn->errorMessage.len > 0)
 			appendPQExpBuffer(&conn->errorMessage,
 							  libpq_gettext(", ssl error: %s\n"), err_msg);
@@ -210,7 +210,7 @@ error:
 			printfPQExpBuffer(&conn->errorMessage,
 							  libpq_gettext("could not establish SSL connection: %s\n"),
 									err_msg);
-		SSLerrfree(err_msg);
+		pg_SSLerrfree(err_msg);
 
 		pgtls_close(conn);
 	}
@@ -219,7 +219,7 @@ error:
 }
 
 /*
- * SSLOpenClient
+ * pg_SSLOpenClient
  *		Validates remote certificate and performs handshake.
  *
  * If the user has supplied a root certificate we add that to the chain here
@@ -227,7 +227,7 @@ error:
  * logging in the case of errors returned.
  */
 static OSStatus
-SSLOpenClient(PGconn *conn)
+pg_SSLOpenClient(PGconn *conn)
 {
 	OSStatus			status;
 	SecTrustRef			trust = NULL;
@@ -397,7 +397,7 @@ SSLOpenClient(PGconn *conn)
 	 * If we reach here the documentation states we need to run the Handshake
 	 * again after validating the trust
 	 */
-	return SSLOpenClient(conn);
+	return pg_SSLOpenClient(conn);
 }
 
 /*
@@ -439,7 +439,7 @@ pgtls_read(PGconn *conn, void *ptr, size_t len)
 	 * Double-check that we have a connection which is in the correct state for
 	 * reading before attempting to pull any data off the wire.
 	 */
-	if (SSLsessionstate(conn, sess_msg, sizeof(sess_msg)) == -1)
+	if (pg_SSLsessionstate(conn, sess_msg, sizeof(sess_msg)) == -1)
 	{
 		printfPQExpBuffer(&conn->errorMessage,
 			libpq_gettext("SSL connection is: %s\n"), sess_msg);
@@ -506,7 +506,7 @@ pgtls_write(PGconn *conn, const void *ptr, size_t len)
 	 * for writing before attempting to push any data on to the wire or the
 	 * local SSL buffer.
 	 */
-	if (SSLsessionstate(conn, sess_msg, sizeof(sess_msg)) == -1)
+	if (pg_SSLsessionstate(conn, sess_msg, sizeof(sess_msg)) == -1)
 	{
 		printfPQExpBuffer(&conn->errorMessage,
 			libpq_gettext("SSL connection is: %s\n"), sess_msg);
@@ -637,7 +637,7 @@ pgtls_close(PGconn *conn)
  * The amount of read bytes is returned in the len variable
  */
 static OSStatus
-SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
+pg_SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 {
 	OSStatus	status = noErr;
 	int			res;
@@ -672,7 +672,7 @@ SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len)
 }
 
 static OSStatus
-SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
+pg_SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 {
 	OSStatus	status = noErr;
 	int			res;
@@ -875,7 +875,7 @@ import_pem(const char *path, int size, char *passphrase, CFArrayRef *certificate
  * populated here even for SSL library errors.
  */
 static OSStatus
-SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
+pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
 				   CFArrayRef *rootcert_array)
 {
 	OSStatus			status;
@@ -918,11 +918,11 @@ SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
 		status = import_pem(fnbuf, buf.st_size, NULL, cert_array);
 		if (status != noErr)
 		{
-			ssl_err_msg = SSLerrmessage(status);
+			ssl_err_msg = pg_SSLerrmessage(status);
 			printfPQExpBuffer(&conn->errorMessage,
 				libpq_gettext("could not load certificate file \"%s\": %s\n"),
 							  fnbuf, ssl_err_msg);
-			SSLerrfree(ssl_err_msg);
+			pg_SSLerrfree(ssl_err_msg);
 			return status;
 		}
 
@@ -956,11 +956,11 @@ SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
 			status = import_pem(fnbuf, buf.st_size, NULL, key_array);
 			if (status != noErr)
 			{
-				ssl_err_msg = SSLerrmessage(status);
+				ssl_err_msg = pg_SSLerrmessage(status);
 				printfPQExpBuffer(&conn->errorMessage,
 					libpq_gettext("could not load private key file \"%s\": %s\n"),
 								  fnbuf, ssl_err_msg);
-				SSLerrfree(ssl_err_msg);
+				pg_SSLerrfree(ssl_err_msg);
 				return status;
 			}
 
@@ -1043,11 +1043,11 @@ SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
 
 		if (status != noErr)
 		{
-			ssl_err_msg = SSLerrmessage(status);
+			ssl_err_msg = pg_SSLerrmessage(status);
 			printfPQExpBuffer(&conn->errorMessage,
 					libpq_gettext("could not set certificate for connection: (%d) %s\n"),
 								  status, ssl_err_msg);
-			SSLerrfree(ssl_err_msg);
+			pg_SSLerrfree(ssl_err_msg);
 			return status;
 		}
 
@@ -1099,11 +1099,11 @@ SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
 			status = import_pem(fnbuf, buf.st_size, NULL, rootcert_array);
 			if (status != noErr)
 			{
-				ssl_err_msg = SSLerrmessage(status);
+				ssl_err_msg = pg_SSLerrmessage(status);
 				printfPQExpBuffer(&conn->errorMessage,
 						libpq_gettext("could not load root certificate file \"%s\": %s\n"),
 									  fnbuf, ssl_err_msg);
-				SSLerrfree(ssl_err_msg);
+				pg_SSLerrfree(ssl_err_msg);
 				return status;
 			}
 
@@ -1224,7 +1224,7 @@ static char ssl_nomem[] = "out of memory allocating error description";
 #define SSL_ERR_LEN 128
 
 static char *
-SSLerrmessage(OSStatus errcode)
+pg_SSLerrmessage(OSStatus errcode)
 {
 	char 	   *err_buf;
 	const char *tmp;
@@ -1251,21 +1251,21 @@ SSLerrmessage(OSStatus errcode)
 }
 
 static void
-SSLerrfree(char *err_buf)
+pg_SSLerrfree(char *err_buf)
 {
 	if (err_buf && err_buf != ssl_nomem && err_buf != ssl_noerr)
 		free(err_buf);
 }
 
 /*
- * SSLsessionstate
+ * pg_SSLsessionstate
  *
  * Returns 0 if the connection is open and -1 in case the connection is closed,
  * or its status unknown. If msg is non-NULL the current state is copied with
  * at most len - 1 characters ensuring a NUL terminated returned string.
  */
 static int
-SSLsessionstate(PGconn *conn, char *msg, size_t len)
+pg_SSLsessionstate(PGconn *conn, char *msg, size_t len)
 {
 	SSLSessionState		state;
 	OSStatus			status;
