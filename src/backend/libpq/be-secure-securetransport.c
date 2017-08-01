@@ -812,9 +812,9 @@ be_tls_get_cipher_bits(Port *port)
 			keysize = SecKeyGetBlockSize(key);
 			CFRelease(key);
 		}
+		CFRelease(trust);
 	}
 
-	CFRelease(trust);
 	return keysize;
 }
 
