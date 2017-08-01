@@ -454,7 +454,7 @@ pgtls_read(PGconn *conn, void *ptr, size_t len)
 			break;
 		case -1:
 		case errSSLWouldBlock:
-			/* If we did perform a read then skip EAGAIN */
+			/* Only set read_errno to EINTR iff we didn't get any data back */
 			if (n == 0)
 				read_errno = EINTR;
 			break;
@@ -847,10 +847,10 @@ import_pem(const char *path, int size, char *passphrase, CFArrayRef *certificate
 }
 
 /*
- * Secure Transport introduce the concept of an identity, which is a packaging
- * of a private key and the certificate which contains the public key. The
- * identity is what is used for verifying the connection, so we need to provide
- * a SecIdentityRef identity to the API.
+ * Secure Transport has the concept of an identity, which is a packaging of a
+ * private key and the certificate which contains the public key. The identity
+ * is what is used for verifying the connection, so we need to provide a
+ * SecIdentityRef identity to the API.
  *
  * A complete, and packaged, identity can be contained in a Keychain, in which
  * case we can load it directly without having to create anything ourselves.
@@ -1021,8 +1021,8 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_arra
 
 		/*
 		 * If we have created the identity "by hand" without involving the
-		 * Keychain we need to include the certifiates in the array passed
-		 * to SSLSetCertificate()
+		 * Keychain we need to include the certificates in the array passed to
+		 * SSLSetCertificate()
 		 */
 		if (cert_array)
 		{
