@@ -452,7 +452,7 @@ pgtls_read(PGconn *conn, void *ptr, size_t len)
 	{
 		case noErr:
 			break;
-		case -1:
+
 		case errSSLWouldBlock:
 			/* Only set read_errno to EINTR iff we didn't get any data back */
 			if (n == 0)
@@ -544,7 +544,6 @@ pgtls_write(PGconn *conn, const void *ptr, size_t len)
 			case noErr:
 				break;
 
-			case -1:
 			case errSSLWouldBlock:
 				conn->ssl_buffered = len;
 				ret = 0;

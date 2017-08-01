@@ -317,7 +317,7 @@ be_tls_open_server(Port *port)
 		if (status == noErr)
 			break;
 
-		if (status == errSSLWouldBlock || status == -1)
+		if (status == errSSLWouldBlock)
 			continue;
 
 		if (status == errSSLClosedAbort || status == errSSLClosedGraceful)
@@ -761,7 +761,6 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 			 * socket. Track this and repeatedly call SSLWrite to drain the
 			 * buffer. See comment above.
 			 */
-			case -1:
 			case errSSLWouldBlock:
 				port->ssl_buffered = len;
 				n = 0;
