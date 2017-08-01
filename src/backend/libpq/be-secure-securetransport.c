@@ -96,7 +96,7 @@ extern SecIdentityRef SecIdentityCreate(CFAllocatorRef allocator,
 										SecKeyRef privateKey);
 
 static OSStatus load_certificate(char *name, CFArrayRef *cert_array);
-static OSStatus load_key(char *name, CFArrayRef *out);
+static void load_key(char *name, CFArrayRef *out);
 
 static char * SSLerrmessage(OSStatus status);
 static OSStatus SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
@@ -190,11 +190,7 @@ be_tls_open_server(Port *port)
 				(errmsg("could not load server certificate \"%s\": \"%s\"",
 						ssl_cert_file, SSLerrmessage(status))));
 
-	status = load_key(ssl_key_file, &keys);
-	if (status != noErr)
-		ereport(COMMERROR,
-				(errmsg("could not load private key \"%s\": \"%s\"",
-						ssl_key_file, SSLerrmessage(status))));
+	load_key(ssl_key_file, &keys);
 
 	/*
 	 * We now have a certificate and either a private key, or a search path
@@ -438,10 +434,13 @@ be_tls_open_server(Port *port)
 }
 
 /*
+ *	load_key
+ *		Extracts a key from a PEM file on the filesystem
  *
- * TODO: figure out better returncodes
+ * Loads a private key from the specified filename. Unless the key loads this
+ * will not return but will error out.
  */
-static OSStatus
+static void
 load_key(char *name, CFArrayRef *out)
 {
 	OSStatus			status;
@@ -467,17 +466,17 @@ load_key(char *name, CFArrayRef *out)
 		if (errno == ENOENT)
 			return errSecSuccess;
 
-		strlcpy(internal_err, _("unable to stat key file"),
-				sizeof(internal_err));
-		return errSecInternalError;
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("could not load private key \"%s\": unable to stat",
+						name)));
 	}
 
 	if (!S_ISREG(stat_buf.st_mode))
-	{
-		strlcpy(internal_err, _("key file is not a regular file"),
-				sizeof(internal_err));
-		return errSecInternalError;
-	}
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("could not load private key \"%s\": not a regular file",
+						name)));
 
 	/*
 	 * Require no public access to the key file. If the file is owned by us,
@@ -487,7 +486,7 @@ load_key(char *name, CFArrayRef *out)
 	 */
 	if ((stat_buf.st_uid == geteuid() && stat_buf.st_mode & (S_IRWXG | S_IRWXO)) ||
 		(stat_buf.st_uid == 0 && stat_buf.st_mode & (S_IWGRP | S_IXGRP | S_IRWXO)))
-		ereport(FATAL,
+		ereport(ERROR,
 				(errcode(ERRCODE_CONFIG_FILE_ERROR),
 				 errmsg("private key file \"%s\" has group or world access",
 						name),
@@ -496,7 +495,10 @@ load_key(char *name, CFArrayRef *out)
 						   "u=rw,g=r (0640) or less if owned by root.")));
 
 	if ((fd = AllocateFile(name, "r")) == NULL)
-		return errSecInternalError;
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("could not load private key \"%s\": unable to open",
+						name)));
 
 	buf = palloc(stat_buf.st_size);
 
@@ -504,7 +506,10 @@ load_key(char *name, CFArrayRef *out)
 	FreeFile(fd);
 
 	if (ret != stat_buf.st_size)
-		return errSecInternalError;
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("could not load private key \"%s\": unable to read",
+						name)));
 
 	type = kSecItemTypePrivateKey;
 	format = kSecFormatPEMSequence;
@@ -522,7 +527,11 @@ load_key(char *name, CFArrayRef *out)
 	CFRelease(path);
 	CFRelease(data);
 
-	return status;
+	if (status != noErr)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("could not load private key \"%s\": \"%s\"",
+						name, SSLerrmessage(status))));
 }
 
 /*
