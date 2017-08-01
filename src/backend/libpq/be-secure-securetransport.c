@@ -70,6 +70,10 @@
 #define ACL_DELETE pg_ACL_DELETE
 #define ACL_EXECUTE pg_ACL_EXECUTE
 
+#ifndef errSecUnknownFormat
+#define errSecUnknownFormat -25257
+#endif
+
 /* ------------------------------------------------------------ */
 /*				Struct definitions and Static variables			*/
 /* ------------------------------------------------------------ */
@@ -922,10 +926,11 @@ SSLerrmessage(OSStatus status)
 	char		   *err_buf;
 
 	/*
-	 * There is no translation for errSecUnknownFormat in macOS El Capitan
-	 * (10.11), and possibly others, so we maintain our own
+	 * While errSecUnknownFormat has been defined as -25257 at least since 10.8
+	 * Lion, there still is no translation for it in 10.11 El Capitan, so we
+	 * maintain our own
 	 */
-	if (status == -25257)
+	if (status == errSecUnknownFormat)
 		return pstrdup(_("The item you are trying to import has an unknown format."));
 
 	/*
