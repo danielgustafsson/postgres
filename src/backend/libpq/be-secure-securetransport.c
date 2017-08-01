@@ -524,8 +524,7 @@ load_key(char *name, CFArrayRef *out)
 
 /*
  *	load_certificate
- *		Extracts a certificate from either a file on the filesystem or
- *		a keychain.
+ *		Extracts a certificate from a PEM file on the filesystem
  *
  * TODO: figure out better returncodes
  */
