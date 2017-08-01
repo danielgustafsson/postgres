@@ -98,13 +98,7 @@ extern const char * SSLciphername(SSLCipherSuite cipher);
 void
 pgtls_init_library(bool do_ssl, int do_crypto)
 {
-#ifndef __darwin__
-	/*
-	 * Secure Transport is only available on Darwin platforms so autoconf
-	 * should protect us from ever reaching here
-	 */
-	Assert(false);
-#endif
+	return;
 }
 
 /*

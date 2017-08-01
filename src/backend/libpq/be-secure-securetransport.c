@@ -140,14 +140,6 @@ be_tls_init(bool isServerStart)
 {
 	memset(internal_err, '\0', sizeof(internal_err));
 
-#ifndef __darwin__
-	/*
-	 * Secure Transport is only available on macOS platforms. Autoconf should
-	 * protect us from ever reaching here but keep belts and suspenders on.
-	 */
-	Assert(false);
-#endif
-
 	/*
 	 * This is where we'd like to load and parse certificates and private keys
 	 * for the connection, but since Secure Transport will spawn threads deep
