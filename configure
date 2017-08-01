@@ -1536,7 +1536,7 @@ Optional Packages:
   --with-ldap             build with LDAP support
   --with-bonjour          build with Bonjour support
   --with-openssl          build with OpenSSL support
-  --with-securetransport  build with macOS Secure Transport support
+  --with-securetransport  build with Apple Secure Transport support
   --with-selinux          build with SELinux support
   --with-systemd          build with systemd support
   --without-readline      do not use GNU Readline nor BSD Libedit for editing
@@ -6019,10 +6019,10 @@ $as_echo "$with_openssl" >&6; }
 
 
 #
-# macOS Secure Transport
+# Apple Secure Transport
 #
-{ $as_echo "$as_me:${as_lineno-$LINENO}: checking whether to build with macOS Secure Transport support" >&5
-$as_echo_n "checking whether to build with macOS Secure Transport support... " >&6; }
+{ $as_echo "$as_me:${as_lineno-$LINENO}: checking whether to build with Apple Secure Transport support" >&5
+$as_echo_n "checking whether to build with Apple Secure Transport support... " >&6; }
 
 
 
@@ -10956,7 +10956,7 @@ if test "$with_securetransport" = yes ; then
 if test "x$ac_cv_header_Security_Security_h" = xyes; then :
 
 else
-  as_fn_error $? "header file <Security/Security.h> is required for Secure Transport" "$LINENO" 5
+  as_fn_error $? "header file <Security/Security.h> is required for Apple Secure Transport" "$LINENO" 5
 fi
 
 
@@ -10964,7 +10964,7 @@ fi
 if test "x$ac_cv_header_CoreFoundation_CoreFoundation_h" = xyes; then :
 
 else
-  as_fn_error $? "header file <CoreFoundation/CoreFoundation.h> is required for Secure Transport" "$LINENO" 5
+  as_fn_error $? "header file <CoreFoundation/CoreFoundation.h> is required for Apple Secure Transport" "$LINENO" 5
 fi
 
 
