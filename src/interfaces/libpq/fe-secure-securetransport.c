@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * fe-secure-securetransport.c
- *	  Apple macOS Secure Transport support
+ *	  Apple Secure Transport support
  *
  *
  * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group

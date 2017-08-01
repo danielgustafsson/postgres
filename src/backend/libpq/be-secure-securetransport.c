@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * be-secure-securetransport.c
- *	  macOS Secure Transport support
+ *	  Apple Secure Transport support
  *
  *
  * Portions Copyright (c) 1996-2017, PostgreSQL Global Development Group
@@ -46,7 +46,7 @@
 #include "utils/memutils.h"
 
 /*
- * TODO: This dance is required due to collisions in the macOS CoreFoundation
+ * TODO: This dance is required due to collisions in the CoreFoundation
  * headers. How to handle it properly?
  */
 #define pg_ACL_DELETE ACL_DELETE
