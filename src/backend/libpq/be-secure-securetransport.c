@@ -884,7 +884,7 @@ be_tls_get_cipher(Port *port, char *ptr, size_t len)
 
 	cipher_name = SSLciphername(cipher);
 	if (cipher_name != NULL)
-		strlcpy(ptr, SSLciphername(cipher), len);
+		strlcpy(ptr, cipher_name, len);
 }
 
 /*
