@@ -722,6 +722,14 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 	if (len == 0)
 		return 0;
 
+	/*
+	 * SSLWrite returns the number of bytes written in the 'n' argument. This
+	 * however can be data either actually written to the socket, or buffered
+	 * in the context. In the latter case SSLWrite will return errSSLWouldBlock
+	 * and we need to call it with no new data (NULL) to drain the buffer on to
+	 * the socket. We track the buffer in ssl_buffered and clear that when all
+	 * data has been drained.
+	 */
 	if (port->ssl_buffered > 0)
 	{
 		write_status = SSLWrite((SSLContextRef) port->ssl, NULL, 0, &n);
@@ -751,6 +759,11 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 			case noErr:
 				break;
 
+			/*
+			 * The data was buffered in the context rather than written to the
+			 * socket. Track this and repeatedly call SSLWrite to drain the
+			 * buffer. See comment above.
+			 */
 			case -1:
 			case errSSLWouldBlock:
 				port->ssl_buffered = len;
