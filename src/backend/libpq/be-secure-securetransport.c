@@ -491,13 +491,13 @@ load_key(char *name, CFArrayRef *out)
 						   "if owned by the database user, or permissions "
 						   "u=rw,g=r (0640) or less if owned by root.")));
 
-	if ((fd = fopen(name, "r")) < 0)
+	if ((fd = AllocateFile(name, "r")) == NULL)
 		return errSecInternalError;
 
 	buf = palloc(stat_buf.st_size);
 
 	ret = fread(buf, 1, stat_buf.st_size, fd);
-	fclose(fd);
+	FreeFile(fd);
 
 	if (ret != stat_buf.st_size)
 		return errSecInternalError;
@@ -559,12 +559,12 @@ load_certificate(char *name, CFArrayRef *cert_array)
 	}
 	else if (ret == 0 && S_ISREG(stat_buf.st_mode))
 	{
-		if ((fd = fopen(name, "r")) < 0)
+		if ((fd = AllocateFile(name, "r")) == NULL)
 			return errSecInternalError;
 
 		buf = palloc(stat_buf.st_size);
 		ret = fread(buf, 1, stat_buf.st_size, fd);
-		fclose(fd);
+		FreeFile(fd);
 
 		if (ret != stat_buf.st_size)
 			return errSecInternalError;
