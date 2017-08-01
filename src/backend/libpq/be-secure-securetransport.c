@@ -172,7 +172,7 @@ be_tls_open_server(Port *port)
 {
 	OSStatus			status;
 	SecTrustRef			trust;
-	SecTrustResultType	trust_eval = 0;
+	SecTrustResultType	trust_eval;
 	SecIdentityRef		identity;
 	CFArrayRef			root_certificates;
 	CFArrayRef			certificates;
@@ -356,6 +356,7 @@ be_tls_open_server(Port *port)
 				}
 			}
 
+			trust_eval = 0;
 			status = SecTrustEvaluate(trust, &trust_eval);
 			if (status != noErr)
 			{
