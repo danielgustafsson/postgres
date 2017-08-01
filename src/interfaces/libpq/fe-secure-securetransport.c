@@ -835,6 +835,8 @@ import_pem(const char *path, int size, char *passphrase, CFArrayRef *certificate
 	 * what we can do to assist.
 	 */
 	file_type = CFSTR(".pem");
+	if (!file_type)
+		return errSecInternalError;
 
 	format = kSecFormatPEMSequence;
 	item_type = kSecItemTypeCertificate;
