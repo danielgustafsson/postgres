@@ -638,7 +638,7 @@ be_tls_get_version(Port *port, char *ptr, size_t len)
 				strlcpy(ptr, "TLSv1.2", len);
 				break;
 			default:
-				strlcpy(ptr, "Unknown", len);
+				strlcpy(ptr, "unknown", len);
 				break;
 		}
 	}
