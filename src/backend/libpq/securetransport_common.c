@@ -27,6 +27,8 @@ const char * SSLciphername(SSLCipherSuite cipher);
  * in log/informational messages to the user. Since this implementation of the
  * Secure Transport lib doesn't support SSLv2/v3 these ciphernames are omitted.
  *
+ * The SSLCipherSuite enum is defined in Security/CipherSuite.h
+ *
  * This only removes the TLS_ portion of the SSLCipherSuite enum label for the
  * ciphers to match what most Secure Transport implementations seem to be doing
  */
@@ -199,7 +201,7 @@ SSLciphername(SSLCipherSuite cipher)
 		case TLS_RSA_PSK_WITH_AES_256_CBC_SHA:
 			return "RSA_PSK_WITH_AES_256_CBC_SHA";
 
-		/* RFC 4785 - Pre-Shared Key (PSK) Ciphersuites with NULL Encryption */
+		/* RFC 4785, Pre-Shared Key (PSK) Ciphersuites with NULL Encryption */
 		case TLS_PSK_WITH_NULL_SHA:
 			return "PSK_WITH_NULL_SHA";
 		case TLS_DHE_PSK_WITH_NULL_SHA:
@@ -208,7 +210,7 @@ SSLciphername(SSLCipherSuite cipher)
 			return "RSA_PSK_WITH_NULL_SHA";
 
 		/*
-		 * Addenda from rfc 5288 AES Galois Counter Mode (GCM) Cipher Suites
+		 * Addenda from RFC 5288, AES Galois Counter Mode (GCM) Cipher Suites
 		 * for TLS.
 		 */
 		case TLS_RSA_WITH_AES_128_GCM_SHA256:
@@ -275,7 +277,7 @@ SSLciphername(SSLCipherSuite cipher)
 			return "RSA_PSK_WITH_NULL_SHA384";
 
 		/*
-		 * Addenda from rfc 5289  Elliptic Curve Cipher Suites with
+		 * Addenda from RFC 5289, Elliptic Curve Cipher Suites with
 		 * HMAC SHA-256/384.
 		 */
 		case TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256:
@@ -296,7 +298,7 @@ SSLciphername(SSLCipherSuite cipher)
 			return "ECDH_RSA_WITH_AES_256_CBC_SHA384";
 
 		/*
-		 * Addenda from rfc 5289  Elliptic Curve Cipher Suites with
+		 * Addenda from RFC 5289, Elliptic Curve Cipher Suites with
 		 * SHA-256/384 and AES Galois Counter Mode (GCM)
 		 */
 		case TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256:
