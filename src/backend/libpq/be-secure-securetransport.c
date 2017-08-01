@@ -455,22 +455,10 @@ load_key(char *name, CFArrayRef *out)
 
 	ret = stat(name, &stat_buf);
 	if (ret != 0)
-	{
-		/*
-		 * The key name is referencing a non-existing file, which we assume to
-		 * mean that it's referencing a Keychain label. We could search the
-		 * user default Keychain here to verify but since identity creation
-		 * will do just that anyways we might as well defer the key search to
-		 * that stage. Return to go ahead with identity creation.
-		 */
-		if (errno == ENOENT)
-			return errSecSuccess;
-
 		ereport(ERROR,
 				(errcode(ERRCODE_CONFIG_FILE_ERROR),
 				 errmsg("could not load private key \"%s\": unable to stat",
 						name)));
-	}
 
 	if (!S_ISREG(stat_buf.st_mode))
 		ereport(ERROR,
