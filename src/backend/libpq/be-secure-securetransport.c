@@ -254,7 +254,7 @@ be_tls_open_server(Port *port)
 
 	port->ssl = (void *) SSLCreateContext(NULL, kSSLServerSide, kSSLStreamType);
 	if (!port->ssl)
-		ereport(FATAL,
+		ereport(COMMERROR,
 				(errmsg("could not create SSL context")));
 
 	port->ssl_in_use = true;
@@ -290,7 +290,7 @@ be_tls_open_server(Port *port)
 	status = SSLSetCertificate((SSLContextRef) port->ssl,
 							   (CFArrayRef) chain);
 	if (status != noErr)
-		ereport(FATAL,
+		ereport(COMMERROR,
 				(errmsg("could not set certificate for connection: \"%s\"",
 				 SSLerrmessage(status))));
 
@@ -298,20 +298,20 @@ be_tls_open_server(Port *port)
 						   SSLSocketRead,
 						   SSLSocketWrite);
 	if (status != noErr)
-		ereport(FATAL,
+		ereport(COMMERROR,
 				(errmsg("could not set SSL IO functions: \"%s\"",
 				 SSLerrmessage(status))));
 
 	status = SSLSetSessionOption((SSLContextRef) port->ssl,
 								 kSSLSessionOptionBreakOnClientAuth, true);
 	if (status != noErr)
-		ereport(FATAL,
+		ereport(COMMERROR,
 				(errmsg("could not set SSL certificate validation: \"%s\"",
 				 SSLerrmessage(status))));
 
 	status = SSLSetConnection((SSLContextRef) port->ssl, port);
 	if (status != noErr)
-		ereport(FATAL,
+		ereport(COMMERROR,
 				(errmsg("could not establish SSL connection: \"%s\"",
 				 SSLerrmessage(status))));
 
