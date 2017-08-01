@@ -75,23 +75,6 @@
 /* ------------------------------------------------------------ */
 
 /*
- * SSL Context variables. Secure Transport doesn't have a corresponding context
- * to the OpenSSL SSL_CTX (Keychains are not analogous as they are mere file-
- * based containers for secrets, not runtime context stores). Create our own
- * SSL context store instead.
- */
-typedef struct SSL_Context
-{
-	/* Certificates */
-	CFArrayRef			root_certificates;
-	CFArrayRef			certificates;
-	CFArrayRef			keys;
-
-	CFMutableArrayRef	chain;
-} SSL_Context;
-
-
-/*
  * For Secure Transport API functions we rely on SecCopyErrorMessageString()
  * which will provide a human readable error message for the individual error
  * statuses. For our static functions, we mimic the behaviour by passing
@@ -198,19 +181,20 @@ be_tls_open_server(Port *port)
 	SecTrustRef			trust;
 	SecTrustResultType	trust_eval = 0;
 	SecIdentityRef		identity;
-	SSL_Context 	   *context;
+	CFArrayRef			root_certificates;
+	CFArrayRef			certificates;
+	CFArrayRef			keys;
+	CFMutableArrayRef	chain;
 
 	Assert(!port->ssl);
 
-	context = palloc(sizeof(SSL_Context));
-
-	status = load_certificate(ssl_cert_file, &context->certificates);
+	status = load_certificate(ssl_cert_file, &certificates);
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not load server certificate \"%s\": \"%s\"",
 						ssl_cert_file, SSLerrmessage(status))));
 
-	status = load_key(ssl_key_file, &context->keys);
+	status = load_key(ssl_key_file, &keys);
 	if (status != noErr)
 		ereport(COMMERROR,
 				(errmsg("could not load private key \"%s\": \"%s\"",
@@ -221,8 +205,8 @@ be_tls_open_server(Port *port)
 	 * which should contain it.
 	 */
 	identity = SecIdentityCreate(NULL,
-								 (SecCertificateRef) CFArrayGetValueAtIndex(context->certificates, 0),
-								 (SecKeyRef) CFArrayGetValueAtIndex(context->keys, 0));
+								 (SecCertificateRef) CFArrayGetValueAtIndex(certificates, 0),
+								 (SecKeyRef) CFArrayGetValueAtIndex(keys, 0));
 	if (identity == NULL)
 		ereport(COMMERROR,
 				(errmsg("could not create identity: \"%s\"",
@@ -233,18 +217,18 @@ be_tls_open_server(Port *port)
 	 * The first element in the passed array is required to be the identity
 	 * with elements 1..n being certificates.
 	 */
-	context->chain = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
+	chain = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
 	CFRetain(identity);
-	CFArrayInsertValueAtIndex(context->chain, 0, identity);
-	CFArrayAppendArray(context->chain, context->certificates,
-					   CFRangeMake(0, CFArrayGetCount(context->certificates)));
+	CFArrayInsertValueAtIndex(chain, 0, identity);
+	CFArrayAppendArray(chain, certificates,
+					   CFRangeMake(0, CFArrayGetCount(certificates)));
 
 	/*
 	 * Load the Certificate Authority if configured
 	 */
 	if (ssl_ca_file[0])
 	{
-		status = load_certificate(ssl_ca_file, &context->root_certificates);
+		status = load_certificate(ssl_ca_file, &root_certificates);
 		if (status != noErr)
 		{
 			ereport(LOG,
@@ -255,8 +239,8 @@ be_tls_open_server(Port *port)
 		}
 		else
 		{
-			CFArrayAppendArray(context->chain, context->root_certificates,
-							   CFRangeMake(0, CFArrayGetCount(context->root_certificates)));
+			CFArrayAppendArray(chain, root_certificates,
+							   CFRangeMake(0, CFArrayGetCount(root_certificates)));
 
 			ssl_loaded_verify_locations = true;
 		}
@@ -308,7 +292,7 @@ be_tls_open_server(Port *port)
 	SSLSetProtocolVersionEnabled((SSLContextRef) port->ssl, kTLSProtocol12, true);
 
 	status = SSLSetCertificate((SSLContextRef) port->ssl,
-							   (CFArrayRef) context->chain);
+							   (CFArrayRef) chain);
 	if (status != noErr)
 		ereport(FATAL,
 				(errmsg("could not set certificate for connection: \"%s\"",
@@ -364,7 +348,7 @@ be_tls_open_server(Port *port)
 
 			if (ssl_loaded_verify_locations)
 			{
-				status = SecTrustSetAnchorCertificates(trust, context->root_certificates);
+				status = SecTrustSetAnchorCertificates(trust, root_certificates);
 				if (status != noErr)
 				{
 					ereport(WARNING,
