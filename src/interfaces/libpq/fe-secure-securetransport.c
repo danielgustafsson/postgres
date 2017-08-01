@@ -50,11 +50,6 @@
 #include <Security/SecureTransport.h>
 #include <CoreFoundation/CoreFoundation.h>
 
-/*
- * The number of required key/value pairs in the dictionary used for querying
- * the Keychain: Class, Return Reference, MatchLimit, MatchPolicy
- */
-#define KEYCHAIN_SEARCH_SIZE 5
 
 /*
  * Private API call used in the Webkit code for creating an identity from a
@@ -711,8 +706,12 @@ SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 /*
  * import_certificate_keychain
  *
- * Queries the local keychain for a certificate with the passed identity.
+ * Queries the default Keychain for a certificate with the passed identity.
+ * Keychains are searched by creating a dictionary of key/value pairs with the
+ * search criteria and then asking for a copy of the matching entry/entries to
+ * the search criteria.
  */
+#define KEYCHAIN_SEARCH_SIZE 5
 static OSStatus
 import_certificate_keychain(const char *certificate, SecIdentityRef *identity)
 {
