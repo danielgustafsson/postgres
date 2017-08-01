@@ -225,20 +225,20 @@ be_tls_open_server(Port *port)
 	if (ssl_ca_file[0])
 	{
 		status = load_certificate(ssl_ca_file, &root_certificates);
-		if (status != noErr)
+		if (status == noErr)
+		{
+			CFArrayAppendArray(chain, root_certificates,
+							   CFRangeMake(0, CFArrayGetCount(root_certificates)));
+
+			ssl_loaded_verify_locations = true;
+		}
+		else
 		{
 			ereport(LOG,
 					(errmsg("could not load root certificate \"%s\": \"%s\"",
 					 ssl_ca_file, SSLerrmessage(status))));
 
 			ssl_loaded_verify_locations = false;
-		}
-		else
-		{
-			CFArrayAppendArray(chain, root_certificates,
-							   CFRangeMake(0, CFArrayGetCount(root_certificates)));
-
-			ssl_loaded_verify_locations = true;
 		}
 	}
 	else
