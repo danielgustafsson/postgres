@@ -49,6 +49,7 @@
 #include <Security/Security.h>
 #include <Security/SecureTransport.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include "common/securetransport.h"
 
 
 /*
@@ -78,9 +79,6 @@ static OSStatus pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 static OSStatus import_certificate_keychain(const char *certificate, SecIdentityRef *identity);
 static OSStatus import_pem(const char *path, int size, char *passphrase,
 						   CFArrayRef *cert_arr);
-
-/* src/backend/libpq/securetransport_common.c */
-extern const char * SSLciphername(SSLCipherSuite cipher);
 
 /* ------------------------------------------------------------ */
 /*						 Public interface						*/
@@ -1188,7 +1186,7 @@ PQsslAttribute(PGconn *conn, const char *attribute_name)
 	{
 		status = SSLGetNegotiatedCipher(conn->ssl, &cipher);
 		if (status == noErr)
-			return SSLciphername(cipher);
+			return pg_SSLciphername(cipher);
 	}
 	else if (strcmp(attribute_name, "protocol") == 0)
 	{

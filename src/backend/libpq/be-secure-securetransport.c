@@ -59,6 +59,7 @@
 #include <Security/cssmerr.h>
 #include <Security/Security.h>
 #include <Security/SecureTransport.h>
+#include "common/securetransport.h"
 #undef uint64
 #undef bool
 #undef Size
@@ -101,9 +102,6 @@ static void load_key(char *name, CFArrayRef *out);
 static char * pg_SSLerrmessage(OSStatus status);
 static OSStatus pg_SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len);
 static OSStatus pg_SSLSocketRead(SSLConnectionRef conn, void *data, size_t *len);
-
-/* src/backend/libpq/securetransport_common.c */
-extern const char * SSLciphername(SSLCipherSuite cipher);
 
 /* ------------------------------------------------------------ */
 /*					Hardcoded DH parameters						*/
@@ -881,7 +879,7 @@ be_tls_get_cipher(Port *port, char *ptr, size_t len)
 	if (status != noErr)
 		return;
 
-	cipher_name = SSLciphername(cipher);
+	cipher_name = pg_SSLciphername(cipher);
 	if (cipher_name != NULL)
 		strlcpy(ptr, cipher_name, len);
 }

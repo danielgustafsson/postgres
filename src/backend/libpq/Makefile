@@ -22,7 +22,7 @@ OBJS += be-secure-openssl.o
 endif
 
 ifeq ($(with_securetransport),yes)
-OBJS += be-secure-securetransport.o securetransport_common.o
+OBJS += be-secure-securetransport.o
 override CFLAGS += -Wno-deprecated -framework Security -framework CoreFoundation
 endif
 

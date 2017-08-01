@@ -1,24 +1,21 @@
 /*-------------------------------------------------------------------------
  *
- * securetransport_common.c
- *	  Set of common functions for macOS Secure Transport support shared
- *	  between frontend and backend
+ * securetransport_common.h
+ *	  Apple Secure Transport support
  *
- * This should only be used (compiled) if code is compiled with Secure
- * Transport support.
- *
+ * These definitions are used by both frontend and backend code.
  *
  * Copyright (c) 2017, PostgreSQL Global Development Group
  *
  * IDENTIFICATION
- *        src/backend/libpq/securetransport_common.c
+ *        src/include/common/securetransport.h
  *
  *-------------------------------------------------------------------------
  */
+#ifndef SECURETRANSPORT_H
+#define SECURETRANSPORT_H
 
 #include <Security/SecureTransport.h>
-
-const char * SSLciphername(SSLCipherSuite cipher);
 
 /*
  * SSLciphername
@@ -32,8 +29,8 @@ const char * SSLciphername(SSLCipherSuite cipher);
  * This only removes the TLS_ portion of the SSLCipherSuite enum label for the
  * ciphers to match what most Secure Transport implementations seem to be doing
  */
-const char *
-SSLciphername(SSLCipherSuite cipher)
+static const char *
+pg_SSLciphername(SSLCipherSuite cipher)
 {
 	switch (cipher)
 	{
@@ -324,3 +321,5 @@ SSLciphername(SSLCipherSuite cipher)
 
 	return NULL;
 }
+
+#endif							/* SECURETRANSPORT_H */
