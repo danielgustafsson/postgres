@@ -378,16 +378,6 @@ be_tls_open_server(Port *port)
 					break;
 
 				/*
-				 * 'Confirm' indicates that an interactive confirmation from
-				 * the user is requested. This result code was deprecated in
-				 * 10.9 however so treat it as a Deny to avoid having to invoke
-				 * UI elements from the Keychain.
-				 */
-				case kSecTrustResultConfirm:
-					port->peer_cert_valid = true;
-					break;
-
-				/*
 				 * 'RecoverableTrustFailure' indicates that the certificate was
 				 * rejected but might be trusted with minor changes to the eval
 				 * context (ignoring expired certificate etc). In the frontend

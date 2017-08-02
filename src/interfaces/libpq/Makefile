@@ -59,7 +59,7 @@ endif
 
 ifeq ($(with_securetransport), yes)
 OBJS += fe-secure-securetransport.o
-override CFLAGS += -Wno-deprecated -framework Security -framework CoreFoundation -fconstant-cfstrings
+override CFLAGS += -framework Security -framework CoreFoundation -fconstant-cfstrings
 endif
 
 ifeq ($(PORTNAME), cygwin)

@@ -345,17 +345,6 @@ pg_SSLOpenClient(PGconn *conn)
 			}
 
 			/*
-			 * 'Confirm' indicates that an interactive confirmation from the
-			 * user is required. This result code was deprecated in macOS 10.9
-			 * however and should not occurr anymore. Treat it as a trust Deny
-			 * since it shouldn't happen, and to handle it we'd need to invoke
-			 * UI elements to request confirmation from the user.
-			 */
-			case kSecTrustResultConfirm:
-				trusted = false;
-				break;
-
-			/*
 			 * The below results are all cases where the certificate should be
 			 * rejected without further questioning.
 			 */
