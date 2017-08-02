@@ -137,14 +137,9 @@ pgtls_open_client(PGconn *conn)
 			return PGRES_POLLING_FAILED;
 		}
 
-		/*
-		 * SSLSetProtocolVersionEnabled() is marked as deprecated as of 10.9
-		 * but the alternative SSLSetSessionConfig() is as of 10.11 not yet
-		 * documented with the kSSLSessionConfig_xxx constants belonging to
-		 * the 10.12 SDK. Rely on the deprecation for now until the dust has
-		 * properly settled around this.
-		 */
-		SSLSetProtocolVersionEnabled(conn->ssl, kTLSProtocol12, true);
+		open_status = SSLSetProtocolVersionMin(conn->ssl, kTLSProtocol12);
+		if (open_status != noErr)
+			goto error;
 
 		open_status = SSLSetConnection(conn->ssl, conn);
 		if (open_status != noErr)

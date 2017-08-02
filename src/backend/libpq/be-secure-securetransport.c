@@ -271,14 +271,12 @@ be_tls_open_server(Port *port)
 	SSLSetDiffieHellmanParams((SSLContextRef) port->ssl,
 							  file_dh2048, sizeof(file_dh2048));
 
-	/*
-	 * SSLSetProtocolVersionEnabled() is marked as deprecated as of 10.9
-	 * but the alternative SSLSetSessionConfig() is as of 10.11 not yet
-	 * documented with the kSSLSessionConfig_xxx constants belonging to
-	 * the 10.12 SDK. Rely on the deprecated version for now until the
-	 * dust has properly settled around this.
-	 */
-	SSLSetProtocolVersionEnabled((SSLContextRef) port->ssl, kTLSProtocol12, true);
+	status = SSLSetProtocolVersionMin((SSLContextRef) port->ssl,
+									  kTLSProtocol12);
+	if (status != noErr)
+		ereport(COMMERROR,
+				(errmsg("could not set protocol for connection: \"%s\"",
+				 pg_SSLerrmessage(status))));
 
 	status = SSLSetCertificate((SSLContextRef) port->ssl,
 							   (CFArrayRef) chain);
