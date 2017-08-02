@@ -778,32 +778,28 @@ be_tls_write(Port *port, void *ptr, size_t len, int *waitfor)
 	return n;
 }
 
+/*
+ * be_tls_get_cipher_bits
+ *		Returns the number of bits in the encryption for the current cipher
+ *
+ * Note: In case of errors, this returns 0 to match the OpenSSL implementation.
+ * A NULL encryption will however also return 0 making it complicated to
+ * differentiate between the two.
+ */
 int
 be_tls_get_cipher_bits(Port *port)
 {
-	OSStatus			status;
-	SecTrustRef			trust;
-	SecCertificateRef	cert;
-	SecKeyRef			key;
-	int					keysize = 0;
+	OSStatus		status;
+	SSLCipherSuite	cipher;
 
 	if (!(SSLContextRef) port->ssl)
 		return 0;
 
-	status = SSLCopyPeerTrust((SSLContextRef) port->ssl, &trust);
-	if (status == noErr)
-	{
-		cert = SecTrustGetCertificateAtIndex(trust, 0);
-		status = SecCertificateCopyPublicKey(cert, &key);
-		if (status == noErr)
-		{
-			keysize = SecKeyGetBlockSize(key);
-			CFRelease(key);
-		}
-		CFRelease(trust);
-	}
+	status = SSLGetNegotiatedCipher((SSLContextRef) port->ssl, &cipher);
+	if (status != noErr)
+		return 0;
 
-	return keysize;
+	return pg_SSLcipherbits(cipher);
 }
 
 void
