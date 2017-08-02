@@ -478,6 +478,8 @@ struct pg_conn
 #endif   /* USE_OPENSSL */
 
 #ifdef USE_SECURETRANSPORT
+	char	   *keychain;
+
 	SSLContextRef	 ssl;		/* SSL context reference */
 	void		    *st_rootcert;
 	ssize_t			 ssl_buffered;

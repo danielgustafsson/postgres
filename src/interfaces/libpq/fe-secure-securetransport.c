@@ -76,7 +76,9 @@ static OSStatus pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 								   CFArrayRef *key_array,
 								   CFArrayRef *rootcert_array);
 
-static OSStatus import_certificate_keychain(const char *certificate, SecIdentityRef *identity);
+static OSStatus import_certificate_keychain(const char *certificate,
+											SecIdentityRef *identity,
+											SecKeychainRef keychain);
 static OSStatus import_pem(const char *path, int size, char *passphrase,
 						   CFArrayRef *cert_arr);
 
@@ -687,49 +689,46 @@ pg_SSLSocketWrite(SSLConnectionRef conn, const void *data, size_t *len)
 /*
  * import_certificate_keychain
  *
- * Queries the default Keychain for a certificate with the passed identity.
- * Keychains are searched by creating a dictionary of key/value pairs with the
- * search criteria and then asking for a copy of the matching entry/entries to
- * the search criteria.
+ * Queries the specified Keychain, or the default unless not defined, for a
+ * certificate with the passed identity.  Keychains are searched by creating a
+ * dictionary of key/value pairs with the search criteria and then asking for a
+ * copy of the matching entry/entries to the search criteria.
  */
-#define KEYCHAIN_SEARCH_SIZE 5
 static OSStatus
-import_certificate_keychain(const char *certificate, SecIdentityRef *identity)
+import_certificate_keychain(const char *certificate, SecIdentityRef *identity,
+							SecKeychainRef keychain)
 {
-	OSStatus		status = errSecItemNotFound;
-	CFTypeRef		key[KEYCHAIN_SEARCH_SIZE];
-	CFTypeRef		val[KEYCHAIN_SEARCH_SIZE];
-	CFDictionaryRef	identity_search;
-	CFStringRef		identity_ref;
-	CFArrayRef		temp;
+	OSStatus				status = errSecItemNotFound;
+	CFMutableDictionaryRef	query;
+	CFStringRef				cert;
+	CFArrayRef				temp;
 
-	identity_ref = CFStringCreateWithCString(NULL, certificate, kCFStringEncodingUTF8);
+	query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+									  &kCFTypeDictionaryValueCallBacks);
 
-	key[0] = kSecClass;
-	val[0] = kSecClassIdentity;
-	key[1] = kSecReturnRef;
-	val[1] = kCFBooleanTrue;
-	key[2] = kSecMatchLimit;
-	val[2] = kSecMatchLimitAll;
-	key[3] = kSecMatchPolicy;
-	val[3] = SecPolicyCreateSSL(false, NULL);
-	key[4] = kSecAttrLabel;
-	val[4] = identity_ref;
+	cert = CFStringCreateWithCString(NULL, certificate, kCFStringEncodingUTF8);
 
-	identity_search = CFDictionaryCreate(NULL,
-										 (const void **) key,
-										 (const void **) val,
-										 KEYCHAIN_SEARCH_SIZE,
-										 &kCFCopyStringDictionaryKeyCallBacks,
-										 &kCFTypeDictionaryValueCallBacks);
 	/*
-	 * Normally we could have used kSecMatchLimitOne in the above search dict
+	 * If we didn't get a Keychain passed, skip adding it to the dictionary
+	 * thus prompting a search in the users default Keychain.
+	 */
+	if (keychain)
+		CFDictionaryAddValue(query, kSecUseKeychain, keychain);
+	
+	CFDictionaryAddValue(query, kSecClass, kSecClassIdentity);
+	CFDictionaryAddValue(query, kSecReturnRef, kCFBooleanTrue);
+	CFDictionaryAddValue(query, kSecMatchLimit, kSecMatchLimitAll);
+	CFDictionaryAddValue(query, kSecMatchPolicy, SecPolicyCreateSSL(false, NULL));
+	CFDictionaryAddValue(query, kSecAttrLabel, cert);
+
+	/*
+	 * Normally we could have used kSecMatchLimitOne in the above dictionary
 	 * but since there are versions of macOS where the certificate matching on
 	 * the label doesn't work, we need to request all and find the one we want.
 	 * Copy all the results to a temp array and scan it for the certificate we
 	 * are interested in.
 	 */
-	status = SecItemCopyMatching(identity_search, (CFTypeRef *) &temp);
+	status = SecItemCopyMatching(query, (CFTypeRef *) &temp);
 	if (status == noErr)
 	{
 		OSStatus	search_stat;
@@ -747,7 +746,7 @@ import_certificate_keychain(const char *certificate, SecIdentityRef *identity)
 			if (search_stat == noErr)
 			{
 				SecCertificateCopyCommonName(search_cert, &cn);
-				if (CFStringCompare(cn, identity_ref, 0) == kCFCompareEqualTo)
+				if (CFStringCompare(cn, cert, 0) == kCFCompareEqualTo)
 				{
 					CFRelease(cn);
 					CFRelease(search_cert);
@@ -763,9 +762,8 @@ import_certificate_keychain(const char *certificate, SecIdentityRef *identity)
 		CFRelease(temp);
 	}
 
-	CFRelease(identity_search);
-	CFRelease(val[3]);
-	CFRelease(identity_ref);
+	CFRelease(query);
+	CFRelease(cert);
 
 	return status;
 }
@@ -867,10 +865,33 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 	char				fnbuf[MAXPGPATH];
 	char				sebuf[256];
 	bool				have_homedir;
+	bool				have_cert = false;
 	char	   		   *ssl_err_msg;
 	SecIdentityRef		identity = NULL;
 	SecCertificateRef	cert_ref;
 	SecKeyRef			key_ref = NULL;
+	CFArrayRef			keychains = NULL;
+
+	/*
+	 * If we have a keychain configured, open the referenced keychain as well
+	 * as the default keychain and prepare an array with the references for
+	 * searching.
+	 */
+	if (conn->keychain)
+	{
+		SecKeychainRef kcref[2];
+
+		if (stat(conn->keychain, &buf) == 0)
+		{
+			status = SecKeychainOpen(conn->keychain, &kcref[0]);
+			if (status == noErr)
+			{
+				SecKeychainCopyDefault(&kcref[1]);
+				keychains = CFArrayCreate(NULL, (const void **) kcref, 2,
+										  &kCFTypeArrayCallBacks);
+			}
+		}
+	}
 
 	/*
 	 * We'll need the home directory if any of the relevant parameters are
@@ -884,19 +905,23 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 	else	/* won't need it */
 		have_homedir = false;
 
-	/* Prepare the filename for reading the certificate */
+	/*
+	 * Prepare the filename for reading the certificate/ A configured sslcert
+	 * has priority
+	 */
 	if (conn->sslcert && strlen(conn->sslcert) > 0)
 		strlcpy(fnbuf, conn->sslcert, sizeof(fnbuf));
-	else if (have_homedir)
+	/* If there is a keychain explicitly configured it trumps defaults */
+	else if (have_homedir && !conn->keychain)
 		snprintf(fnbuf, sizeof(fnbuf), "%s/%s", homedir, USER_CERT_FILE);
 	else
-		strlcpy(fnbuf, USER_CERT_FILE, sizeof(fnbuf));
+		fnbuf[0] = '\0';
 
 	/*
 	 * If there is a file matching the path, the certificate must be loaded
 	 * from this file for us to continue.
 	 */
-	if (stat(fnbuf, &buf) == 0)
+	if (fnbuf[0] != '\0' && stat(fnbuf, &buf) == 0)
 	{
 		status = import_pem(fnbuf, buf.st_size, NULL, cert_array);
 		if (status != noErr)
@@ -910,6 +935,7 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 		}
 
 		cert_ref = (SecCertificateRef) CFArrayGetValueAtIndex(*cert_array, 0);
+		have_cert = true;
 
 		/*
 		 * We now have a certificate, so we need a private key as well in order
@@ -965,7 +991,7 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 			 * Search for the private key matching the cert_ref in the default
 			 * Keychain. If found, we get the identity returned.
 			 */
-			status = SecIdentityCreateWithCertificate(NULL, cert_ref, &identity);
+			status = SecIdentityCreateWithCertificate(keychains, cert_ref, &identity);
 			if (status != noErr)
 			{
 				printfPQExpBuffer(&conn->errorMessage,
@@ -991,13 +1017,27 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 							  fnbuf, pqStrerror(errno, sebuf, sizeof(sebuf)));
 			return errSecInternalError;
 		}
+	}
 
+	if (!identity)
+	{
 		/*
 		 * The certificate is not located in a file, this means that we must
 		 * look for the complete identity in a Keychain instead.
 		 */
-		import_certificate_keychain(conn->sslcert, &identity);
-		SecIdentityCopyPrivateKey(identity, &key_ref);
+		if (keychains)
+		{
+			import_certificate_keychain(conn->sslcert ? conn->sslcert : USER_CERT_FILE, &identity,
+										(SecKeychainRef) CFArrayGetValueAtIndex(keychains, 0));
+			if (!identity)
+				import_certificate_keychain(conn->sslcert ? conn->sslcert : USER_CERT_FILE, &identity,
+											(SecKeychainRef) CFArrayGetValueAtIndex(keychains, 1));
+		}
+		else
+			import_certificate_keychain(conn->sslcert ? conn->sslcert : USER_CERT_FILE, &identity, NULL);
+
+		if (identity)
+			SecIdentityCopyPrivateKey(identity, &key_ref);
 	}
 
 	if (identity)
@@ -1009,7 +1049,7 @@ pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
 		 * Keychain we need to include the certificates in the array passed to
 		 * SSLSetCertificate()
 		 */
-		if (cert_array)
+		if (have_cert)
 		{
 			cert_connection = CFArrayCreateMutableCopy(NULL, 0, *cert_array);
 			CFArraySetValueAtIndex(cert_connection, 0, identity);
