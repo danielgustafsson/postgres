@@ -858,8 +858,8 @@ import_pem(const char *path, int size, char *passphrase, CFArrayRef *certificate
  * populated here even for SSL library errors.
  */
 static OSStatus
-pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array, CFArrayRef *key_array,
-				   CFArrayRef *rootcert_array)
+pg_SSLLoadCertificate(PGconn *conn, CFArrayRef *cert_array,
+					  CFArrayRef *key_array, CFArrayRef *rootcert_array)
 {
 	OSStatus			status;
 	struct stat 		buf;

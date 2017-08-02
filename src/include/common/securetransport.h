@@ -18,7 +18,7 @@
 #include <Security/SecureTransport.h>
 
 /*
- * SSLciphername
+ * pg_SSLciphername
  *
  * Translate a SSLCipherSuite code into a string literal suitable for printing
  * in log/informational messages to the user. Since this implementation of the
