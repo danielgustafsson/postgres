@@ -53,6 +53,8 @@ parseCommandLine(int argc, char *argv[])
 		{"retain", no_argument, NULL, 'r'},
 		{"jobs", required_argument, NULL, 'j'},
 		{"verbose", no_argument, NULL, 'v'},
+		{"add-checksum", no_argument, NULL, 'X'},
+		{"remove-checksum", no_argument, NULL, 'x'},
 		{NULL, 0, NULL, 0}
 	};
 	int			option;			/* Command line option */
@@ -100,7 +102,7 @@ parseCommandLine(int argc, char *argv[])
 	if ((log_opts.internal = fopen_priv(INTERNAL_LOG_FILE, "a")) == NULL)
 		pg_fatal("could not write to log file \"%s\"\n", INTERNAL_LOG_FILE);
 
-	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:ko:O:p:P:rU:v",
+	while ((option = getopt_long(argc, argv, "d:D:b:B:cj:ko:O:p:P:rU:vXx",
 								 long_options, &optindex)) != -1)
 	{
 		switch (option)
@@ -203,12 +205,25 @@ parseCommandLine(int argc, char *argv[])
 				log_opts.verbose = true;
 				break;
 
+			case 'X':
+				pg_log(PG_REPORT, "Adding data checksums\n");
+				user_opts.checksum_mode = CHECKSUM_ADD;
+				break;
+
+			case 'x':
+				pg_log(PG_REPORT, "Removing data checksums\n");
+				user_opts.checksum_mode = CHECKSUM_REMOVE;
+				break;
+
 			default:
 				pg_fatal("Try \"%s --help\" for more information.\n",
 						 os_info.progname);
 				break;
 		}
 	}
+
+	if (user_opts.transfer_mode == TRANSFER_MODE_LINK && user_opts.checksum_mode != CHECKSUM_NONE)
+		pg_fatal("Checksumming only supported in copy mode.\n");
 
 	/* label start of upgrade in logfiles */
 	for (filename = output_files; *filename != NULL; filename++)
@@ -293,6 +308,8 @@ usage(void)
 	printf(_("  -U, --username=NAME           cluster superuser (default \"%s\")\n"), os_info.user);
 	printf(_("  -v, --verbose                 enable verbose internal logging\n"));
 	printf(_("  -V, --version                 display version information, then exit\n"));
+	printf(_("  -X, --add-checksum            add data checksums to new cluster\n"));
+	printf(_("  -x, --remove-checksum         remove data checksums from relations new cluster\n"));
 	printf(_("  -?, --help                    show this help, then exit\n"));
 	printf(_("\n"
 			 "Before running pg_upgrade you must:\n"

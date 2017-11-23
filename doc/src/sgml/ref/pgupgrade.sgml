@@ -183,6 +183,19 @@
      </varlistentry>
 
      <varlistentry>
+      <term><option>-X</option></term>
+      <term><option>--add-checksum</option></term>
+      <listitem><para>add data checksums to the new cluster</para></listitem>
+     </varlistentry>
+
+     <varlistentry>
+      <term><option>-x</option></term>
+      <term><option>--remove-checksum</option></term>
+      <listitem><para>remove data checksums present in the old cluster during
+      transfer to the new cluster</para></listitem>
+     </varlistentry>
+
+     <varlistentry>
       <term><option>-?</option></term>
       <term><option>--help</option></term>
       <listitem><para>show help, then exit</para></listitem>

@@ -239,6 +239,16 @@ typedef enum
 } transferMode;
 
 /*
+ * Enumeration to denote checksum modes
+ */
+typedef enum
+{
+	CHECKSUM_NONE = 0,
+	CHECKSUM_ADD,
+	CHECKSUM_REMOVE
+} checksumMode;
+
+/*
  * Enumeration to denote pg_log modes
  */
 typedef enum
@@ -298,6 +308,8 @@ typedef struct
 								 * changes */
 	transferMode transfer_mode; /* copy files or link them? */
 	int			jobs;
+	checksumMode checksum_mode;	/* true -> calculate and add checksums to
+								 * data pages */
 } UserOpts;
 
 
@@ -375,6 +387,8 @@ void rewriteVisibilityMap(const char *fromfile, const char *tofile,
 					 const char *schemaName, const char *relName);
 void		check_hard_link(void);
 FILE	   *fopen_priv(const char *path, const char *mode);
+void rewriteHeapPageChecksum(const char *fromfile, const char *tofile,
+					 const char *schemaName, const char *relName);
 
 /* function.c */
 

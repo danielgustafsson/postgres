@@ -252,9 +252,20 @@ transfer_relfile(FileNameMap *map, const char *type_suffix, bool vm_must_add_fro
 		}
 		else if (user_opts.transfer_mode == TRANSFER_MODE_COPY)
 		{
-			pg_log(PG_VERBOSE, "copying \"%s\" to \"%s\"\n",
-				   old_file, new_file);
-			copyFile(old_file, new_file, map->nspname, map->relname);
+
+			if (user_opts.checksum_mode != CHECKSUM_NONE)
+			{
+				pg_log(PG_VERBOSE, "rewriting \"%s\" to \"%s\"\n",
+					   old_file, new_file);
+				rewriteHeapPageChecksum(old_file, new_file, map->nspname,
+										map->relname);
+			}
+			else
+			{
+				pg_log(PG_VERBOSE, "copying \"%s\" to \"%s\"\n",
+					   old_file, new_file);
+				copyFile(old_file, new_file, map->nspname, map->relname);
+			}
 		}
 		else
 		{
