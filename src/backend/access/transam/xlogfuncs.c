@@ -698,3 +698,10 @@ pg_backup_start_time(PG_FUNCTION_ARGS)
 
 	PG_RETURN_DATUM(xtime);
 }
+
+Datum
+enable_data_checksums(PG_FUNCTION_ARGS)
+{
+	EnableDataChecksumsProgress();
+	PG_RETURN_BOOL(DataChecksumsEnabled());
+}

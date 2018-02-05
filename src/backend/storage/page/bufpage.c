@@ -97,7 +97,7 @@ PageIsVerified(Page page, BlockNumber blkno)
 		{
 			checksum = pg_checksum_page((char *) page, blkno);
 
-			if (checksum != p->pd_checksum)
+			if (checksum != p->pd_checksum && !DataChecksumsInProgress())
 				checksum_failure = true;
 		}
 

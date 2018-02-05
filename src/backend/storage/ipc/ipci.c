@@ -27,6 +27,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/checksumhelper.h"
 #include "postmaster/postmaster.h"
 #include "replication/logicallauncher.h"
 #include "replication/slot.h"
@@ -261,6 +262,11 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	WalSndShmemInit();
 	WalRcvShmemInit();
 	ApplyLauncherShmemInit();
+	/*
+	 * TODO: This needs to be moved to when the backend actually starts to
+	 * avoid consuming memory for no reason
+	 */
+	ChecksumHelperShmemInit();
 
 	/*
 	 * Set up other modules that need some shared memory space

@@ -48,6 +48,7 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/checksumhelper.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
@@ -2843,6 +2844,16 @@ pgstat_bestart(void)
 			/* bgworker */
 			beentry->st_backendType = B_BG_WORKER;
 		}
+		else if (IsChecksumHelperLauncherProcess())
+		{
+			/* Checksum Helper Launcher */
+			beentry->st_backendType = B_CHECKSUMHELPER_LAUNCHER;
+		}
+		else if (IsChecksumHelperWorkerProcess())
+		{
+			/* Checksum Helper Worker */
+			beentry->st_backendType = B_CHECKSUMHELPER_WORKER;
+		}
 		else
 		{
 			/* client-backend */
@@ -3512,6 +3523,9 @@ pgstat_get_wait_activity(WaitEventActivity w)
 		case WAIT_EVENT_WAL_WRITER_MAIN:
 			event_name = "WalWriterMain";
 			break;
+		case WAIT_EVENT_CHECKSUMHELPER_LAUNCHER_MAIN:
+			event_name = "ChecksumHelper";
+			break;
 			/* no default case, so that compiler will warn */
 	}
 
@@ -4125,6 +4139,11 @@ pgstat_get_backend_desc(BackendType backendType)
 		case B_WAL_WRITER:
 			backendDesc = "walwriter";
 			break;
+		case B_CHECKSUMHELPER_LAUNCHER:
+			backendDesc = "checksumhelper launcher";
+			break;
+		case B_CHECKSUMHELPER_WORKER:
+			backendDesc = "checksumhelper worker";
 	}
 
 	return backendDesc;

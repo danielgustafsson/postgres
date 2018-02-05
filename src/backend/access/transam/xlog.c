@@ -4734,6 +4734,46 @@ DataChecksumsEnabled(void)
 	return (ControlFile->data_checksum_version > 0);
 }
 
+bool
+DataChecksumsInProgress(void)
+{
+	Assert(ControlFile != NULL);
+	return (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION);
+}
+
+void
+EnableDataChecksumsProgress(void)
+{
+	if (DataChecksumsEnabled())
+		return;
+
+	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_INPROGRESS_VERSION;
+	/* Make the initdb settings visible as GUC variables, too */
+	SetConfigOption("data_checksums", "yes", PGC_INTERNAL, PGC_S_OVERRIDE);
+	UpdateControlFile();
+	LWLockRelease(ControlFileLock);
+}
+
+void
+SetDataChecksumsNormal(void)
+{
+	if (!DataChecksumsEnabled())
+		elog(ERROR, "Checksums not enabled");
+
+	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+
+	if (ControlFile->data_checksum_version != PG_DATA_CHECKSUM_INPROGRESS_VERSION)
+	{
+		LWLockRelease(ControlFileLock);
+		elog(ERROR, "Checksums not in in_progress mode");
+	}
+
+	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_VERSION;
+	UpdateControlFile();
+	LWLockRelease(ControlFileLock);
+}
+
 /*
  * Returns a fake LSN for unlogged relations.
  *

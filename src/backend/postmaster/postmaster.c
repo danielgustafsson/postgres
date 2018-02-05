@@ -109,6 +109,7 @@
 #include "port/pg_bswap.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/checksumhelper.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/pgarch.h"
 #include "postmaster/postmaster.h"
@@ -253,7 +254,8 @@ static pid_t StartupPID = 0,
 			AutoVacPID = 0,
 			PgArchPID = 0,
 			PgStatPID = 0,
-			SysLoggerPID = 0;
+			SysLoggerPID = 0,
+			ChecksumHelperPID = 0;
 
 /* Startup process's status */
 typedef enum
@@ -1829,6 +1831,14 @@ ServerLoop(void)
 		if (WalReceiverRequested)
 			MaybeStartWalReceiver();
 
+		/*
+		 * If we have enabled data checksums on a running cluster, we are now
+		 * in in-progress mode and need to start the checksumhelper to back-
+		 * fill the existing relations with data checsksums,
+		 */
+		if (ChecksumHelperPID == 0 && DataChecksumsInProgress())
+			ChecksumHelperPID = StartChecksumHelperLauncher();
+
 		/* Get other worker processes running, if needed */
 		if (StartWorkerNeeded || HaveCrashedWorker)
 			maybe_start_bgworkers();
@@ -2688,6 +2698,9 @@ pmdie(SIGNAL_ARGS)
 				/* and the walwriter too */
 				if (WalWriterPID != 0)
 					signal_child(WalWriterPID, SIGTERM);
+				/* and the checksumhelper too */
+				if (ChecksumHelperPID != 0)
+					signal_child(ChecksumHelperPID, SIGTERM);
 
 				/*
 				 * If we're in recovery, we can't kill the startup process
@@ -3058,6 +3071,12 @@ reaper(SIGNAL_ARGS)
 			if (!EXIT_STATUS_0(exitstatus))
 				HandleChildCrash(pid, exitstatus,
 								 _("autovacuum launcher process"));
+			continue;
+		}
+
+		if (pid == ChecksumHelperPID)
+		{
+			ChecksumHelperPID = 0;
 			continue;
 		}
 
@@ -3810,6 +3829,7 @@ PostmasterStateMachine(void)
 			Assert(CheckpointerPID == 0);
 			Assert(WalWriterPID == 0);
 			Assert(AutoVacPID == 0);
+			Assert(ChecksumHelperPID == 0);
 			/* syslogger is not considered here */
 			pmState = PM_NO_CHILDREN;
 		}

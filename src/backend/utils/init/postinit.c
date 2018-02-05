@@ -38,6 +38,7 @@
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/autovacuum.h"
+#include "postmaster/checksumhelper.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
 #include "storage/bufmgr.h"
@@ -671,7 +672,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	before_shmem_exit(ShutdownPostgres, 0);
 
 	/* The autovacuum launcher is done here */
-	if (IsAutoVacuumLauncherProcess())
+	if (IsAutoVacuumLauncherProcess() || IsChecksumHelperLauncherProcess())
 	{
 		/* report this backend in the PgBackendStatus array */
 		pgstat_bestart();
@@ -711,7 +712,7 @@ InitPostgres(const char *in_dbname, Oid dboid, const char *username,
 	 * In standalone mode and in autovacuum worker processes, we use a fixed
 	 * ID, otherwise we figure it out from the authenticated user name.
 	 */
-	if (bootstrap || IsAutoVacuumWorkerProcess())
+	if (bootstrap || IsAutoVacuumWorkerProcess() || IsChecksumHelperWorkerProcess())
 	{
 		InitializeSessionUserIdStandalone();
 		am_superuser = true;
