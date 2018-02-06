@@ -4747,9 +4747,9 @@ EnableDataChecksumsProgress(void)
 	if (DataChecksumsEnabled())
 		return;
 
+	SetConfigOption("data_checksums", "inprogress", PGC_INTERNAL, PGC_S_OVERRIDE);
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_INPROGRESS_VERSION;
-	SetConfigOption("data_checksums", "yes", PGC_INTERNAL, PGC_S_OVERRIDE);
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
 }
@@ -4771,6 +4771,7 @@ SetDataChecksumsNormal(void)
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_VERSION;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+	SetConfigOption("data_checksums", "on", PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
 /*
