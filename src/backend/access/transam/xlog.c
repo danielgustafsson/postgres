@@ -4749,7 +4749,6 @@ EnableDataChecksumsProgress(void)
 
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_INPROGRESS_VERSION;
-	/* Make the initdb settings visible as GUC variables, too */
 	SetConfigOption("data_checksums", "yes", PGC_INTERNAL, PGC_S_OVERRIDE);
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
