@@ -240,13 +240,11 @@ ChecksumHelperLauncherMain(int argc, char **argv)
 		 * process.  We don't need to protect the DatabaseList with a lock
 		 * since this is the only place where we alter it.
 		 */
-		db = list_head(DatabaseList);
+		db = (ChecksumHelperDatabase *) lfirst(list_head(DatabaseList));
 		DatabaseList = list_delete_first(DatabaseList);
 
 		LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
-
-		/* XXX: Launch worker */
-
+		/* TODO: Launch worker */
 		LWLockRelease(ChecksumHelperLock);
 	}
 
