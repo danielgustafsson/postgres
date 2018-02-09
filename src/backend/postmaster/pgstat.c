@@ -3512,9 +3512,6 @@ pgstat_get_wait_activity(WaitEventActivity w)
 		case WAIT_EVENT_WAL_WRITER_MAIN:
 			event_name = "WalWriterMain";
 			break;
-		case WAIT_EVENT_CHECKSUMHELPER_LAUNCHER_MAIN:
-			event_name = "ChecksumHelper";
-			break;
 			/* no default case, so that compiler will warn */
 	}
 
