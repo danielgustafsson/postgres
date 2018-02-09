@@ -36,6 +36,7 @@ usage()
 	printf(_("  %s [OPTION] [DATADIR]\n"), progname);
 	printf(_("\nOptions:\n"));
 	printf(_(" [-D] DATADIR    data directory\n"));
+	printf(_("  -f,            force check even if checksums are disabled\n"));
 	printf(_("  -V, --version  output version information, then exit\n"));
 	printf(_("  -?, --help     show this help, then exit\n"));
 	printf(_("\nIf no data directory (DATADIR) is specified, "
@@ -150,6 +151,7 @@ int
 main(int argc, char *argv[])
 {
 	char	   *DataDir = NULL;
+	bool force = false;
 	int c;
 	ControlFileData *ControlFile;
 	bool crc_ok;
@@ -172,14 +174,16 @@ main(int argc, char *argv[])
 		}
 	}
 
-	while ((c = getopt(argc, argv, "D:")) != -1)
+	while ((c = getopt(argc, argv, "D:f")) != -1)
 	{
 		switch (c)
 		{
 			case 'D':
 				DataDir = optarg;
 				break;
-
+			case 'f':
+				force = true;
+				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 				exit(1);
@@ -223,6 +227,12 @@ main(int argc, char *argv[])
 		ControlFile->state != DB_SHUTDOWNED_IN_RECOVERY)
 	{
 		fprintf(stderr, _("%s: cluster must be shut down to verify checksums.\n"), progname);
+		exit(1);
+	}
+
+	if (ControlFile->data_checksum_version == 0 && !force)
+	{
+		fprintf(stderr, _("%s: data checksums are not enabled in cluster.\n"), progname);
 		exit(1);
 	}
 
