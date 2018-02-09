@@ -366,6 +366,11 @@ BuildDatabaseList(void)
 		Form_pg_database		pgdb = (Form_pg_database) GETSTRUCT(tup);
 		ChecksumHelperDatabase *db;
 
+		if (!pgdb->datallowconn)
+			ereport(ERROR,
+					(errmsg("Database %s does not allow connections.", NameStr(pgdb->datname)),
+					 errhint("Allow connections using ALTER DATABASE and try again.")));
+
 		oldctx = MemoryContextSwitchTo(ctx);
 
 		db = (ChecksumHelperDatabase *) palloc(sizeof(ChecksumHelperDatabase));
@@ -404,7 +409,7 @@ void ChecksumHelperWorkerMain(Datum arg)
 	ereport(DEBUG1,
 		   (errmsg("Checksum worker starting for database oid %d", dboid)));
 
-	BackgroundWorkerInitializeConnectionByOid(dboid, NULL);
+	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
 
 	sleep(10);
 
