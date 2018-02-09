@@ -4655,7 +4655,7 @@ ReadControlFile(void)
 	CalculateCheckpointSegments();
 
 	/* Make the initdb settings visible as GUC variables, too */
-	SetConfigOption("data_checksums", DataChecksumsEnabled() ? "yes" : "no",
+	SetConfigOption("data_checksums", DataChecksumsEnabled() ? "on" : "off",
 					PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
