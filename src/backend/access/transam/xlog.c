@@ -4653,11 +4653,6 @@ ReadControlFile(void)
 		(SizeOfXLogLongPHD - SizeOfXLogShortPHD);
 
 	CalculateCheckpointSegments();
-
-	/* Make the initdb settings visible as GUC variables, too */
-
-	SetConfigOption("data_checksums", DataChecksumsInProgress() ? "inprogress" : (DataChecksumsEnabled() ? "on" : "off"),
-					PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
 void
@@ -4748,7 +4743,6 @@ SetDataChecksumsInProgress(void)
 	if (DataChecksumsEnabled())
 		return;
 
-	SetConfigOption("data_checksums", "inprogress", PGC_INTERNAL, PGC_S_OVERRIDE);
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_INPROGRESS_VERSION;
 	UpdateControlFile();
@@ -4772,7 +4766,6 @@ SetDataChecksumsOn(void)
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_VERSION;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
-	SetConfigOption("data_checksums", "on", PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
 void
@@ -4783,7 +4776,18 @@ SetDataChecksumsOff(void)
 	ControlFile->data_checksum_version = 0;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
-	SetConfigOption("data_checksums", "off", PGC_INTERNAL, PGC_S_OVERRIDE);
+}
+
+/* guc hook */
+const char *
+show_data_checksums(void)
+{
+	if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION)
+		return "on";
+	else if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
+		return "inprogress";
+	else
+		return "off";
 }
 
 /*

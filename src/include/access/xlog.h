@@ -262,6 +262,7 @@ extern bool DataChecksumsInProgress(void);
 extern void SetDataChecksumsInProgress(void);
 extern void SetDataChecksumsOn(void);
 extern void SetDataChecksumsOff(void);
+extern const char *show_data_checksums(void);
 extern XLogRecPtr GetFakeLSNForUnloggedRel(void);
 extern Size XLOGShmemSize(void);
 extern void XLOGShmemInit(void);

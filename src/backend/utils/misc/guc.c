@@ -32,6 +32,7 @@
 #include "access/transam.h"
 #include "access/twophase.h"
 #include "access/xact.h"
+#include "access/xlog.h"
 #include "access/xlog_internal.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
@@ -525,7 +526,7 @@ static int	max_identifier_length;
 static int	block_size;
 static int	segment_size;
 static int	wal_block_size;
-static int	data_checksums;
+static int	data_checksums_tmp; /* only accessed locally! */
 static bool integer_datetimes;
 static bool assert_enabled;
 
@@ -3962,9 +3963,9 @@ static struct config_enum ConfigureNamesEnum[] =
 			NULL,
 			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
 		},
-		&data_checksums,
+		&data_checksums_tmp,
 		DATA_CHECKSUMS_OFF, data_checksum_options,
-		NULL, NULL, NULL
+		NULL, NULL, show_data_checksums
 	},
 
 	/* End-of-list marker */
