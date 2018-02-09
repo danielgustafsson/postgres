@@ -14,19 +14,15 @@
 #ifndef CHECKSUMHELPER_H
 #define CHECKSUMHELPER_H
 
-/* Status functions */
-extern bool IsChecksumHelperLauncherProcess(void);
-extern bool IsChecksumHelperWorkerProcess(void);
-
 /* Shared memory */
 extern Size ChecksumHelperShmemSize(void);
 extern void ChecksumHelperShmemInit(void);
 
-/* Called from the postmaster */
-int StartChecksumHelperLauncher(void);
+/* Start the background processes for enabling checksums */
+bool StartChecksumHelperLauncher(void);
 
-#ifdef EXEC_BACKEND
-extern void ChecksumHelperLauncherMain(int argc, char **argv);
-#endif
+/* Background worker entrypoints */
+void ChecksumHelperLauncherMain(Datum arg);
+void ChecksumHelperWorkerMain(Datum arg);
 
 #endif							/* CHECKSUMHELPER_H */

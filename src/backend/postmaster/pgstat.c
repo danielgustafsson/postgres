@@ -48,7 +48,6 @@
 #include "miscadmin.h"
 #include "pg_trace.h"
 #include "postmaster/autovacuum.h"
-#include "postmaster/checksumhelper.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/postmaster.h"
 #include "replication/walsender.h"
@@ -2843,16 +2842,6 @@ pgstat_bestart(void)
 		{
 			/* bgworker */
 			beentry->st_backendType = B_BG_WORKER;
-		}
-		else if (IsChecksumHelperLauncherProcess())
-		{
-			/* Checksum Helper Launcher */
-			beentry->st_backendType = B_CHECKSUMHELPER_LAUNCHER;
-		}
-		else if (IsChecksumHelperWorkerProcess())
-		{
-			/* Checksum Helper Worker */
-			beentry->st_backendType = B_CHECKSUMHELPER_WORKER;
 		}
 		else
 		{

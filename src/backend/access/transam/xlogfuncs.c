@@ -24,6 +24,7 @@
 #include "catalog/pg_type.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "postmaster/checksumhelper.h"
 #include "replication/walreceiver.h"
 #include "storage/smgr.h"
 #include "utils/builtins.h"
@@ -702,6 +703,10 @@ pg_backup_start_time(PG_FUNCTION_ARGS)
 Datum
 enable_data_checksums(PG_FUNCTION_ARGS)
 {
-	EnableDataChecksumsProgress();
+	SetDataChecksumsInProgress();
+	if (!StartChecksumHelperLauncher())
+		ereport(ERROR,
+				(errmsg("failed to start checksum helper process")));
+
 	PG_RETURN_BOOL(DataChecksumsEnabled());
 }

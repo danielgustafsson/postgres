@@ -4655,7 +4655,8 @@ ReadControlFile(void)
 	CalculateCheckpointSegments();
 
 	/* Make the initdb settings visible as GUC variables, too */
-	SetConfigOption("data_checksums", DataChecksumsEnabled() ? "on" : "off",
+
+	SetConfigOption("data_checksums", DataChecksumsInProgress() ? "inprogress" : (DataChecksumsEnabled() ? "on" : "off"),
 					PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
@@ -4742,7 +4743,7 @@ DataChecksumsInProgress(void)
 }
 
 void
-EnableDataChecksumsProgress(void)
+SetDataChecksumsInProgress(void)
 {
 	if (DataChecksumsEnabled())
 		return;
@@ -4755,10 +4756,10 @@ EnableDataChecksumsProgress(void)
 }
 
 void
-SetDataChecksumsNormal(void)
+SetDataChecksumsOn(void)
 {
 	if (!DataChecksumsEnabled())
-		elog(ERROR, "Checksums not enabled");
+		elog(ERROR, "Checksums not enabled or in progress");
 
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 
@@ -4772,6 +4773,17 @@ SetDataChecksumsNormal(void)
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
 	SetConfigOption("data_checksums", "on", PGC_INTERNAL, PGC_S_OVERRIDE);
+}
+
+void
+SetDataChecksumsOff(void)
+{
+	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+
+	ControlFile->data_checksum_version = 0;
+	UpdateControlFile();
+	LWLockRelease(ControlFileLock);
+	SetConfigOption("data_checksums", "off", PGC_INTERNAL, PGC_S_OVERRIDE);
 }
 
 /*

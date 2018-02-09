@@ -30,6 +30,7 @@
 #include "lib/ilist.h"
 #include "miscadmin.h"
 #include "pgstat.h"
+#include "postmaster/bgworker.h"
 #include "postmaster/checksumhelper.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/postmaster.h"
@@ -41,265 +42,268 @@
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
 
+// XXX: for sleep() only!
+#include <unistd.h>
+
 /*
- * GUCs
+ * Maximum number of times to try enabling checksums in a specific
+ * database before giving up.
  */
-int			checksumhelper_max_workers;
+#define MAX_ATTEMPTS 4
 
-typedef struct ChecksumHelperDatabase
-{
-	Oid			dboid;
-	const char *dbname;
-} ChecksumHelperDatabase;
-
-/*--------------
- * Structure holding information about a single worker.
- *
- * cwi_links		entry into free list or running list
- * cwi_dboid		Oid of the database the worker is checksumming
- * cwi_tableoid		Oid of the current table being worked on
- * cwi_proc			pointer to PGPROC of the running worker, or NULL
- *
- * All fields are protected by ChecksumHelperLock.
- *---------------
- */
-typedef struct ChecksumWorkerInfoData
-{
-	dlist_node	cwi_links;
-	Oid			cwi_dboid;
-	Oid			cwi_tableoid;
-	PGPROC	   *cwi_proc;
-} ChecksumWorkerInfoData;
-
-typedef struct ChecksumWorkerInfoData *ChecksumWorkerInfo;
-
-/*--------------
- *
- * ch_launcherpid
- * ch_freeWorkers
- * ch_runningWorkers
- *--------------
- */
 typedef struct ChecksumHelperShmemStruct
 {
-	pid_t		ch_launcherpid;
-	dlist_head	ch_freeWorkers;
-	dlist_head	ch_runningWorkers;
+	bool		success;
 
 } ChecksumHelperShmemStruct;
 
 /* Shared memory segment for checksum helper */
 static ChecksumHelperShmemStruct *ChecksumHelperShmem;
 
-/* Type of process */
-static bool am_checksumhelper_launcher = false;
-static bool am_checksumhelper_worker = false;
-
 /* Signal handling */
-static volatile sig_atomic_t got_SIGHUP = false;
 static volatile sig_atomic_t got_SIGTERM = false;
 
-/* Loop control */
-static int ChecksumHelperTimeout = 300;
-
 /* Bookkeeping for work to do */
-static List * DatabaseList = NIL;
-
-/* Worker variables */
-static ChecksumWorkerInfo MyWorkerInfo = NULL;
+typedef struct ChecksumHelperDatabase
+{
+	Oid			dboid;
+	char   	   *dbname;
+	int			attempts;
+	bool		success;
+} ChecksumHelperDatabase;
 
 /* Prototypes */
-static void ch_sighup_handler(SIGNAL_ARGS);
-static void ch_sigterm_handler(SIGNAL_ARGS);
-static void BuildDatabaseList(void);
-static void FreeChecksumWorkerInfo(int code, Datum arg);
-NON_EXEC_STATIC void ChecksumHelperLauncherMain(int argc, char **argv);
+static List *BuildDatabaseList(void);
+static bool ProcessDatabase(ChecksumHelperDatabase *db);
 
 /*
  * Main entry point for checksum helper launcher process
  */
-int
+bool
 StartChecksumHelperLauncher(void)
 {
-	pid_t		ChecksumhelperPID;
+	BackgroundWorker bgw;
+	BackgroundWorkerHandle *bgw_handle;
 
-#ifdef EXEC_BACKEND
-	switch ((ChecksumhelperPID = chlauncher_forkexec()))
-#else
-	switch ((ChecksumhelperPID = fork_process()))
-#endif
-	{
-		case -1:
-			ereport(LOG,
-					(errmsg("could not launch checksum helper process: %m")));
-			return 0;
+	/*
+	 * XXX: ensure only one can be started!
+	 */
 
-#ifndef EXEC_BACKEND
-		case 0:
-			InitPostmasterChild();
+	memset(&bgw, 0, sizeof(bgw));
+	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "postgres");
+	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ChecksumHelperLauncherMain");
+	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksum helper launcher");
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksum helper launcher");
+	bgw.bgw_restart_time = BGW_NEVER_RESTART;
+	bgw.bgw_notify_pid = MyProcPid;
+	bgw.bgw_main_arg = (Datum) 0;
 
-			ClosePostmasterPorts(false);
+	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
+		return false;
 
-			ChecksumHelperLauncherMain(0, NULL);
-			break;
-#endif
-			
-		default:
-			return (int) ChecksumhelperPID;
-	}
-
-	/* unreached */
-	return 0;
+	return true;
 }
 
-NON_EXEC_STATIC void
-ChecksumHelperLauncherMain(int argc, char **argv)
+/*
+ * Enable checksums in a single database.
+ * We do this by launching a dynamic background worker into this database,
+ * and waiting for it to finish.
+ * We have to do this in a separate worker, since each process can only be
+ * connected to one database during it's lifetime.
+ */
+static bool
+ProcessDatabase(ChecksumHelperDatabase *db)
 {
-	bool			done = false;
+	BackgroundWorker bgw;
+	BackgroundWorkerHandle *bgw_handle;
+	BgwHandleStatus status;
+	pid_t pid;
 
-	am_checksumhelper_launcher = true;
+	ChecksumHelperShmem->success = false;
 
-	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_LAUNCHER), "", "", "");
+	memset(&bgw, 0, sizeof(bgw));
+	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
+	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
+	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "postgres");
+	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ChecksumHelperWorkerMain");
+	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksum helper worker");
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksum helper worker");
+	bgw.bgw_restart_time = BGW_NEVER_RESTART;
+	bgw.bgw_notify_pid = MyProcPid;
+	bgw.bgw_main_arg = ObjectIdGetDatum(db->dboid);
+
+	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
+	{
+		ereport(LOG,
+				(errmsg("failed to start worker for checksum helper in %s", db->dbname)));
+		return false;
+	}
+
+	status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
+	if (status != BGWH_STARTED)
+	{
+		ereport(LOG,
+				(errmsg("failed to wait for worker startup for checksum helper in %s", db->dbname)));
+		return false;
+	}
+
+	ereport(DEBUG1,
+			(errmsg("started background worker for checksums in %s", db->dbname)));
+
+	status = WaitForBackgroundWorkerShutdown(bgw_handle);
+	if (status != BGWH_STOPPED)
+	{
+		ereport(LOG,
+				(errmsg("failed to wait for worker shutdown for checksum helper in %s", db->dbname)));
+		return false;
+	}
+
+	ereport(DEBUG1,
+		   (errmsg("background worker for checksums in %s completed", db->dbname)));
+
+	return ChecksumHelperShmem->success;
+}
+
+void
+ChecksumHelperLauncherMain(Datum arg)
+{
+	List *DatabaseList;
 
 	ereport(DEBUG1,
 			(errmsg("checksumhelper launcher started")));
 
-	SetProcessingMode(InitProcessing);
+	pqsignal(SIGTERM, die);
 
-	pqsignal(SIGHUP, ch_sighup_handler);
-	pqsignal(SIGINT, StatementCancelHandler);
-	pqsignal(SIGTERM, ch_sigterm_handler);
-	pqsignal(SIGQUIT, quickdie);
-	InitializeTimeouts();		/* establishes SIGALRM handler */
+	BackgroundWorkerUnblockSignals();
 
-	BaseInit();
+	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_LAUNCHER), "", "", "");
 
-#ifndef EXEC_BACKEND
-	InitProcess();
-#endif
 
-	InitPostgres(NULL, InvalidOid, NULL, InvalidOid, NULL);
-
-	SetProcessingMode(NormalProcessing);
-
-	ChecksumHelperShmem->ch_launcherpid = MyProcPid;
+	/*
+	 * Initialize a connection to shared catalogs only.
+	 */
+	BackgroundWorkerInitializeConnection(NULL, NULL);
 
 	/*
 	 * Create a database list.  We don't need to concern ourselves with
 	 * rebuilding this list during runtime since any new created database
 	 * will be running with checksums turned on from the start.
 	 */
-	BuildDatabaseList();
+	DatabaseList = BuildDatabaseList();
 
 	/*
 	 * If there are no databases at all to checksum, we can exit immediately
 	 * as there is no work to do.
 	 */
 	if (DatabaseList == NIL || list_length(DatabaseList) == 0)
-		goto shutdown;
+		return;
 
-	/*
-	 * Main loop, loop until we've either touched all databases or we are
-	 * signalled to exit.
-	 */
-	while (!got_SIGTERM)
+	while (true)
 	{
-		ChecksumHelperDatabase *db;
-		int						rc;
+		List *remaining = NIL;
+		ListCell *lc, *lc2;
+		List *CurrentDatabases = NIL;
 
-		/* sleep */
-		rc = WaitLatch(MyLatch,
-					   WL_LATCH_SET | WL_TIMEOUT | WL_POSTMASTER_DEATH,
-					   ChecksumHelperTimeout * 1000L /* convert to ms */ ,
-					   WAIT_EVENT_CHECKSUMHELPER_LAUNCHER_MAIN);
+		elog(DEBUG1, "Entering loop, length %i", list_length(DatabaseList));
+		foreach (lc, DatabaseList)
+		{
+			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 
-		ResetLatch(MyLatch);
+			elog(DEBUG1, "Looping for %s", db->dbname);
+			if (ProcessDatabase(db))
+			{
+				pfree(db->dbname);
+				pfree(db);
+			}
+			else
+			{
+				/*
+				 * Put failed databases on the remaining list.
+				 */
+				remaining = lappend(remaining, db);
+			}
+		}
+		elog(DEBUG1, "Loop 1 done");
+		list_free(DatabaseList);
 
-		if (got_SIGTERM)
+		DatabaseList = remaining;
+		remaining = NIL;
+
+		/*
+		 * DatabaseList now has all databases not yet processed. This can be because
+		 * they failed for some reason, or because the database was DROPed between
+		 * us getting the database list and trying to process it.
+		 * Get a fresh list of databases to detect the second case with.
+		 * Any database that still exists but failed we retry for a limited number
+		 * of times before giving up. Any database that remains in failed state
+		 * after that will fail the entire operation.
+		 */
+		CurrentDatabases = BuildDatabaseList();
+
+		foreach (lc, DatabaseList)
+		{
+			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+			bool found = false;
+
+			foreach (lc2, CurrentDatabases)
+			{
+				ChecksumHelperDatabase *db2 = (ChecksumHelperDatabase *) lfirst(lc2);
+
+				if (db->dboid == db2->dboid)
+				{
+					/* Database still exists, time to give up? */
+					if (++db->attempts > MAX_ATTEMPTS)
+					{
+						/* Disable checksums on cluster, because we failed */
+						SetDataChecksumsOff();
+
+						ereport(ERROR,
+								(errmsg("failed to enable checksums in %s, giving up.", db->dbname)));
+					}
+					else
+						/* Try again with this db */
+						remaining = lappend(remaining, db);
+					found = true;
+					break;
+				}
+			}
+			if (!found)
+			{
+				ereport(LOG,
+						(errmsg("Database %s dropped, skipping", db->dbname)));
+				pfree(db->dbname);
+				pfree(db);
+			}
+		}
+
+		/* Free the extra list of databases */
+		foreach (lc, CurrentDatabases)
+		{
+			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+			pfree(db->dbname);
+			pfree(db);
+		}
+		list_free(CurrentDatabases);
+
+		/* All databases processed yet? */
+		if (remaining == NIL || list_length(remaining) == 0)
 			break;
 
-		if (rc & WL_POSTMASTER_DEATH)
-			proc_exit(1);
-
-		/*
-		 * If there are no free workers, go back to sleeping on the latch
-		 */
-		if (dlist_is_empty(&ChecksumHelperShmem->ch_freeWorkers))
-			continue;
-
-		/* 
-		 * If there are no more databases to backfill checksums on, we can
-		 * only sit back and wait for the current workers to exit after which
-		 * we are done.
-		 */
-		if (DatabaseList == NIL || list_length(DatabaseList) == 0)
-			continue;
-
-		/*
-		 * Start a new worker, and assign a database from the list for it to
-		 * process.  We don't need to protect the DatabaseList with a lock
-		 * since this is the only place where we alter it.
-		 */
-		db = (ChecksumHelperDatabase *) lfirst(list_head(DatabaseList));
-		DatabaseList = list_delete_first(DatabaseList);
-
-		LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
-		/* TODO: Launch worker */
-		LWLockRelease(ChecksumHelperLock);
+		DatabaseList = remaining;
 	}
 
-shutdown:
 
 	/*
-	 * If we are done with backfilling the database, bump the pg_control
-	 * flag to Normal from InProgress
+	 * Everything has been processed, so flag checksums enabled.
 	 */
-	if (done)
-		SetDataChecksumsNormal();
+	SetDataChecksumsOn();
 
-	ereport(DEBUG1,
-			(errmsg("checksumhelper launcher shutting down")));
-	ChecksumHelperShmem->ch_launcherpid = 0;
-
-	proc_exit(0);
+	ereport(LOG,
+			(errmsg("Checksums enabled, checksumhelper launcher shutting down")));
 }
 
-static void
-ch_sighup_handler(SIGNAL_ARGS)
-{
-	int			save_errno = errno;
-
-	got_SIGHUP = true;
-	SetLatch(MyLatch);
-
-	errno = save_errno;
-}
-
-static void
-ch_sigterm_handler(SIGNAL_ARGS)
-{
-	int			save_errno = errno;
-
-	got_SIGTERM = true;
-	SetLatch(MyLatch);
-
-	errno = save_errno;
-}
-
-/*
- * IsChecksumHelper{Launcher|Worker}Process
- *		Returns the type of process interrogated
- */
-bool
-IsChecksumHelperLauncherProcess(void)
-{
-	return am_checksumhelper_launcher;
-}
-bool
-IsChecksumHelperWorkerProcess(void)
-{
-	return am_checksumhelper_worker;
-}
 
 /*
  * ChecksumHelperShmemSize
@@ -312,8 +316,7 @@ ChecksumHelperShmemSize(void)
 
 	size = sizeof(ChecksumHelperShmemStruct);
 	size = MAXALIGN(size);
-	size = add_size(size, mul_size(checksumhelper_max_workers,
-								   sizeof(ChecksumWorkerInfoData)));
+
 	return size;
 }
 
@@ -331,27 +334,12 @@ ChecksumHelperShmemInit(void)
 						ChecksumHelperShmemSize(),
 						&found);
 
-	if (!IsUnderPostmaster)
-	{
-		ChecksumWorkerInfo	worker;
-		int					i;
-
-		Assert(!found);
-
-		ChecksumHelperShmem->ch_launcherpid = 0;
-		dlist_init(&ChecksumHelperShmem->ch_freeWorkers);
-		dlist_init(&ChecksumHelperShmem->ch_runningWorkers);
-
-		worker = (ChecksumWorkerInfo) ((char *) ChecksumHelperShmem +
-									   MAXALIGN(sizeof(ChecksumHelperShmemStruct)));
-
-		for (i = 0; i < checksumhelper_max_workers; i++)
-			dlist_push_head(&ChecksumHelperShmem->ch_freeWorkers,
-							&worker[i].cwi_links);
-	}
-	else
-		Assert(found);
+	/*
+	 * No need to initialize content as struct is never used
+	 * globally.
+	 */
 }
+
 
 /*
  * BuildDatabaseList
@@ -361,18 +349,17 @@ ChecksumHelperShmemInit(void)
  * as we are only concerned with already existing databases we need to ever
  * rebuild this list, which simplifies the coding.
  */
-static void
+static List *
 BuildDatabaseList(void)
 {
+	List		   *DatabaseList = NIL;
 	Relation		rel;
 	HeapScanDesc	scan;
 	HeapTuple		tup;
+	MemoryContext	ctx = CurrentMemoryContext;
+	MemoryContext   oldctx;
 
-	/*
-	 * As we are only interested in the databases that exist when we start
-	 * the helper, this list should never be rebuilt.
-	 */
-	Assert(DatabaseList == NIL);
+	StartTransactionCommand();
 
 	rel = heap_open(DatabaseRelationId, AccessShareLock);
 	scan = heap_beginscan_catalog(rel, 0, NULL);
@@ -382,61 +369,49 @@ BuildDatabaseList(void)
 		Form_pg_database		pgdb = (Form_pg_database) GETSTRUCT(tup);
 		ChecksumHelperDatabase *db;
 
+		oldctx = MemoryContextSwitchTo(ctx);
+
 		db = (ChecksumHelperDatabase *) palloc(sizeof(ChecksumHelperDatabase));
 
 		db->dboid = HeapTupleGetOid(tup);
 		db->dbname = pstrdup(NameStr(pgdb->datname));
+		elog(DEBUG1, "Added database %s to list", db->dbname);
 
 		DatabaseList = lappend(DatabaseList, db);
+
+		MemoryContextSwitchTo(oldctx);
 	}
 
 	heap_endscan(scan);
 	heap_close(rel, AccessShareLock);
 
 	CommitTransactionCommand();
+
+	return DatabaseList;
 }
 
-NON_EXEC_STATIC void
-ChecksumWorkerMain(int argc, char **argv)
+
+
+/*
+ * Main function for enabling checksums in a single database
+ */
+void ChecksumHelperWorkerMain(Datum arg)
 {
-	am_checksumhelper_worker = true;
+	Oid dboid = DatumGetObjectId(arg);
+
+	pqsignal(SIGTERM, die);
+
+	BackgroundWorkerUnblockSignals();
 
 	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_WORKER), "", "", "");
 
-	SetProcessingMode(InitProcessing);
+	ereport(DEBUG1,
+		   (errmsg("Checksum worker starting for database oid %d", dboid)));
 
-	pqsignal(SIGTERM, die);
-	pqsignal(SIGQUIT, quickdie);
+	sleep(10);
 
-	BaseInit();
+	ChecksumHelperShmem->success = true;
 
-	SetProcessingMode(NormalProcessing);
-
-	on_shmem_exit(FreeChecksumWorkerInfo, 0);
-}
-
-/*
- * FreeChecksumWorkerInfo
- *		Return a worker to the free list
- *
- * The worker struct doesn't contain any allocations, so just reset the
- * values to initial settings.
- */
-static void
-FreeChecksumWorkerInfo(int code, Datum arg)
-{
-	if (MyWorkerInfo == NULL)
-		return;
-	
-	LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
-
-	dlist_delete(&MyWorkerInfo->cwi_links);
-	MyWorkerInfo->cwi_dboid = InvalidOid;
-	MyWorkerInfo->cwi_proc = NULL;
-
-	dlist_push_head(&ChecksumHelperShmem->ch_freeWorkers,
-					&MyWorkerInfo->cwi_links);
-	MyWorkerInfo = NULL;
-
-	LWLockRelease(ChecksumHelperLock);
+	ereport(DEBUG1,
+			(errmsg("Checksum worker completed in database oid %d", dboid)));
 }
