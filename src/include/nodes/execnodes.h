@@ -466,8 +466,11 @@ typedef struct EState
 	ResultRelInfo *es_root_result_relations;	/* array of ResultRelInfos */
 	int			es_num_root_result_relations;	/* length of the array */
 
-	/* Info about leaf partitions of partitioned table(s) for insert queries: */
-	List	   *es_leaf_result_relations;	/* List of ResultRelInfos */
+	/*
+	 * The following list contains ResultRelInfos created by the tuple
+	 * routing code for partitions that don't already have one.
+	 */
+	List	   *es_tuple_routing_result_relations;
 
 	/* Stuff used for firing triggers: */
 	List	   *es_trig_target_relations;	/* trigger-only ResultRelInfos */
@@ -1885,11 +1888,14 @@ typedef struct WindowAggState
 	FmgrInfo   *partEqfunctions;	/* equality funcs for partition columns */
 	FmgrInfo   *ordEqfunctions; /* equality funcs for ordering columns */
 	Tuplestorestate *buffer;	/* stores rows of current partition */
-	int			current_ptr;	/* read pointer # for current */
+	int			current_ptr;	/* read pointer # for current row */
+	int			framehead_ptr;	/* read pointer # for frame head, if used */
+	int			frametail_ptr;	/* read pointer # for frame tail, if used */
+	int			grouptail_ptr;	/* read pointer # for group tail, if used */
 	int64		spooled_rows;	/* total # of rows in buffer */
 	int64		currentpos;		/* position of current row in partition */
 	int64		frameheadpos;	/* current frame head position */
-	int64		frametailpos;	/* current frame tail position */
+	int64		frametailpos;	/* current frame tail position (frame end+1) */
 	/* use struct pointer to avoid including windowapi.h here */
 	struct WindowObjectData *agg_winobj;	/* winobj for aggregate fetches */
 	int64		aggregatedbase; /* start row for current aggregates */
@@ -1900,6 +1906,20 @@ typedef struct WindowAggState
 	ExprState  *endOffset;		/* expression for ending bound offset */
 	Datum		startOffsetValue;	/* result of startOffset evaluation */
 	Datum		endOffsetValue; /* result of endOffset evaluation */
+
+	/* these fields are used with RANGE offset PRECEDING/FOLLOWING: */
+	FmgrInfo	startInRangeFunc;	/* in_range function for startOffset */
+	FmgrInfo	endInRangeFunc; /* in_range function for endOffset */
+	Oid			inRangeColl;	/* collation for in_range tests */
+	bool		inRangeAsc;		/* use ASC sort order for in_range tests? */
+	bool		inRangeNullsFirst;	/* nulls sort first for in_range tests? */
+
+	/* these fields are used in GROUPS mode: */
+	int64		currentgroup;	/* peer group # of current row in partition */
+	int64		frameheadgroup; /* peer group # of frame head row */
+	int64		frametailgroup; /* peer group # of frame tail row */
+	int64		groupheadpos;	/* current row's peer group head position */
+	int64		grouptailpos;	/* " " " " tail position (group end+1) */
 
 	MemoryContext partcontext;	/* context for partition-lifespan data */
 	MemoryContext aggcontext;	/* shared context for aggregate working data */
@@ -1916,9 +1936,13 @@ typedef struct WindowAggState
 									 * date for current row */
 	bool		frametail_valid;	/* true if frametailpos is known up to
 									 * date for current row */
+	bool		grouptail_valid;	/* true if grouptailpos is known up to
+									 * date for current row */
 
 	TupleTableSlot *first_part_slot;	/* first tuple of current or next
 										 * partition */
+	TupleTableSlot *framehead_slot; /* first tuple of current frame */
+	TupleTableSlot *frametail_slot; /* first tuple after current frame */
 
 	/* temporary slots for tuples fetched back from tuplestore */
 	TupleTableSlot *agg_row_slot;

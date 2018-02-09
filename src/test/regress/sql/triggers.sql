@@ -92,6 +92,13 @@ delete from pkeys where pkey1 = 40 and pkey2 = '4';
 update pkeys set pkey1 = 7, pkey2 = '70' where pkey1 = 50 and pkey2 = '5';
 update pkeys set pkey1 = 7, pkey2 = '70' where pkey1 = 10 and pkey2 = '1';
 
+SELECT trigger_name, event_manipulation, event_object_schema, event_object_table,
+       action_order, action_condition, action_orientation, action_timing,
+       action_reference_old_table, action_reference_new_table
+  FROM information_schema.triggers
+  WHERE event_object_table in ('pkeys', 'fkeys', 'fkeys2')
+  ORDER BY trigger_name COLLATE "C", 2;
+
 DROP TABLE pkeys;
 DROP TABLE fkeys;
 DROP TABLE fkeys2;
@@ -279,6 +286,12 @@ CREATE TRIGGER insert_when BEFORE INSERT ON main_table
 FOR EACH STATEMENT WHEN (true) EXECUTE PROCEDURE trigger_func('insert_when');
 CREATE TRIGGER delete_when AFTER DELETE ON main_table
 FOR EACH STATEMENT WHEN (true) EXECUTE PROCEDURE trigger_func('delete_when');
+SELECT trigger_name, event_manipulation, event_object_schema, event_object_table,
+       action_order, action_condition, action_orientation, action_timing,
+       action_reference_old_table, action_reference_new_table
+  FROM information_schema.triggers
+  WHERE event_object_table IN ('main_table')
+  ORDER BY trigger_name COLLATE "C", 2;
 INSERT INTO main_table (a) VALUES (123), (456);
 COPY main_table FROM stdin;
 123	999
@@ -1471,6 +1484,13 @@ create trigger child3_update_trig
 create trigger child3_delete_trig
   after delete on child3 referencing old table as old_table
   for each statement execute procedure dump_delete();
+
+SELECT trigger_name, event_manipulation, event_object_schema, event_object_table,
+       action_order, action_condition, action_orientation, action_timing,
+       action_reference_old_table, action_reference_new_table
+  FROM information_schema.triggers
+  WHERE event_object_table IN ('parent', 'child1', 'child2', 'child3')
+  ORDER BY trigger_name COLLATE "C", 2;
 
 -- insert directly into children sees respective child-format tuples
 insert into child1 values ('AAA', 42);
