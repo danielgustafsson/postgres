@@ -701,6 +701,14 @@ pg_backup_start_time(PG_FUNCTION_ARGS)
 }
 
 Datum
+disable_data_checksums(PG_FUNCTION_ARGS)
+{
+	SetDataChecksumsOff();
+
+	PG_RETURN_BOOL(!DataChecksumsEnabled());
+}
+
+Datum
 enable_data_checksums(PG_FUNCTION_ARGS)
 {
 	SetDataChecksumsInProgress();
