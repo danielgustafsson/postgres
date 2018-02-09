@@ -206,12 +206,10 @@ ChecksumHelperLauncherMain(Datum arg)
 		ListCell *lc, *lc2;
 		List *CurrentDatabases = NIL;
 
-		elog(DEBUG1, "Entering loop, length %i", list_length(DatabaseList));
 		foreach (lc, DatabaseList)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 
-			elog(DEBUG1, "Looping for %s", db->dbname);
 			if (ProcessDatabase(db))
 			{
 				pfree(db->dbname);
@@ -225,7 +223,6 @@ ChecksumHelperLauncherMain(Datum arg)
 				remaining = lappend(remaining, db);
 			}
 		}
-		elog(DEBUG1, "Loop 1 done");
 		list_free(DatabaseList);
 
 		DatabaseList = remaining;
@@ -375,7 +372,6 @@ BuildDatabaseList(void)
 
 		db->dboid = HeapTupleGetOid(tup);
 		db->dbname = pstrdup(NameStr(pgdb->datname));
-		elog(DEBUG1, "Added database %s to list", db->dbname);
 
 		DatabaseList = lappend(DatabaseList, db);
 
@@ -407,6 +403,8 @@ void ChecksumHelperWorkerMain(Datum arg)
 
 	ereport(DEBUG1,
 		   (errmsg("Checksum worker starting for database oid %d", dboid)));
+
+	BackgroundWorkerInitializeConnectionByOid(dboid, NULL);
 
 	sleep(10);
 
