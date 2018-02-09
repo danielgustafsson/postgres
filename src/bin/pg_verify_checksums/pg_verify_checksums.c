@@ -1,0 +1,240 @@
+/*
+ * pg_verify_checksums
+ *
+ * Verifies page level checksums in an offline cluster
+ *
+ * src/bin/pg_verify_checksums/pg_verify_checksums.c
+ */
+
+#define FRONTEND 1
+
+#include "postgres.h"
+#include "catalog/pg_control.h"
+#include "common/controldata_utils.h"
+#include "storage/bufpage.h"
+#include "storage/checksum.h"
+#include "storage/checksum_impl.h"
+
+#include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
+
+#include "pg_getopt.h"
+
+
+static int64 files = 0;
+static int64 blocks = 0;
+static int64 badblocks = 0;
+
+static const char *progname;
+
+static void
+usage()
+{
+	printf(_("%s verifies page level checksums in offline PostgreSQL database cluster.\n\n"), progname);
+	printf(_("Usage:\n"));
+	printf(_("  %s [OPTION] [DATADIR]\n"), progname);
+	printf(_("\nOptions:\n"));
+	printf(_(" [-D] DATADIR    data directory\n"));
+	printf(_("  -V, --version  output version information, then exit\n"));
+	printf(_("  -?, --help     show this help, then exit\n"));
+	printf(_("\nIf no data directory (DATADIR) is specified, "
+			 "the environment variable PGDATA\nis used.\n\n"));
+	printf(_("Report bugs to <pgsql-bugs@postgresql.org>.\n"));
+}
+
+static const char *skip[] = {
+	"pg_control",
+	"pg_filenode.map",
+	"pg_internal.init",
+	"PG_VERSION",
+	NULL,
+};
+
+static bool
+skipfile(char *fn)
+{
+	const char **f;
+
+	if (strcmp(fn, ".") == 0 ||
+		strcmp(fn, "..") == 0)
+		return true;
+
+	for (f = skip; *f; f++)
+		if (strcmp(*f, fn) == 0)
+			return true;
+	return false;
+}
+
+static void
+scan_file(char *fn)
+{
+	char buf[BLCKSZ];
+	PageHeader header = (PageHeader) buf;
+	int f;
+	int blockno;
+
+	f = open(fn, 0);
+	if (f < 0)
+	{
+		fprintf(stderr, _("%s: could not open %s: %m\n"), progname, fn);
+		exit(1);
+	}
+
+	files++;
+
+	for (blockno = 0; ; blockno++)
+	{
+		uint16 csum;
+		int r = read(f, buf, BLCKSZ);
+
+		if (r == 0)
+			break;
+		if (r != BLCKSZ)
+		{
+			fprintf(stderr, _("%s: short read of block %d in %s, got only %d bytes\n"),
+					progname, blockno, fn, r);
+			exit(1);
+		}
+		blocks++;
+
+		csum = pg_checksum_page(buf, blockno);
+		if (csum != header->pd_checksum)
+		{
+			fprintf(stderr, _("%s: %s, block %d, invalid checksum in file %X, calculated %X\n"),
+					progname, fn, blockno, header->pd_checksum, csum);
+			badblocks++;
+		}
+	}
+
+	close(f);
+}
+
+static void
+scan_directory(char *basedir, char *subdir)
+{
+	char path[MAXPGPATH];
+	DIR *dir;
+	struct dirent *de;
+	
+	snprintf(path, MAXPGPATH, "%s/%s", basedir, subdir);
+	dir = opendir(path);
+	if (!dir)
+	{
+		fprintf(stderr, _("%s: could not open directory %s: %m\n"), progname, path);
+		exit(1);
+	}
+	while ((de = readdir(dir)) != NULL)
+	{
+		char fn[MAXPGPATH];
+		struct stat st;
+
+		if (skipfile(de->d_name))
+			continue;
+
+		snprintf(fn, MAXPGPATH, "%s/%s", path, de->d_name);
+		if (lstat(fn, &st) < 0)
+		{
+			fprintf(stderr, _("%s: could not stat file %s: %m\n"), progname, fn);
+			exit(1);
+		}
+		if (S_ISREG(st.st_mode))
+			scan_file(fn);
+		else if (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
+			scan_directory(path, de->d_name);
+	}
+	closedir(dir);
+}
+
+int
+main(int argc, char *argv[])
+{
+	char	   *DataDir = NULL;
+	int c;
+	ControlFileData *ControlFile;
+	bool crc_ok;
+
+	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_verify_checksums"));
+
+	progname = get_progname(argv[0]);
+
+	if (argc > 1)
+	{
+		if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-?") == 0)
+		{
+			usage();
+			exit(0);
+		}
+		if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0)
+		{
+			puts("pg_verify_checksums (PostgreSQL) " PG_VERSION);
+			exit(0);
+		}
+	}
+
+	while ((c = getopt(argc, argv, "D:")) != -1)
+	{
+		switch (c)
+		{
+			case 'D':
+				DataDir = optarg;
+				break;
+
+			default:
+				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+				exit(1);
+		}
+	}
+
+	if (DataDir == NULL)
+	{
+		if (optind < argc)
+			DataDir = argv[optind++];
+		else
+			DataDir = getenv("PGDATA");
+	}
+
+	/* Complain if any arguments remain */
+	if (optind < argc)
+	{
+		fprintf(stderr, _("%s: too many command-line arguments (first is \"%s\")\n"),
+				progname, argv[optind]);
+		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
+				progname);
+		exit(1);
+	}
+
+	if (DataDir == NULL)
+	{
+		fprintf(stderr, _("%s: no data directory specified\n"), progname);
+		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+		exit(1);
+	}
+
+	/* Check if cluster is running */
+	ControlFile = get_controlfile(DataDir, progname, &crc_ok);
+	if (!crc_ok)
+	{
+		fprintf(stderr, _("%s: pg_control CRC value is incorrect.\n"), progname);
+		exit(1);
+	}
+
+	if (ControlFile->state != DB_SHUTDOWNED &&
+		ControlFile->state != DB_SHUTDOWNED_IN_RECOVERY)
+	{
+		fprintf(stderr, _("%s: cluster must be shut down to verify checksums.\n"), progname);
+		exit(1);
+	}
+
+	/* Scan all files */
+	scan_directory(DataDir, "global");
+	scan_directory(DataDir, "base");
+	scan_directory(DataDir, "pg_tblspc");
+
+	printf("Checksum scan completed\n");
+	printf("Files scanned:  %" INT64_MODIFIER "d\n", files);
+	printf("Blocks scanned: %" INT64_MODIFIER "d\n", blocks);
+	printf("Bad checksums:  %" INT64_MODIFIER "d\n", badblocks);
+
+	return 0;
+}
