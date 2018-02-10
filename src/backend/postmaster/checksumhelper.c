@@ -69,8 +69,16 @@ typedef struct ChecksumHelperDatabase
 	bool		success;
 } ChecksumHelperDatabase;
 
+typedef struct ChecksumHelperRelation
+{
+	Oid			reloid;
+	char		relkind;
+	bool		success;
+} ChecksumHelperRelation;
+
 /* Prototypes */
 static List *BuildDatabaseList(void);
+static List *BuildRelationList(bool shared);
 static bool ProcessDatabase(ChecksumHelperDatabase *db);
 
 /*
@@ -388,14 +396,65 @@ BuildDatabaseList(void)
 	return DatabaseList;
 }
 
+/*
+ * If shared is true, only shared clusterwide relations are returned, else all
+ * non-shared relations are returned.
+ */
+static List *
+BuildRelationList(bool shared)
+{
+	List		   *RelationList = NIL;
+	Relation		rel;
+	HeapScanDesc	scan;
+	HeapTuple		tup;
+	MemoryContext	ctx = CurrentMemoryContext;
+	MemoryContext	oldctx;
 
+	StartTransactionCommand();
+
+	rel = heap_open(RelationRelationId, AccessShareLock);
+	scan = heap_beginscan_catalog(rel, 0, NULL);
+
+	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
+	{
+		Form_pg_class			pgc = (Form_pg_class) GETSTRUCT(tup);
+		ChecksumHelperRelation *relentry;
+
+		if (pgc->relisshared && !shared)
+			continue;
+
+		/*
+		 * Foreign tables have by definition no local storage that can be
+		 * checksummed, so skip
+		 */
+		if (pgc->relkind == RELKIND_FOREIGN_TABLE)
+			continue;
+
+		oldctx = MemoryContextSwitchTo(ctx);
+		relentry = (ChecksumHelperRelation *) palloc(sizeof(ChecksumHelperRelation));
+
+		relentry->reloid = HeapTupleGetOid(tup);
+		relentry->relkind = pgc->relkind;
+
+		RelationList = lappend(RelationList, relentry);
+
+		MemoryContextSwitchTo(oldctx);
+	}
+
+	heap_close(rel, AccessShareLock);
+
+	CommitTransactionCommand();
+
+	return RelationList;
+}
 
 /*
  * Main function for enabling checksums in a single database
  */
 void ChecksumHelperWorkerMain(Datum arg)
 {
-	Oid dboid = DatumGetObjectId(arg);
+	Oid		dboid = DatumGetObjectId(arg);
+	List   *RelationList = NIL;
 
 	pqsignal(SIGTERM, die);
 
@@ -407,6 +466,7 @@ void ChecksumHelperWorkerMain(Datum arg)
 		   (errmsg("Checksum worker starting for database oid %d", dboid)));
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
+	RelationList = BuildRelationList(false);
 
 	sleep(10);
 
