@@ -25,6 +25,7 @@
 static int64 files = 0;
 static int64 blocks = 0;
 static int64 badblocks = 0;
+static ControlFileData *ControlFile;
 
 static const char *progname;
 
@@ -102,8 +103,9 @@ scan_file(char *fn)
 		csum = pg_checksum_page(buf, blockno);
 		if (csum != header->pd_checksum)
 		{
-			fprintf(stderr, _("%s: %s, block %d, invalid checksum in file %X, calculated %X\n"),
-					progname, fn, blockno, header->pd_checksum, csum);
+			if (ControlFile->data_checksum_version == 1)
+				fprintf(stderr, _("%s: %s, block %d, invalid checksum in file %X, calculated %X\n"),
+						progname, fn, blockno, header->pd_checksum, csum);
 			badblocks++;
 		}
 	}
@@ -153,7 +155,6 @@ main(int argc, char *argv[])
 	char	   *DataDir = NULL;
 	bool force = false;
 	int c;
-	ControlFileData *ControlFile;
 	bool crc_ok;
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_verify_checksums"));
@@ -241,10 +242,14 @@ main(int argc, char *argv[])
 	scan_directory(DataDir, "base");
 	scan_directory(DataDir, "pg_tblspc");
 
-	printf("Checksum scan completed\n");
-	printf("Files scanned:  %" INT64_MODIFIER "d\n", files);
-	printf("Blocks scanned: %" INT64_MODIFIER "d\n", blocks);
-	printf("Bad checksums:  %" INT64_MODIFIER "d\n", badblocks);
+	printf(_("Checksum scan completed\n"));
+	printf(_("Data checksum version: %d\n"), ControlFile->data_checksum_version);
+	printf(_("Files scanned:  %" INT64_MODIFIER "d\n"), files);
+	printf(_("Blocks scanned: %" INT64_MODIFIER "d\n"), blocks);
+	if (ControlFile->data_checksum_version == 2)
+		printf(_("Blocks left in progress: %" INT64_MODIFIER "d\n"), badblocks);
+	else
+		printf(_("Bad checksums:  %" INT64_MODIFIER "d\n"), badblocks);
 
 	return 0;
 }
