@@ -60,9 +60,6 @@ typedef struct ChecksumHelperShmemStruct
 /* Shared memory segment for checksum helper */
 static ChecksumHelperShmemStruct *ChecksumHelperShmem;
 
-/* Signal handling */
-static volatile sig_atomic_t got_SIGTERM = false;
-
 /* Bookkeeping for work to do */
 typedef struct ChecksumHelperDatabase
 {
