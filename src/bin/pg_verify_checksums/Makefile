@@ -23,7 +23,7 @@ pg_verify_checksums: $(OBJS) | submake-libpgport
 	$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LDFLAGS_EX) $(LIBS) -o $@$(X)
 
 install: all installdirs
-	$(INSTALL_PROGRAM) pg_verify_checksums$(X) '$(DESTDIR)$(bindir)/pg_controldata$(X)'
+	$(INSTALL_PROGRAM) pg_verify_checksums$(X) '$(DESTDIR)$(bindir)/pg_verify_checksums$(X)'
 
 installdirs:
 	$(MKDIR_P) '$(DESTDIR)$(bindir)'
