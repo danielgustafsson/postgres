@@ -121,7 +121,11 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		Buffer buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
 		/* Need to get an exclusive lock before we can flag as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+		START_CRIT_SECTION();
 		MarkBufferDirty(buf);
+		log_newpage_buffer(buf, false);
+		END_CRIT_SECTION();
+
 		UnlockReleaseBuffer(buf);
 
 		vacuum_delay_point();

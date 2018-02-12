@@ -856,6 +856,7 @@ static void SetLatestXTime(TimestampTz xtime);
 static void SetCurrentChunkStartTime(TimestampTz xtime);
 static void CheckRequiredParameterValues(void);
 static void XLogReportParameters(void);
+static void XlogChecksums(ChecksumType new_type);
 static void checkTimeLineSwitch(XLogRecPtr lsn, TimeLineID newTLI,
 					TimeLineID prevTLI);
 static void LocalSetXLogInsertAllowed(void);
@@ -4743,6 +4744,8 @@ SetDataChecksumsInProgress(void)
 	if (DataChecksumsEnabled())
 		return;
 
+	XlogChecksums(PG_DATA_CHECKSUM_INPROGRESS_VERSION);
+
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_INPROGRESS_VERSION;
 	UpdateControlFile();
@@ -4766,6 +4769,8 @@ SetDataChecksumsOn(void)
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_VERSION;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+
+	XlogChecksums(PG_DATA_CHECKSUM_VERSION);
 }
 
 void
@@ -4776,6 +4781,8 @@ SetDataChecksumsOff(void)
 	ControlFile->data_checksum_version = 0;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+
+	XlogChecksums(0);
 }
 
 /* guc hook */
@@ -9578,6 +9585,22 @@ XLogReportParameters(void)
 }
 
 /*
+ * Log the new state of checksums
+ */
+static void
+XlogChecksums(ChecksumType new_type)
+{
+	xl_checksum_state xlrec;
+
+	xlrec.new_checksumtype = new_type;
+
+	XLogBeginInsert();
+	XLogRegisterData((char *) &xlrec, sizeof(xl_checksum_state));
+
+	XLogInsert(RM_XLOG_ID, XLOG_CHECKSUMS);
+}
+
+/*
  * Update full_page_writes in shared memory, and write an
  * XLOG_FPW_CHANGE record if necessary.
  *
@@ -10004,6 +10027,16 @@ xlog_redo(XLogReaderState *record)
 
 		/* Keep track of full_page_writes */
 		lastFullPageWrites = fpw;
+	}
+	else if (info == XLOG_CHECKSUMS)
+	{
+		xl_checksum_state state;
+		memcpy(&state, XLogRecGetData(record), sizeof(xl_checksum_state));
+
+		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+		ControlFile->data_checksum_version = state.new_checksumtype;
+		UpdateControlFile();
+		LWLockRelease(ControlFileLock);
 	}
 }
 
