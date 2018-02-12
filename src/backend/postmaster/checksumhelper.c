@@ -139,7 +139,6 @@ ProcessSingleRelationByOid(Oid relationId)
 
 	StartTransactionCommand();
 
-	elog(DEBUG1, "vacuum cost: %d", VacuumCostBalance);
 	elog(DEBUG2, "Checksumhelper starting to process relation %d", relationId);
 	rel = relation_open(relationId, AccessShareLock);
 	RelationOpenSmgr(rel);
@@ -533,7 +532,8 @@ void ChecksumHelperWorkerMain(Datum arg)
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
 
 	/*
-	 * Enable vacuum cost delay, if any */
+	 * Enable vacuum cost delay, if any
+	 */
 	VacuumCostActive = (VacuumCostDelay > 0);
 	VacuumCostBalance = 0;
 	VacuumPageHit = 0;
