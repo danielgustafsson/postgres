@@ -441,6 +441,7 @@ BuildRelationList(bool shared)
 		MemoryContextSwitchTo(oldctx);
 	}
 
+	heap_endscan(scan);
 	heap_close(rel, AccessShareLock);
 
 	CommitTransactionCommand();
