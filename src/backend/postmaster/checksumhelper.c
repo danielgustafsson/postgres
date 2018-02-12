@@ -27,23 +27,24 @@
 #include "access/xact.h"
 #include "access/xlog.h"
 #include "catalog/pg_database.h"
+#include "common/relpath.h"
 #include "lib/ilist.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
+#include "postmaster/bgwriter.h"
 #include "postmaster/checksumhelper.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/postmaster.h"
+#include "storage/bufmgr.h"
 #include "storage/ipc.h"
 #include "storage/latch.h"
 #include "storage/lmgr.h"
 #include "storage/proc.h"
+#include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
-
-// XXX: for sleep() only!
-#include <unistd.h>
 
 /*
  * Maximum number of times to try enabling checksums in a specific
@@ -54,7 +55,7 @@
 typedef struct ChecksumHelperShmemStruct
 {
 	bool		success;
-
+	bool		process_shared_catalogs;
 } ChecksumHelperShmemStruct;
 
 /* Shared memory segment for checksum helper */
@@ -78,7 +79,7 @@ typedef struct ChecksumHelperRelation
 
 /* Prototypes */
 static List *BuildDatabaseList(void);
-static List *BuildRelationList(bool shared);
+static List *BuildRelationList(bool include_shared);
 static bool ProcessDatabase(ChecksumHelperDatabase *db);
 
 /*
@@ -107,6 +108,55 @@ StartChecksumHelperLauncher(void)
 
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
 		return false;
+
+	return true;
+}
+
+/*
+ * Enable checksums in a single relation/fork.
+ * XXX: must hold a lock on the relation preventing it from being truncated?
+ */
+static bool
+ProcessSingleRelationFork(Relation reln, ForkNumber forkNum)
+{
+	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
+	BlockNumber b;
+
+	for (b = 0; b < numblocks; b++)
+	{
+		/* XXX set strategy */
+		/* XXX indicate ignore-checksums in RBM? */
+		Buffer buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, NULL);
+		/* Need to get an exclusive lock before we can flag as dirty */
+		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
+		MarkBufferDirty(buf);
+		UnlockReleaseBuffer(buf);
+	}
+
+	return true;
+}
+
+static bool
+ProcessSingleRelationByOid(Oid relationId)
+{
+	Relation rel;
+	ForkNumber fnum;
+
+	StartTransactionCommand();
+
+	elog(DEBUG2, "Checksumhelper starting to process relation %d", relationId);
+	rel = relation_open(relationId, AccessShareLock);
+	RelationOpenSmgr(rel);
+
+	for (fnum = 0; fnum <= MAX_FORKNUM ; fnum++)
+	{
+		if (smgrexists(rel->rd_smgr, fnum))
+			ProcessSingleRelationFork(rel, fnum);
+	}
+	relation_close(rel, AccessShareLock);
+	elog(DEBUG2, "Checksumhelper done with relation %d", relationId);
+
+	CommitTransactionCommand();
 
 	return true;
 }
@@ -192,6 +242,11 @@ ChecksumHelperLauncherMain(Datum arg)
 	BackgroundWorkerInitializeConnection(NULL, NULL);
 
 	/*
+	 * Set up so first run processes shared catalogs, but not once in every db
+	 */
+	ChecksumHelperShmem->process_shared_catalogs = true;
+
+	/*
 	 * Create a database list.  We don't need to concern ourselves with
 	 * rebuilding this list during runtime since any new created database
 	 * will be running with checksums turned on from the start.
@@ -219,6 +274,13 @@ ChecksumHelperLauncherMain(Datum arg)
 			{
 				pfree(db->dbname);
 				pfree(db);
+
+				if (ChecksumHelperShmem->process_shared_catalogs)
+					/*
+					 * Now that one database has completed shared catalogs, we don't
+					 * have to process them again .
+					 */
+					ChecksumHelperShmem->process_shared_catalogs = false;
 			}
 			else
 			{
@@ -296,6 +358,11 @@ ChecksumHelperLauncherMain(Datum arg)
 		DatabaseList = remaining;
 	}
 
+
+	/*
+	 * Force a checkpoint to get everything out to disk
+	 */
+	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
 
 	/*
 	 * Everything has been processed, so flag checksums enabled.
@@ -397,11 +464,11 @@ BuildDatabaseList(void)
 }
 
 /*
- * If shared is true, only shared clusterwide relations are returned, else all
+ * If shared is true, both shared relations and local ones are returned, else all
  * non-shared relations are returned.
  */
 static List *
-BuildRelationList(bool shared)
+BuildRelationList(bool include_shared)
 {
 	List		   *RelationList = NIL;
 	Relation		rel;
@@ -420,7 +487,7 @@ BuildRelationList(bool shared)
 		Form_pg_class			pgc = (Form_pg_class) GETSTRUCT(tup);
 		ChecksumHelperRelation *relentry;
 
-		if (pgc->relisshared && !shared)
+		if (pgc->relisshared && !include_shared)
 			continue;
 
 		/*
@@ -456,6 +523,7 @@ void ChecksumHelperWorkerMain(Datum arg)
 {
 	Oid		dboid = DatumGetObjectId(arg);
 	List   *RelationList = NIL;
+	ListCell *lc;
 
 	pqsignal(SIGTERM, die);
 
@@ -467,9 +535,19 @@ void ChecksumHelperWorkerMain(Datum arg)
 		   (errmsg("Checksum worker starting for database oid %d", dboid)));
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
-	RelationList = BuildRelationList(false);
 
-	sleep(10);
+	RelationList = BuildRelationList(ChecksumHelperShmem->process_shared_catalogs);
+	foreach (lc, RelationList)
+	{
+		ChecksumHelperRelation *rel = (ChecksumHelperRelation *) lfirst(lc);
+
+		if (!ProcessSingleRelationByOid(rel->reloid))
+		{
+			ereport(ERROR,
+					(errmsg("failed to process table with oid %d", rel->reloid)));
+		}
+	}
+	list_free_deep(RelationList);
 
 	ChecksumHelperShmem->success = true;
 
