@@ -27,6 +27,9 @@ static int64 blocks = 0;
 static int64 badblocks = 0;
 static ControlFileData *ControlFile;
 
+static char *only_oid = NULL;
+static bool debug = false;
+
 static const char *progname;
 
 static void
@@ -38,6 +41,8 @@ usage()
 	printf(_("\nOptions:\n"));
 	printf(_(" [-D] DATADIR    data directory\n"));
 	printf(_("  -f,            force check even if checksums are disabled\n"));
+	printf(_("  -o oid         check only relation with specified oid\n"));
+	printf(_("  -d             debug output, listing all checked blocks\n"));
 	printf(_("  -V, --version  output version information, then exit\n"));
 	printf(_("  -?, --help     show this help, then exit\n"));
 	printf(_("\nIf no data directory (DATADIR) is specified, "
@@ -108,6 +113,8 @@ scan_file(char *fn)
 						progname, fn, blockno, header->pd_checksum, csum);
 			badblocks++;
 		}
+		else if (debug)
+			fprintf(stderr, _("%s: %s, block %d, correct checksum %X\n"), progname, fn, blockno, csum);
 	}
 
 	close(f);
@@ -119,7 +126,7 @@ scan_directory(char *basedir, char *subdir)
 	char path[MAXPGPATH];
 	DIR *dir;
 	struct dirent *de;
-	
+
 	snprintf(path, MAXPGPATH, "%s/%s", basedir, subdir);
 	dir = opendir(path);
 	if (!dir)
@@ -142,7 +149,21 @@ scan_directory(char *basedir, char *subdir)
 			exit(1);
 		}
 		if (S_ISREG(st.st_mode))
-			scan_file(fn);
+		{
+			if (only_oid)
+			{
+				if (strcmp(only_oid, de->d_name) == 0 ||
+					(strncmp(only_oid, de->d_name, strlen(only_oid)) == 0 &&
+					 strlen(de->d_name) > strlen(only_oid) &&
+					 de->d_name[strlen(only_oid)] == '_')
+					) {
+					/* Either it's the same oid, or it's a relation fork of it */
+					scan_file(fn);
+				}
+			}
+			else
+				scan_file(fn);
+		}
 		else if (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
 			scan_directory(path, de->d_name);
 	}
@@ -175,15 +196,26 @@ main(int argc, char *argv[])
 		}
 	}
 
-	while ((c = getopt(argc, argv, "D:f")) != -1)
+	while ((c = getopt(argc, argv, "D:fo:d")) != -1)
 	{
 		switch (c)
 		{
+			case 'd':
+				debug = true;
+				break;
 			case 'D':
 				DataDir = optarg;
 				break;
 			case 'f':
 				force = true;
+				break;
+			case 'o':
+				if (atoi(optarg) <= 0)
+				{
+					fprintf(stderr, _("%s: invalid oid: %s\n"), progname, optarg);
+					exit(1);
+				}
+				only_oid = pstrdup(optarg);
 				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
