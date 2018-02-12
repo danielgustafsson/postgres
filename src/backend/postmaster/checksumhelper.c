@@ -26,6 +26,7 @@
 #include "access/htup_details.h"
 #include "access/xact.h"
 #include "catalog/pg_database.h"
+#include "commands/vacuum.h"
 #include "common/relpath.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -123,6 +124,8 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum)
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		MarkBufferDirty(buf);
 		UnlockReleaseBuffer(buf);
+
+		vacuum_delay_point();
 	}
 
 	return true;
@@ -136,6 +139,7 @@ ProcessSingleRelationByOid(Oid relationId)
 
 	StartTransactionCommand();
 
+	elog(DEBUG1, "vacuum cost: %d", VacuumCostBalance);
 	elog(DEBUG2, "Checksumhelper starting to process relation %d", relationId);
 	rel = relation_open(relationId, AccessShareLock);
 	RelationOpenSmgr(rel);
@@ -527,6 +531,14 @@ void ChecksumHelperWorkerMain(Datum arg)
 		   (errmsg("Checksum worker starting for database oid %d", dboid)));
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
+
+	/*
+	 * Enable vacuum cost delay, if any */
+	VacuumCostActive = (VacuumCostDelay > 0);
+	VacuumCostBalance = 0;
+	VacuumPageHit = 0;
+	VacuumPageMiss = 0;
+	VacuumPageDirty = 0;
 
 	RelationList = BuildRelationList(ChecksumHelperShmem->process_shared_catalogs);
 	foreach (lc, RelationList)
