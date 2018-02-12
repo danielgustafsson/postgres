@@ -110,7 +110,7 @@ StartChecksumHelperLauncher(void)
  * XXX: must hold a lock on the relation preventing it from being truncated?
  */
 static bool
-ProcessSingleRelationFork(Relation reln, ForkNumber forkNum)
+ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy)
 {
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
 	BlockNumber b;
@@ -118,8 +118,7 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum)
 	for (b = 0; b < numblocks; b++)
 	{
 		/* XXX set strategy */
-		/* XXX indicate ignore-checksums in RBM? */
-		Buffer buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, NULL);
+		Buffer buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
 		/* Need to get an exclusive lock before we can flag as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		MarkBufferDirty(buf);
@@ -132,7 +131,7 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum)
 }
 
 static bool
-ProcessSingleRelationByOid(Oid relationId)
+ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 {
 	Relation rel;
 	ForkNumber fnum;
@@ -146,7 +145,7 @@ ProcessSingleRelationByOid(Oid relationId)
 	for (fnum = 0; fnum <= MAX_FORKNUM ; fnum++)
 	{
 		if (smgrexists(rel->rd_smgr, fnum))
-			ProcessSingleRelationFork(rel, fnum);
+			ProcessSingleRelationFork(rel, fnum, strategy);
 	}
 	relation_close(rel, AccessShareLock);
 	elog(DEBUG2, "Checksumhelper done with relation %d", relationId);
@@ -519,6 +518,7 @@ void ChecksumHelperWorkerMain(Datum arg)
 	Oid		dboid = DatumGetObjectId(arg);
 	List   *RelationList = NIL;
 	ListCell *lc;
+	BufferAccessStrategy strategy;
 
 	pqsignal(SIGTERM, die);
 
@@ -540,12 +540,17 @@ void ChecksumHelperWorkerMain(Datum arg)
 	VacuumPageMiss = 0;
 	VacuumPageDirty = 0;
 
+	/*
+	 * Create and set the vacuum strategy as our buffer strategy
+	 */
+	strategy = GetAccessStrategy(BAS_VACUUM);
+
 	RelationList = BuildRelationList(ChecksumHelperShmem->process_shared_catalogs);
 	foreach (lc, RelationList)
 	{
 		ChecksumHelperRelation *rel = (ChecksumHelperRelation *) lfirst(lc);
 
-		if (!ProcessSingleRelationByOid(rel->reloid))
+		if (!ProcessSingleRelationByOid(rel->reloid, strategy))
 		{
 			ereport(ERROR,
 					(errmsg("failed to process table with oid %d", rel->reloid)));
