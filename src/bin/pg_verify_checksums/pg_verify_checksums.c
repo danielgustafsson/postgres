@@ -76,10 +76,10 @@ skipfile(char *fn)
 static void
 scan_file(char *fn)
 {
-	char buf[BLCKSZ];
-	PageHeader header = (PageHeader) buf;
-	int f;
-	int blockno;
+	char		buf[BLCKSZ];
+	PageHeader	header = (PageHeader) buf;
+	int			f;
+	int			blockno;
 
 	f = open(fn, 0);
 	if (f < 0)
@@ -90,10 +90,10 @@ scan_file(char *fn)
 
 	files++;
 
-	for (blockno = 0; ; blockno++)
+	for (blockno = 0;; blockno++)
 	{
-		uint16 csum;
-		int r = read(f, buf, BLCKSZ);
+		uint16		csum;
+		int			r = read(f, buf, BLCKSZ);
 
 		if (r == 0)
 			break;
@@ -123,8 +123,8 @@ scan_file(char *fn)
 static void
 scan_directory(char *basedir, char *subdir)
 {
-	char path[MAXPGPATH];
-	DIR *dir;
+	char		path[MAXPGPATH];
+	DIR		   *dir;
 	struct dirent *de;
 
 	snprintf(path, MAXPGPATH, "%s/%s", basedir, subdir);
@@ -136,7 +136,7 @@ scan_directory(char *basedir, char *subdir)
 	}
 	while ((de = readdir(dir)) != NULL)
 	{
-		char fn[MAXPGPATH];
+		char		fn[MAXPGPATH];
 		struct stat st;
 
 		if (skipfile(de->d_name))
@@ -156,7 +156,8 @@ scan_directory(char *basedir, char *subdir)
 					(strncmp(only_oid, de->d_name, strlen(only_oid)) == 0 &&
 					 strlen(de->d_name) > strlen(only_oid) &&
 					 de->d_name[strlen(only_oid)] == '_')
-					) {
+					)
+				{
 					/* Either it's the same oid, or it's a relation fork of it */
 					scan_file(fn);
 				}
@@ -174,9 +175,9 @@ int
 main(int argc, char *argv[])
 {
 	char	   *DataDir = NULL;
-	bool force = false;
-	int c;
-	bool crc_ok;
+	bool		force = false;
+	int			c;
+	bool		crc_ok;
 
 	set_pglocale_pgservice(argv[0], PG_TEXTDOMAIN("pg_verify_checksums"));
 
