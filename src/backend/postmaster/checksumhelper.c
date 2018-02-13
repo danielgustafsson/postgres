@@ -49,31 +49,31 @@ typedef struct ChecksumHelperShmemStruct
 {
 	bool		success;
 	bool		process_shared_catalogs;
-} ChecksumHelperShmemStruct;
+}			ChecksumHelperShmemStruct;
 
 /* Shared memory segment for checksum helper */
-static ChecksumHelperShmemStruct *ChecksumHelperShmem;
+static ChecksumHelperShmemStruct * ChecksumHelperShmem;
 
 /* Bookkeeping for work to do */
 typedef struct ChecksumHelperDatabase
 {
 	Oid			dboid;
-	char   	   *dbname;
+	char	   *dbname;
 	int			attempts;
 	bool		success;
-} ChecksumHelperDatabase;
+}			ChecksumHelperDatabase;
 
 typedef struct ChecksumHelperRelation
 {
 	Oid			reloid;
 	char		relkind;
 	bool		success;
-} ChecksumHelperRelation;
+}			ChecksumHelperRelation;
 
 /* Prototypes */
 static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool include_shared);
-static bool ProcessDatabase(ChecksumHelperDatabase *db);
+static bool ProcessDatabase(ChecksumHelperDatabase * db);
 
 /*
  * Main entry point for checksum helper launcher process
@@ -118,7 +118,8 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	for (b = 0; b < numblocks; b++)
 	{
 		/* XXX set strategy */
-		Buffer buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
+		Buffer		buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
+
 		/* Need to get an exclusive lock before we can flag as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
 		START_CRIT_SECTION();
@@ -137,8 +138,8 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 static bool
 ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 {
-	Relation rel;
-	ForkNumber fnum;
+	Relation	rel;
+	ForkNumber	fnum;
 
 	StartTransactionCommand();
 
@@ -146,7 +147,7 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	rel = relation_open(relationId, AccessShareLock);
 	RelationOpenSmgr(rel);
 
-	for (fnum = 0; fnum <= MAX_FORKNUM ; fnum++)
+	for (fnum = 0; fnum <= MAX_FORKNUM; fnum++)
 	{
 		if (smgrexists(rel->rd_smgr, fnum))
 			ProcessSingleRelationFork(rel, fnum, strategy);
@@ -167,12 +168,12 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
  * connected to one database during it's lifetime.
  */
 static bool
-ProcessDatabase(ChecksumHelperDatabase *db)
+ProcessDatabase(ChecksumHelperDatabase * db)
 {
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
 	BgwHandleStatus status;
-	pid_t pid;
+	pid_t		pid;
 
 	ChecksumHelperShmem->success = false;
 
@@ -214,7 +215,7 @@ ProcessDatabase(ChecksumHelperDatabase *db)
 	}
 
 	ereport(DEBUG1,
-		   (errmsg("background worker for checksums in %s completed", db->dbname)));
+			(errmsg("background worker for checksums in %s completed", db->dbname)));
 
 	return ChecksumHelperShmem->success;
 }
@@ -222,7 +223,7 @@ ProcessDatabase(ChecksumHelperDatabase *db)
 void
 ChecksumHelperLauncherMain(Datum arg)
 {
-	List *DatabaseList;
+	List	   *DatabaseList;
 
 	ereport(DEBUG1,
 			(errmsg("checksumhelper launcher started")));
@@ -246,8 +247,8 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	/*
 	 * Create a database list.  We don't need to concern ourselves with
-	 * rebuilding this list during runtime since any new created database
-	 * will be running with checksums turned on from the start.
+	 * rebuilding this list during runtime since any new created database will
+	 * be running with checksums turned on from the start.
 	 */
 	DatabaseList = BuildDatabaseList();
 
@@ -260,11 +261,12 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	while (true)
 	{
-		List *remaining = NIL;
-		ListCell *lc, *lc2;
-		List *CurrentDatabases = NIL;
+		List	   *remaining = NIL;
+		ListCell   *lc,
+				   *lc2;
+		List	   *CurrentDatabases = NIL;
 
-		foreach (lc, DatabaseList)
+		foreach(lc, DatabaseList)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 
@@ -274,9 +276,10 @@ ChecksumHelperLauncherMain(Datum arg)
 				pfree(db);
 
 				if (ChecksumHelperShmem->process_shared_catalogs)
+
 					/*
-					 * Now that one database has completed shared catalogs, we don't
-					 * have to process them again .
+					 * Now that one database has completed shared catalogs, we
+					 * don't have to process them again .
 					 */
 					ChecksumHelperShmem->process_shared_catalogs = false;
 			}
@@ -294,22 +297,22 @@ ChecksumHelperLauncherMain(Datum arg)
 		remaining = NIL;
 
 		/*
-		 * DatabaseList now has all databases not yet processed. This can be because
-		 * they failed for some reason, or because the database was DROPed between
-		 * us getting the database list and trying to process it.
-		 * Get a fresh list of databases to detect the second case with.
-		 * Any database that still exists but failed we retry for a limited number
-		 * of times before giving up. Any database that remains in failed state
-		 * after that will fail the entire operation.
+		 * DatabaseList now has all databases not yet processed. This can be
+		 * because they failed for some reason, or because the database was
+		 * DROPed between us getting the database list and trying to process
+		 * it. Get a fresh list of databases to detect the second case with.
+		 * Any database that still exists but failed we retry for a limited
+		 * number of times before giving up. Any database that remains in
+		 * failed state after that will fail the entire operation.
 		 */
 		CurrentDatabases = BuildDatabaseList();
 
-		foreach (lc, DatabaseList)
+		foreach(lc, DatabaseList)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-			bool found = false;
+			bool		found = false;
 
-			foreach (lc2, CurrentDatabases)
+			foreach(lc2, CurrentDatabases)
 			{
 				ChecksumHelperDatabase *db2 = (ChecksumHelperDatabase *) lfirst(lc2);
 
@@ -341,9 +344,10 @@ ChecksumHelperLauncherMain(Datum arg)
 		}
 
 		/* Free the extra list of databases */
-		foreach (lc, CurrentDatabases)
+		foreach(lc, CurrentDatabases)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+
 			pfree(db->dbname);
 			pfree(db);
 		}
@@ -402,8 +406,7 @@ ChecksumHelperShmemInit(void)
 						&found);
 
 	/*
-	 * No need to initialize content as struct is never used
-	 * globally.
+	 * No need to initialize content as struct is never used globally.
 	 */
 }
 
@@ -419,12 +422,12 @@ ChecksumHelperShmemInit(void)
 static List *
 BuildDatabaseList(void)
 {
-	List		   *DatabaseList = NIL;
-	Relation		rel;
-	HeapScanDesc	scan;
-	HeapTuple		tup;
-	MemoryContext	ctx = CurrentMemoryContext;
-	MemoryContext   oldctx;
+	List	   *DatabaseList = NIL;
+	Relation	rel;
+	HeapScanDesc scan;
+	HeapTuple	tup;
+	MemoryContext ctx = CurrentMemoryContext;
+	MemoryContext oldctx;
 
 	StartTransactionCommand();
 
@@ -433,7 +436,7 @@ BuildDatabaseList(void)
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
-		Form_pg_database		pgdb = (Form_pg_database) GETSTRUCT(tup);
+		Form_pg_database pgdb = (Form_pg_database) GETSTRUCT(tup);
 		ChecksumHelperDatabase *db;
 
 		if (!pgdb->datallowconn)
@@ -468,12 +471,12 @@ BuildDatabaseList(void)
 static List *
 BuildRelationList(bool include_shared)
 {
-	List		   *RelationList = NIL;
-	Relation		rel;
-	HeapScanDesc	scan;
-	HeapTuple		tup;
-	MemoryContext	ctx = CurrentMemoryContext;
-	MemoryContext	oldctx;
+	List	   *RelationList = NIL;
+	Relation	rel;
+	HeapScanDesc scan;
+	HeapTuple	tup;
+	MemoryContext ctx = CurrentMemoryContext;
+	MemoryContext oldctx;
 
 	StartTransactionCommand();
 
@@ -482,7 +485,7 @@ BuildRelationList(bool include_shared)
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
-		Form_pg_class			pgc = (Form_pg_class) GETSTRUCT(tup);
+		Form_pg_class pgc = (Form_pg_class) GETSTRUCT(tup);
 		ChecksumHelperRelation *relentry;
 
 		if (pgc->relisshared && !include_shared)
@@ -517,11 +520,12 @@ BuildRelationList(bool include_shared)
 /*
  * Main function for enabling checksums in a single database
  */
-void ChecksumHelperWorkerMain(Datum arg)
+void
+ChecksumHelperWorkerMain(Datum arg)
 {
-	Oid		dboid = DatumGetObjectId(arg);
-	List   *RelationList = NIL;
-	ListCell *lc;
+	Oid			dboid = DatumGetObjectId(arg);
+	List	   *RelationList = NIL;
+	ListCell   *lc;
 	BufferAccessStrategy strategy;
 
 	pqsignal(SIGTERM, die);
@@ -531,7 +535,7 @@ void ChecksumHelperWorkerMain(Datum arg)
 	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_WORKER), "", "", "");
 
 	ereport(DEBUG1,
-		   (errmsg("Checksum worker starting for database oid %d", dboid)));
+			(errmsg("Checksum worker starting for database oid %d", dboid)));
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
 
@@ -550,7 +554,7 @@ void ChecksumHelperWorkerMain(Datum arg)
 	strategy = GetAccessStrategy(BAS_VACUUM);
 
 	RelationList = BuildRelationList(ChecksumHelperShmem->process_shared_catalogs);
-	foreach (lc, RelationList)
+	foreach(lc, RelationList)
 	{
 		ChecksumHelperRelation *rel = (ChecksumHelperRelation *) lfirst(lc);
 
