@@ -7832,6 +7832,16 @@ StartupXLOG(void)
 	CompleteCommitTsInitialization();
 
 	/*
+	 * If we reach this point with checksums in inprogress state, we notify
+	 * the user that they need to manually restart the process to enable
+	 * checksums.
+	 */
+	if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
+		ereport(WARNING,
+				(errmsg("checksum state is \"in progress\" with no worker."),
+				 errhint("either disable or enable checksums by calling the pg_data_checksums_enable()/disable() functions")));
+
+	/*
 	 * All done with end-of-recovery actions.
 	 *
 	 * Now allow backends to write WAL and update the control file status in
