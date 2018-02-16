@@ -3,7 +3,9 @@
  *
  * Verifies page level checksums in an offline cluster
  *
- * src/bin/pg_verify_checksums/pg_verify_checksums.c
+ *	Copyright (c) 2010-2018, PostgreSQL Global Development Group
+ *
+ *	src/bin/pg_verify_checksums/pg_verify_checksums.c
  */
 
 #define FRONTEND 1
