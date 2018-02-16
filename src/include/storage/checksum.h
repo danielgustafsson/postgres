@@ -17,7 +17,7 @@
 
 typedef enum ChecksumType
 {
-	DATA_CHECKSUMS_OFF = 0
+	DATA_CHECKSUMS_OFF = 0,
 	DATA_CHECKSUMS_ON,
 	DATA_CHECKSUMS_INPROGRESS
 } ChecksumType;
