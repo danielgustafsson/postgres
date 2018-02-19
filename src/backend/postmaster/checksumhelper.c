@@ -133,7 +133,6 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 
 	for (b = 0; b < numblocks; b++)
 	{
-		/* XXX set strategy */
 		Buffer		buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
 
 		/* Need to get an exclusive lock before we can flag as dirty */

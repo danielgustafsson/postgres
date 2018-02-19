@@ -262,10 +262,6 @@ CreateSharedMemoryAndSemaphores(bool makePrivate, int port)
 	WalSndShmemInit();
 	WalRcvShmemInit();
 	ApplyLauncherShmemInit();
-	/*
-	 * TODO: This needs to be moved to when the backend actually starts to
-	 * avoid consuming memory for no reason
-	 */
 	ChecksumHelperShmemInit();
 
 	/*
