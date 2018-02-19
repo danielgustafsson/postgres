@@ -703,18 +703,30 @@ pg_backup_start_time(PG_FUNCTION_ARGS)
 Datum
 disable_data_checksums(PG_FUNCTION_ARGS)
 {
+	if (DataChecksumsDisabled())
+		ereport(ERROR,
+				(errmsg("data checksums already disabled")));
+
 	SetDataChecksumsOff();
 
-	PG_RETURN_BOOL(!DataChecksumsEnabled());
+	PG_RETURN_BOOL(DataChecksumsDisabled());
 }
 
 Datum
 enable_data_checksums(PG_FUNCTION_ARGS)
 {
+	/*
+	 * Allow state change from "off" or from "inprogress", since this is how
+	 * we restart the worker if necessary.
+	 */
+	if (DataChecksumsEnabledOrInProgress() && !DataChecksumsInProgress())
+		ereport(ERROR,
+				(errmsg("data checksums already enabled")));
+
 	SetDataChecksumsInProgress();
 	if (!StartChecksumHelperLauncher())
 		ereport(ERROR,
 				(errmsg("failed to start checksum helper process")));
 
-	PG_RETURN_BOOL(DataChecksumsEnabled());
+	PG_RETURN_BOOL(DataChecksumsEnabledOrInProgress());
 }

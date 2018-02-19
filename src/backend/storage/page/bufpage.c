@@ -100,7 +100,7 @@ PageIsVerified(Page page, BlockNumber blkno)
 		 * again are checksummed.  The PageSetChecksum functions must continue
 		 * to write the checksums even though we don't validate them yet.
 		 */
-		if (DataChecksumsEnabled() && !DataChecksumsInProgress())
+		if (DataChecksumsEnabledOrInProgress() && !DataChecksumsInProgress())
 		{
 			checksum = pg_checksum_page((char *) page, blkno);
 
@@ -1175,7 +1175,7 @@ PageSetChecksumCopy(Page page, BlockNumber blkno)
 	static char *pageCopy = NULL;
 
 	/* If we don't need a checksum, just return the passed-in data */
-	if (PageIsNew(page) || !DataChecksumsEnabled())
+	if (PageIsNew(page) || !DataChecksumsEnabledOrInProgress())
 		return (char *) page;
 
 	/*
@@ -1202,7 +1202,7 @@ void
 PageSetChecksumInplace(Page page, BlockNumber blkno)
 {
 	/* If we don't need a checksum, just return */
-	if (PageIsNew(page) || !DataChecksumsEnabled())
+	if (PageIsNew(page) || !DataChecksumsEnabledOrInProgress())
 		return;
 
 	((PageHeader) page)->pd_checksum = pg_checksum_page((char *) page, blkno);
