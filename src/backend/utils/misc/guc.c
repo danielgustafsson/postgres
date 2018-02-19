@@ -167,6 +167,7 @@ static void assign_syslog_ident(const char *newval, void *extra);
 static void assign_session_replication_role(int newval, void *extra);
 static bool check_temp_buffers(int *newval, void **extra, GucSource source);
 static bool check_bonjour(bool *newval, void **extra, GucSource source);
+static bool check_ignore_checksum_failure(bool *newval, void **extra, GucSource source);
 static bool check_ssl(bool *newval, void **extra, GucSource source);
 static bool check_stage_log_stats(bool *newval, void **extra, GucSource source);
 static bool check_log_stats(bool *newval, void **extra, GucSource source);
@@ -1035,7 +1036,7 @@ static struct config_bool ConfigureNamesBool[] =
 		},
 		&ignore_checksum_failure,
 		false,
-		NULL, NULL, NULL
+		check_ignore_checksum_failure, NULL, NULL
 	},
 	{
 		{"zero_damaged_pages", PGC_SUSET, DEVELOPER_OPTIONS,
@@ -10212,6 +10213,17 @@ check_bonjour(bool *newval, void **extra, GucSource source)
 		return false;
 	}
 #endif
+	return true;
+}
+
+static bool
+check_ignore_checksum_failure(bool *newval, void **extra, GucSource source)
+{
+	if (*newval && DataChecksumsInProgress())
+	{
+		GUC_check_errdetail("\"ignore_checksum_failure\" cannot be turned on when \"data_checksums\" are in progress.");
+		return false;
+	}
 	return true;
 }
 
