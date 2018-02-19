@@ -94,7 +94,7 @@ PageIsVerified(Page page, BlockNumber blkno)
 	if (!PageIsNew(page))
 	{
 		/*
-		 * If data checksums have been turned on in a runing cluster which was
+		 * If data checksums have been turned on in a running cluster which was
 		 * initdb'd without checksums, or a cluster which has had checksums
 		 * turned off, we hold off on verifying the checksum until all pages
 		 * again are checksummed.  The PageSetChecksum functions must continue
