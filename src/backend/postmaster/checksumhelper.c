@@ -41,6 +41,7 @@
 #include "postmaster/checksumhelper.h"
 #include "storage/bufmgr.h"
 #include "storage/lmgr.h"
+#include "storage/ipc.h"
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/ps_status.h"
@@ -53,6 +54,7 @@
 
 typedef struct ChecksumHelperShmemStruct
 {
+	pg_atomic_flag		launcher_started;
 	bool		success;
 	bool		process_shared_catalogs;
 }			ChecksumHelperShmemStruct;
@@ -90,9 +92,14 @@ StartChecksumHelperLauncher(void)
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
 
-	/*
-	 * XXX: ensure only one can be started!
-	 */
+	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
+	{
+		/*
+		 * Failed to set means somebody else started
+		 */
+		ereport(ERROR,
+				(errmsg("could not start checksum helper: already running")));
+	}
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -106,7 +113,10 @@ StartChecksumHelperLauncher(void)
 	bgw.bgw_main_arg = (Datum) 0;
 
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
+	{
+		pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
 		return false;
+	}
 
 	return true;
 }
@@ -226,10 +236,18 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	return ChecksumHelperShmem->success;
 }
 
+static void
+launcher_exit(int code, Datum arg)
+{
+	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
+}
+
 void
 ChecksumHelperLauncherMain(Datum arg)
 {
 	List	   *DatabaseList;
+
+	on_shmem_exit(launcher_exit, 0);
 
 	ereport(DEBUG1,
 			(errmsg("checksumhelper launcher started")));
@@ -411,9 +429,7 @@ ChecksumHelperShmemInit(void)
 						ChecksumHelperShmemSize(),
 						&found);
 
-	/*
-	 * No need to initialize content as struct is never used globally.
-	 */
+	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
 }
 
 
