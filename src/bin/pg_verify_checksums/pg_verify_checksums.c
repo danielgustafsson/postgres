@@ -286,5 +286,8 @@ main(int argc, char *argv[])
 	else
 		printf(_("Bad checksums:  %" INT64_MODIFIER "d\n"), badblocks);
 
+	if (badblocks > 0)
+		return 1;
+
 	return 0;
 }
