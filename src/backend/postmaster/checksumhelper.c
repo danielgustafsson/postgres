@@ -120,6 +120,21 @@ StartChecksumHelperLauncher(void)
 	return true;
 }
 
+
+void
+ShutdownChecksumHelperIfRunning(void)
+{
+	if (pg_atomic_unlocked_test_flag(&ChecksumHelperShmem->launcher_started))
+		/*
+		 * Launcher not started, so nothing to shut down.
+		 */
+		return;
+
+	ereport(ERROR,
+			(errmsg("Checksum helper is currently running, cannot disable checksums"),
+			 errhint("Restart the cluster or wait for the worker to finish")));
+}
+
 /*
  * Enable checksums in a single relation/fork.
  * XXX: must hold a lock on the relation preventing it from being truncated?

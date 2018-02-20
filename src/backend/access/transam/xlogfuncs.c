@@ -707,6 +707,8 @@ disable_data_checksums(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errmsg("data checksums already disabled")));
 
+	ShutdownChecksumHelperIfRunning();
+
 	SetDataChecksumsOff();
 
 	PG_RETURN_BOOL(DataChecksumsDisabled());

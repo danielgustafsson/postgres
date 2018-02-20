@@ -21,6 +21,9 @@ extern void ChecksumHelperShmemInit(void);
 /* Start the background processes for enabling checksums */
 bool StartChecksumHelperLauncher(void);
 
+/* Shutdown the background processes, if any */
+void ShutdownChecksumHelperIfRunning(void);
+
 /* Background worker entrypoints */
 void ChecksumHelperLauncherMain(Datum arg);
 void ChecksumHelperWorkerMain(Datum arg);
