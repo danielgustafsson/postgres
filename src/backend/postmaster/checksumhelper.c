@@ -427,7 +427,7 @@ ChecksumHelperShmemInit(void)
 						ChecksumHelperShmemSize(),
 						&found);
 
-	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
+	pg_atomic_init_flag(&ChecksumHelperShmem->launcher_started);
 }
 
 
