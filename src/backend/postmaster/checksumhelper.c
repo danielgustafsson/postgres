@@ -14,7 +14,6 @@
  *	- Moving the names of the versions to checksum_impl.h to allow
  *	  frontend tools to use them?
  *	- Only dump pages with incorrect, or no, checksum in the xlog
- *	- Documentation
  *	- pg_indent
  *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
