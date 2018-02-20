@@ -13,7 +13,6 @@
  * TODO:
  *	- Moving the names of the versions to checksum_impl.h to allow
  *	  frontend tools to use them?
- *	- Only dump pages with incorrect, or no, checksum in the xlog
  *	- pg_indent
  *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
@@ -39,6 +38,7 @@
 #include "postmaster/bgwriter.h"
 #include "postmaster/checksumhelper.h"
 #include "storage/bufmgr.h"
+#include "storage/checksum.h"
 #include "storage/lmgr.h"
 #include "storage/ipc.h"
 #include "storage/smgr.h"
@@ -148,13 +148,31 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	for (b = 0; b < numblocks; b++)
 	{
 		Buffer		buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
+		Page		page;
+		PageHeader	pagehdr;
+		uint16		checksum;
 
 		/* Need to get an exclusive lock before we can flag as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
-		START_CRIT_SECTION();
-		MarkBufferDirty(buf);
-		log_newpage_buffer(buf, false);
-		END_CRIT_SECTION();
+
+		/* Do we already have a valid checksum? */
+		page = BufferGetPage(buf);
+		pagehdr = (PageHeader) page;
+		checksum = pg_checksum_page((char *) page, b);
+
+		/*
+		 * If checksum was not set or was invalid, mark the buffer as dirty
+		 * and force a full page write. If the checksum was already valid,
+		 * we can leave it since we know that any other process writing
+		 * the buffer will update the checksum.
+		 */
+		if (checksum != pagehdr->pd_checksum)
+		{
+			START_CRIT_SECTION();
+			MarkBufferDirty(buf);
+			log_newpage_buffer(buf, false);
+			END_CRIT_SECTION();
+		}
 
 		UnlockReleaseBuffer(buf);
 
