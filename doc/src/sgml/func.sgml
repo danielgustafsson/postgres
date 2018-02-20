@@ -19418,6 +19418,7 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
    <para>
     The functions shown in <xref linkend="functions-checksums-table" /> can
     be used to enable or disable data checksums in a running cluster.
+    See <xref linkend="checksums" /> for details.
    </para>
 
    <table id="functions-checksums-table">
@@ -19447,12 +19448,6 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
         all data in the database and enable checksums for it. When all data pages have had
         checksums enabled, the cluster will automatically switch to checksums
         <literal>on</literal>.
-        <note>
-         <para>
-          This process can cause significant I/O, as most of the database pages will end
-          up being rewritten, including written to the WAL.
-         </para>
-        </note>
        </entry>
       </row>
       <row>
