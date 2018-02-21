@@ -110,7 +110,7 @@ scan_file(char *fn)
 		csum = pg_checksum_page(buf, blockno);
 		if (csum != header->pd_checksum)
 		{
-			if (ControlFile->data_checksum_version == 1)
+			if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION)
 				fprintf(stderr, _("%s: %s, block %d, invalid checksum in file %X, calculated %X\n"),
 						progname, fn, blockno, header->pd_checksum, csum);
 			badblocks++;
@@ -281,7 +281,7 @@ main(int argc, char *argv[])
 	printf(_("Data checksum version: %d\n"), ControlFile->data_checksum_version);
 	printf(_("Files scanned:  %" INT64_MODIFIER "d\n"), files);
 	printf(_("Blocks scanned: %" INT64_MODIFIER "d\n"), blocks);
-	if (ControlFile->data_checksum_version == 2)
+	if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
 		printf(_("Blocks left in progress: %" INT64_MODIFIER "d\n"), badblocks);
 	else
 		printf(_("Bad checksums:  %" INT64_MODIFIER "d\n"), badblocks);

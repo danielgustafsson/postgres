@@ -10,10 +10,6 @@
  * ensure that all pages are checksummed before verification of the
  * checksums is turned on.
  *
- * TODO:
- *	- Moving the names of the versions to checksum_impl.h to allow
- *	  frontend tools to use them?
- *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
