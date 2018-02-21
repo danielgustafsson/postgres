@@ -10219,10 +10219,30 @@ check_bonjour(bool *newval, void **extra, GucSource source)
 static bool
 check_ignore_checksum_failure(bool *newval, void **extra, GucSource source)
 {
-	if (*newval && DataChecksumsInProgress())
+	if (*newval)
 	{
-		GUC_check_errdetail("\"ignore_checksum_failure\" cannot be turned on when \"data_checksums\" are in progress.");
-		return false;
+		/*
+		 * When data checksums are in progress, the verification of the
+		 * checksums is already ignored until all pages have had checksums
+		 * backfilled, making the effect of ignore_checksum_failure a no-op.
+		 * Allowing it during checksumming in progress can hide the fact that
+		 * checksums become enabled once done, so disallow.
+		 */
+		if (DataChecksumsInProgress())
+		{
+			GUC_check_errdetail("\"ignore_checksum_failure\" cannot be turned on when \"data_checksums\" are in progress.");
+			return false;
+		}
+
+		/*
+		 * While safe, it's nonsensical to allow ignoring checksums when data
+		 * checksums aren't enabled in the first place.
+		 */
+		if (DataChecksumsDisabled())
+		{
+			GUC_check_errdetail("\"ignore_checksum_failure\" cannot be turned on when \"data_checksums\" aren't enabled.");
+			return false;
+		}
 	}
 	return true;
 }
