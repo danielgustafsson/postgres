@@ -10048,6 +10048,7 @@ xlog_redo(XLogReaderState *record)
 	else if (info == XLOG_CHECKSUMS)
 	{
 		xl_checksum_state state;
+
 		memcpy(&state, XLogRecGetData(record), sizeof(xl_checksum_state));
 
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);

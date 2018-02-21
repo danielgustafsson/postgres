@@ -245,7 +245,7 @@ typedef struct xl_restore_point
 typedef struct xl_checksum_state
 {
 	ChecksumType new_checksumtype;
-} xl_checksum_state;
+}			xl_checksum_state;
 
 /* End of recovery mark, when we don't do an END_OF_RECOVERY checkpoint */
 typedef struct xl_end_of_recovery

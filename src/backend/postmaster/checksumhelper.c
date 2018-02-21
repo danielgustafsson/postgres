@@ -13,7 +13,6 @@
  * TODO:
  *	- Moving the names of the versions to checksum_impl.h to allow
  *	  frontend tools to use them?
- *	- pg_indent
  *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
@@ -53,7 +52,7 @@
 
 typedef struct ChecksumHelperShmemStruct
 {
-	pg_atomic_flag		launcher_started;
+	pg_atomic_flag launcher_started;
 	bool		success;
 	bool		process_shared_catalogs;
 }			ChecksumHelperShmemStruct;
@@ -125,6 +124,7 @@ void
 ShutdownChecksumHelperIfRunning(void)
 {
 	if (pg_atomic_unlocked_test_flag(&ChecksumHelperShmem->launcher_started))
+
 		/*
 		 * Launcher not started, so nothing to shut down.
 		 */
@@ -162,9 +162,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 
 		/*
 		 * If checksum was not set or was invalid, mark the buffer as dirty
-		 * and force a full page write. If the checksum was already valid,
-		 * we can leave it since we know that any other process writing
-		 * the buffer will update the checksum.
+		 * and force a full page write. If the checksum was already valid, we
+		 * can leave it since we know that any other process writing the
+		 * buffer will update the checksum.
 		 */
 		if (checksum != pagehdr->pd_checksum)
 		{
