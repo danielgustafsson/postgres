@@ -12,7 +12,7 @@
 
 static int	yyline = 1;			/* line number for error reporting */
 
-static char litbuf[1024];
+static char litbuf[2048];
 static int litbufpos = 0;
 
 static void addlitchar(char c);
