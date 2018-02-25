@@ -76,7 +76,7 @@ skipfile(char *fn)
 }
 
 static void
-scan_file(char *fn)
+scan_file(char *fn, int segmentno)
 {
 	char		buf[BLCKSZ];
 	PageHeader	header = (PageHeader) buf;
@@ -107,7 +107,7 @@ scan_file(char *fn)
 		}
 		blocks++;
 
-		csum = pg_checksum_page(buf, blockno);
+		csum = pg_checksum_page(buf, blockno + segmentno*RELSEG_SIZE);
 		if (csum != header->pd_checksum)
 		{
 			if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION)
@@ -152,20 +152,35 @@ scan_directory(char *basedir, char *subdir)
 		}
 		if (S_ISREG(st.st_mode))
 		{
-			if (only_oid)
+			char *forkpath, *segmentpath;
+			int segmentno = 0;
+
+			/*
+			 * Cut off at the segment boundary (".") to get the segment number in order to
+			 * mix it into the checksum. Then also cut off at the fork boundary, to get
+			 * the oid (relfilenode) the file belongs to for filtering.
+			 */
+			segmentpath = strchr(de->d_name, '.');
+			if (segmentpath != NULL)
 			{
-				if (strcmp(only_oid, de->d_name) == 0 ||
-					(strncmp(only_oid, de->d_name, strlen(only_oid)) == 0 &&
-					 strlen(de->d_name) > strlen(only_oid) &&
-					 de->d_name[strlen(only_oid)] == '_')
-					)
+				*segmentpath++ = '\0';
+				segmentno = atoi(segmentpath);
+				if (segmentno == 0)
 				{
-					/* Either it's the same oid, or it's a relation fork of it */
-					scan_file(fn);
+					fprintf(stderr, _("%s: invalid segment number %d in filename %s\n"), progname, segmentno, fn);
+					exit(1);
 				}
 			}
-			else
-				scan_file(fn);
+
+			forkpath = strchr(de->d_name, '_');
+			if (forkpath != NULL)
+				*forkpath++ = '\0';
+
+			if (only_oid && strcmp(only_oid, de->d_name) != 0)
+				/* Oid not to be included */
+				continue;
+
+			scan_file(fn, segmentno);
 		}
 		else if (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))
 			scan_directory(path, de->d_name);
