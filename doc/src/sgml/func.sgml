@@ -19437,17 +19437,24 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
         <indexterm>
          <primary>pg_enable_data_checksums</primary>
         </indexterm>
-        <literal><function>pg_enable_data_checksums()</function></literal>
+        <literal><function>pg_enable_data_checksums(<optional><parameter>cost_delay</parameter> <type>int</type>, <parameter>cost_limit</parameter> <type>int</type></optional>)</function></literal>
        </entry>
        <entry>
         bool
        </entry>
        <entry>
-        Initiates data checksums for the cluster. This will switch the data checksums mode
-        to <literal>in progress</literal> and start a background worker that will process
-        all data in the database and enable checksums for it. When all data pages have had
-        checksums enabled, the cluster will automatically switch to checksums
-        <literal>on</literal>.
+        <para>
+         Initiates data checksums for the cluster. This will switch the data checksums mode
+         to <literal>in progress</literal> and start a background worker that will process
+         all data in the database and enable checksums for it. When all data pages have had
+         checksums enabled, the cluster will automatically switch to checksums
+         <literal>on</literal>.
+        </para>
+        <para>
+         If <parameter>cost_delay</parameter> and <parameter>cost_limit</parameter> are
+         specified, the speed of the process is throttled using the same principles as
+         <link linkend="runtime-config-resource-vacuum-cost">Cost-based Vacuum Delay</link>.
+        </para>
        </entry>
       </row>
       <row>

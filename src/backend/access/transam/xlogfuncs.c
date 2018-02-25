@@ -717,6 +717,15 @@ disable_data_checksums(PG_FUNCTION_ARGS)
 Datum
 enable_data_checksums(PG_FUNCTION_ARGS)
 {
+	int cost_delay = PG_GETARG_INT32(0);
+	int cost_limit = PG_GETARG_INT32(1);
+
+	if (cost_delay < 0)
+		ereport(ERROR,
+				(errmsg("cost delay cannot be less than zero")));
+	if (cost_limit <= 0)
+		ereport(ERROR,
+				(errmsg("cost limit must be a positive value")));
 	/*
 	 * Allow state change from "off" or from "inprogress", since this is how
 	 * we restart the worker if necessary.
@@ -726,7 +735,7 @@ enable_data_checksums(PG_FUNCTION_ARGS)
 				(errmsg("data checksums already enabled")));
 
 	SetDataChecksumsInProgress();
-	if (!StartChecksumHelperLauncher())
+	if (!StartChecksumHelperLauncher(cost_delay, cost_limit))
 		ereport(ERROR,
 				(errmsg("failed to start checksum helper process")));
 

@@ -5546,7 +5546,7 @@ DESCR("pg_controldata init state information as a function");
 
 DATA(insert OID = 3996 ( pg_disable_data_checksums		PGNSP PGUID 12 1 0 0 0 f f f f t f v s 0 0 16 "" _null_ _null_ _null_ _null_ _null_ disable_data_checksums _null_ _null_ _null_ ));
 DESCR("disable data checksums");
-DATA(insert OID = 3998 ( pg_enable_data_checksums		PGNSP PGUID 12 1 0 0 0 f f f f t f v s 0 0 16 "" _null_ _null_ _null_ _null_ _null_ enable_data_checksums _null_ _null_ _null_ ));
+DATA(insert OID = 3998 ( pg_enable_data_checksums		PGNSP PGUID 12 1 0 0 0 f f f f t f v s 2 0 16 "23 23" _null_ _null_ "{cost_delay,cost_limit}" _null_ _null_ enable_data_checksums _null_ _null_ _null_ ));
 DESCR("enable data checksums");
 
 /* collation management functions */

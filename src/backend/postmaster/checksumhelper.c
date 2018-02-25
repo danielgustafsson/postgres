@@ -51,6 +51,9 @@ typedef struct ChecksumHelperShmemStruct
 	pg_atomic_flag launcher_started;
 	bool		success;
 	bool		process_shared_catalogs;
+	/* Parameter values  set on start */
+	int			cost_delay;
+	int			cost_limit;
 }			ChecksumHelperShmemStruct;
 
 /* Shared memory segment for checksum helper */
@@ -81,7 +84,7 @@ static bool ProcessDatabase(ChecksumHelperDatabase * db);
  * Main entry point for checksum helper launcher process
  */
 bool
-StartChecksumHelperLauncher(void)
+StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 {
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
@@ -94,6 +97,9 @@ StartChecksumHelperLauncher(void)
 		ereport(ERROR,
 				(errmsg("could not start checksum helper: already running")));
 	}
+
+	ChecksumHelperShmem->cost_delay = cost_delay;
+	ChecksumHelperShmem->cost_limit = cost_limit;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -591,6 +597,8 @@ ChecksumHelperWorkerMain(Datum arg)
 	/*
 	 * Enable vacuum cost delay, if any
 	 */
+	VacuumCostDelay = ChecksumHelperShmem->cost_delay;
+	VacuumCostLimit = ChecksumHelperShmem->cost_limit;
 	VacuumCostActive = (VacuumCostDelay > 0);
 	VacuumCostBalance = 0;
 	VacuumPageHit = 0;
