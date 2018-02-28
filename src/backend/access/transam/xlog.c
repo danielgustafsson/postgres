@@ -7845,8 +7845,8 @@ StartupXLOG(void)
 	 */
 	if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
 		ereport(WARNING,
-				(errmsg("checksum state is \"in progress\" with no worker."),
-				 errhint("either disable or enable checksums by calling the pg_data_checksums_enable()/disable() functions")));
+				(errmsg("checksum state is \"in progress\" with no worker"),
+				 errhint("Either disable or enable checksums by calling the pg_disable_data_checksums() or pg_enable_data_checksums() functions.")));
 
 	/*
 	 * All done with end-of-recovery actions.
