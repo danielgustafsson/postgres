@@ -43,7 +43,7 @@ usage()
 	printf(_("\nOptions:\n"));
 	printf(_(" [-D] DATADIR    data directory\n"));
 	printf(_("  -f,            force check even if checksums are disabled\n"));
-	printf(_("  -o oid         check only relation with specified oid\n"));
+	printf(_("  -o relfilenode check only relation with specified relfilenode\n"));
 	printf(_("  -d             debug output, listing all checked blocks\n"));
 	printf(_("  -V, --version  output version information, then exit\n"));
 	printf(_("  -?, --help     show this help, then exit\n"));
