@@ -29,7 +29,7 @@ static int64 blocks = 0;
 static int64 badblocks = 0;
 static ControlFileData *ControlFile;
 
-static char *only_oid = NULL;
+static char *only_relfilenode = NULL;
 static bool debug = false;
 
 static const char *progname;
@@ -43,7 +43,7 @@ usage()
 	printf(_("\nOptions:\n"));
 	printf(_(" [-D] DATADIR    data directory\n"));
 	printf(_("  -f,            force check even if checksums are disabled\n"));
-	printf(_("  -o relfilenode check only relation with specified relfilenode\n"));
+	printf(_("  -r relfilenode check only relation with specified relfilenode\n"));
 	printf(_("  -d             debug output, listing all checked blocks\n"));
 	printf(_("  -V, --version  output version information, then exit\n"));
 	printf(_("  -?, --help     show this help, then exit\n"));
@@ -158,7 +158,7 @@ scan_directory(char *basedir, char *subdir)
 			/*
 			 * Cut off at the segment boundary (".") to get the segment number in order to
 			 * mix it into the checksum. Then also cut off at the fork boundary, to get
-			 * the oid (relfilenode) the file belongs to for filtering.
+			 * the relfilenode the file belongs to for filtering.
 			 */
 			segmentpath = strchr(de->d_name, '.');
 			if (segmentpath != NULL)
@@ -176,8 +176,8 @@ scan_directory(char *basedir, char *subdir)
 			if (forkpath != NULL)
 				*forkpath++ = '\0';
 
-			if (only_oid && strcmp(only_oid, de->d_name) != 0)
-				/* Oid not to be included */
+			if (only_relfilenode && strcmp(only_relfilenode, de->d_name) != 0)
+				/* Relfilenode not to be included */
 				continue;
 
 			scan_file(fn, segmentno);
@@ -214,7 +214,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	while ((c = getopt(argc, argv, "D:fo:d")) != -1)
+	while ((c = getopt(argc, argv, "D:fr:d")) != -1)
 	{
 		switch (c)
 		{
@@ -227,13 +227,13 @@ main(int argc, char *argv[])
 			case 'f':
 				force = true;
 				break;
-			case 'o':
+			case 'r':
 				if (atoi(optarg) <= 0)
 				{
-					fprintf(stderr, _("%s: invalid oid: %s\n"), progname, optarg);
+					fprintf(stderr, _("%s: invalid relfilenode: %s\n"), progname, optarg);
 					exit(1);
 				}
-				only_oid = pstrdup(optarg);
+				only_relfilenode = pstrdup(optarg);
 				break;
 			default:
 				fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);

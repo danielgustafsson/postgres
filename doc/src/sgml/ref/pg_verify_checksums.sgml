@@ -44,7 +44,7 @@ PostgreSQL documentation
     <variablelist>
 
      <varlistentry>
-      <term><option>-o <replaceable>relfilenode</replaceable></option></term>
+      <term><option>-r <replaceable>relfilenode</replaceable></option></term>
       <listitem>
        <para>
         Only validate checksums in the relation with specified relfilenode.
