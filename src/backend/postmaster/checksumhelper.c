@@ -163,18 +163,19 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		checksum = pg_checksum_page((char *) page, b);
 
 		/*
-		 * If checksum was not set or was invalid, mark the buffer as dirty
-		 * and force a full page write. If the checksum was already valid, we
-		 * can leave it since we know that any other process writing the
-		 * buffer will update the checksum.
+		 * Mark the buffer as dirty and force a full page write.
+		 * We have to re-write the page to wal even if the checksum hasn't
+		 * changed, because if there is a replica it might have a slightly
+		 * different version of the page with an invalid checksum, caused
+		 * by unlogged changes (e.g. hintbits) on the master happening while
+		 * checksums were off. This can happen if there was a valid checksum
+		 * on the page at one point in the past, so only when checksums
+		 * are first on, then off, and then turned on again.
 		 */
-		if (checksum != pagehdr->pd_checksum)
-		{
-			START_CRIT_SECTION();
-			MarkBufferDirty(buf);
-			log_newpage_buffer(buf, false);
-			END_CRIT_SECTION();
-		}
+		START_CRIT_SECTION();
+		MarkBufferDirty(buf);
+		log_newpage_buffer(buf, false);
+		END_CRIT_SECTION();
 
 		UnlockReleaseBuffer(buf);
 
