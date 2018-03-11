@@ -1876,6 +1876,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		/* see max_connections and max_wal_senders */
 		{"superuser_reserved_connections", PGC_POSTMASTER, CONN_AUTH_SETTINGS,
 			gettext_noop("Sets the number of connection slots reserved for superusers."),
 			NULL
@@ -2378,7 +2379,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		/* see max_connections */
+		/* see max_connections and superuser_reserved_connections */
 		{"max_wal_senders", PGC_POSTMASTER, REPLICATION_SENDING,
 			gettext_noop("Sets the maximum number of simultaneously running WAL sender processes."),
 			NULL
@@ -2389,7 +2390,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		/* see max_connections */
+		/* see max_wal_senders */
 		{"max_replication_slots", PGC_POSTMASTER, REPLICATION_SENDING,
 			gettext_noop("Sets the maximum number of simultaneously defined replication slots."),
 			NULL
@@ -2759,7 +2760,7 @@ static struct config_int ConfigureNamesInt[] =
 
 	{
 		{"max_parallel_workers", PGC_USERSET, RESOURCES_ASYNCHRONOUS,
-			gettext_noop("Sets the maximum number of parallel workers than can be active at one time."),
+			gettext_noop("Sets the maximum number of parallel workers that can be active at one time."),
 			NULL
 		},
 		&max_parallel_workers,
