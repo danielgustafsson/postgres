@@ -55,7 +55,7 @@ typedef struct ChecksumHelperShmemStruct
 	int			cost_limit;
 }			ChecksumHelperShmemStruct;
 
-/* Shared memory segment for checksum helper */
+/* Shared memory segment for checksumhelper */
 static ChecksumHelperShmemStruct * ChecksumHelperShmem;
 
 /* Bookkeeping for work to do */
@@ -80,7 +80,7 @@ static List *BuildRelationList(bool include_shared);
 static bool ProcessDatabase(ChecksumHelperDatabase * db);
 
 /*
- * Main entry point for checksum helper launcher process.
+ * Main entry point for checksumhelper launcher process.
  */
 bool
 StartChecksumHelperLauncher(int cost_delay, int cost_limit)
@@ -117,7 +117,7 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	{
 		/* Failed to set means somebody else started */
 		ereport(ERROR,
-				(errmsg("could not start checksum helper: already running")));
+				(errmsg("could not start checksumhelper: already running")));
 	}
 
 	ChecksumHelperShmem->cost_delay = cost_delay;
@@ -128,8 +128,8 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "postgres");
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ChecksumHelperLauncherMain");
-	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksum helper launcher");
-	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksum helper launcher");
+	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksumhelper launcher");
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksumhelper launcher");
 	bgw.bgw_restart_time = BGW_NEVER_RESTART;
 	bgw.bgw_notify_pid = MyProcPid;
 	bgw.bgw_main_arg = (Datum) 0;
@@ -245,8 +245,8 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	bgw.bgw_start_time = BgWorkerStart_RecoveryFinished;
 	snprintf(bgw.bgw_library_name, BGW_MAXLEN, "postgres");
 	snprintf(bgw.bgw_function_name, BGW_MAXLEN, "ChecksumHelperWorkerMain");
-	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksum helper worker");
-	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksum helper worker");
+	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksumhelper worker");
+	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksumhelper worker");
 	bgw.bgw_restart_time = BGW_NEVER_RESTART;
 	bgw.bgw_notify_pid = MyProcPid;
 	bgw.bgw_main_arg = ObjectIdGetDatum(db->dboid);
@@ -254,8 +254,8 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
 	{
 		ereport(LOG,
-				(errmsg("failed to start worker for checksum helper in \"%s\"",
-				 db->dbname)));
+				(errmsg("failed to start worker for checksumhelper in \"%s\"",
+						db->dbname)));
 		return false;
 	}
 
@@ -263,27 +263,27 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	if (status != BGWH_STARTED)
 	{
 		ereport(LOG,
-				(errmsg("failed to wait for worker startup for checksum helper in \"%s\"",
-				 db->dbname)));
+				(errmsg("failed to wait for worker startup for checksumhelper in \"%s\"",
+						db->dbname)));
 		return false;
 	}
 
 	ereport(DEBUG1,
 			(errmsg("started background worker for checksums in \"%s\"",
-			 db->dbname)));
+					db->dbname)));
 
 	status = WaitForBackgroundWorkerShutdown(bgw_handle);
 	if (status != BGWH_STOPPED)
 	{
 		ereport(LOG,
-				(errmsg("failed to wait for worker shutdown for checksum helper in \"%s\"",
-				 db->dbname)));
+				(errmsg("failed to wait for worker shutdown for checksumhelper in \"%s\"",
+						db->dbname)));
 		return false;
 	}
 
 	ereport(DEBUG1,
 			(errmsg("background worker for checksums in \"%s\" completed",
-			 db->dbname)));
+					db->dbname)));
 
 	return ChecksumHelperShmem->success;
 }
@@ -322,8 +322,9 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	/*
 	 * Create a database list.  We don't need to concern ourselves with
-	 * rebuilding this list during runtime since any new created database will
-	 * be running with checksums turned on from the start.
+	 * rebuilding this list during runtime since any database created after
+	 * this process started will be running with checksums turned on from the
+	 * start.
 	 */
 	DatabaseList = BuildDatabaseList();
 
@@ -489,9 +490,8 @@ ChecksumHelperShmemInit(void)
  * BuildDatabaseList
  *		Compile a list of all currently available databases in the cluster
  *
- * This is intended to create the worklist for the workers to go through, and
- * as we are only concerned with already existing databases we need to ever
- * rebuild this list, which simplifies the coding.
+ * This creates the list of databases for the checksumhelper workers to add
+ * checksums to.
  */
 static List *
 BuildDatabaseList(void)
