@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * checksumhelper.h
- *	  header file for checksum helper deamon
+ *	  header file for checksum helper background worker
  *
  *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group

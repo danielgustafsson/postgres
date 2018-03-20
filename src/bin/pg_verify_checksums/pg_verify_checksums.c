@@ -86,7 +86,7 @@ scan_file(char *fn, int segmentno)
 	f = open(fn, 0);
 	if (f < 0)
 	{
-		fprintf(stderr, _("%s: could not open %s: %m\n"), progname, fn);
+		fprintf(stderr, _("%s: could not open file \"%s\": %m\n"), progname, fn);
 		exit(1);
 	}
 
@@ -101,7 +101,7 @@ scan_file(char *fn, int segmentno)
 			break;
 		if (r != BLCKSZ)
 		{
-			fprintf(stderr, _("%s: short read of block %d in %s, got only %d bytes\n"),
+			fprintf(stderr, _("%s: short read of block %d in file \"%s\", got only %d bytes\n"),
 					progname, blockno, fn, r);
 			exit(1);
 		}
@@ -111,12 +111,13 @@ scan_file(char *fn, int segmentno)
 		if (csum != header->pd_checksum)
 		{
 			if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION)
-				fprintf(stderr, _("%s: %s, block %d, invalid checksum in file %X, calculated %X\n"),
-						progname, fn, blockno, header->pd_checksum, csum);
+				fprintf(stderr, _("%s: checksum verification failed in file \"%s\", block %d: calculated checksum %X but expected %X\n"),
+						progname, fn, blockno, csum, header->pd_checksum);
 			badblocks++;
 		}
 		else if (debug)
-			fprintf(stderr, _("%s: %s, block %d, correct checksum %X\n"), progname, fn, blockno, csum);
+			fprintf(stderr, _("%s: checksum verified in file \"%s\", block %d: %X\n"),
+					progname, fn, blockno, csum);
 	}
 
 	close(f);
@@ -133,7 +134,8 @@ scan_directory(char *basedir, char *subdir)
 	dir = opendir(path);
 	if (!dir)
 	{
-		fprintf(stderr, _("%s: could not open directory %s: %m\n"), progname, path);
+		fprintf(stderr, _("%s: could not open directory \"%s\": %m\n"),
+				progname, path);
 		exit(1);
 	}
 	while ((de = readdir(dir)) != NULL)
@@ -147,7 +149,8 @@ scan_directory(char *basedir, char *subdir)
 		snprintf(fn, MAXPGPATH, "%s/%s", path, de->d_name);
 		if (lstat(fn, &st) < 0)
 		{
-			fprintf(stderr, _("%s: could not stat file %s: %m\n"), progname, fn);
+			fprintf(stderr, _("%s: could not stat file \"%s\": %m\n"),
+					progname, fn);
 			exit(1);
 		}
 		if (S_ISREG(st.st_mode))
@@ -156,9 +159,10 @@ scan_directory(char *basedir, char *subdir)
 			int segmentno = 0;
 
 			/*
-			 * Cut off at the segment boundary (".") to get the segment number in order to
-			 * mix it into the checksum. Then also cut off at the fork boundary, to get
-			 * the relfilenode the file belongs to for filtering.
+			 * Cut off at the segment boundary (".") to get the segment number
+			 * in order to mix it into the checksum. Then also cut off at the
+			 * fork boundary, to get the relfilenode the file belongs to for
+			 * filtering.
 			 */
 			segmentpath = strchr(de->d_name, '.');
 			if (segmentpath != NULL)
@@ -167,7 +171,8 @@ scan_directory(char *basedir, char *subdir)
 				segmentno = atoi(segmentpath);
 				if (segmentno == 0)
 				{
-					fprintf(stderr, _("%s: invalid segment number %d in filename %s\n"), progname, segmentno, fn);
+					fprintf(stderr, _("%s: invalid segment number %d in filename \"%s\"\n"),
+							progname, segmentno, fn);
 					exit(1);
 				}
 			}
@@ -247,6 +252,14 @@ main(int argc, char *argv[])
 			DataDir = argv[optind++];
 		else
 			DataDir = getenv("PGDATA");
+
+		/* If no DataDir was specified, and none could be found, error out */
+		if (DataDir == NULL)
+		{
+			fprintf(stderr, _("%s: no data directory specified\n"), progname);
+			fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
+			exit(1);
+		}
 	}
 
 	/* Complain if any arguments remain */
@@ -256,13 +269,6 @@ main(int argc, char *argv[])
 				progname, argv[optind]);
 		fprintf(stderr, _("Try \"%s --help\" for more information.\n"),
 				progname);
-		exit(1);
-	}
-
-	if (DataDir == NULL)
-	{
-		fprintf(stderr, _("%s: no data directory specified\n"), progname);
-		fprintf(stderr, _("Try \"%s --help\" for more information.\n"), progname);
 		exit(1);
 	}
 

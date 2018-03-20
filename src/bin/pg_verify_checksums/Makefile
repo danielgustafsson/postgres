@@ -8,7 +8,7 @@
 #
 #-------------------------------------------------------------------------
 
-PGFILEDESC = "pg_verify_checksums - verify data checksums in offline cluster"
+PGFILEDESC = "pg_verify_checksums - verify data checksums in an offline cluster"
 PGAPPICON=win32
 
 subdir = src/bin/pg_verify_checksums
@@ -34,9 +34,3 @@ uninstall:
 clean distclean maintainer-clean:
 	rm -f pg_verify_checksums$(X) $(OBJS)
 	rm -rf tmp_check
-
-check:
-	$(prove_check)
-
-installcheck:
-	$(prove_installcheck)
