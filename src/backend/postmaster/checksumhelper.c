@@ -169,7 +169,7 @@ ShutdownChecksumHelperIfRunning(void)
  * Enable checksums in a single relation/fork.
  * XXX: must hold a lock on the relation preventing it from being truncated?
  */
-static void
+static bool
 ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy)
 {
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
@@ -199,8 +199,17 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 
 		UnlockReleaseBuffer(buf);
 
+		/*
+		 * This is the only place where we check if we are asked to abort, the
+		 * abortion will bubble up from here.
+		 */
+		if (ChecksumHelperShmem->abort)
+			return false;
+
 		vacuum_delay_point();
 	}
+
+	return true;
 }
 
 static bool
@@ -219,16 +228,12 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	for (fnum = 0; fnum <= MAX_FORKNUM; fnum++)
 	{
 		if (smgrexists(rel->rd_smgr, fnum))
-			ProcessSingleRelationFork(rel, fnum, strategy);
-
-		/*
-		 * This is the only place where we check if we are asked to abort, the
-		 * abortion will bubble up from here.
-		 */
-		if (ChecksumHelperShmem->abort)
 		{
-			aborted = true;
-			break;
+			if (!ProcessSingleRelationFork(rel, fnum, strategy))
+			{
+				aborted = true;
+				break;
+			}
 		}
 	}
 	relation_close(rel, AccessShareLock);
@@ -388,10 +393,7 @@ ChecksumHelperLauncherMain(Datum arg)
 				remaining = lappend(remaining, db);
 			}
 			else
-			{
-				list_free(remaining);
-				goto aborted;
-			}
+				return;
 		}
 		list_free(DatabaseList);
 
@@ -478,13 +480,6 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	ereport(LOG,
 			(errmsg("checksums enabled, checksumhelper launcher shutting down")));
-
-	return;
-
-aborted:
-	list_free(DatabaseList);
-	ereport(LOG,
-			(errmsg("checksums aborted, checksumhelper launcher shutting down")));
 }
 
 /*
