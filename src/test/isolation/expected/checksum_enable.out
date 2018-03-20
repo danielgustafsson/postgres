@@ -16,7 +16,7 @@ t
 step c_enable_checksums: SELECT pg_enable_data_checksums();
 pg_enable_data_checksums
 
-t              
+               
 step c_wait_for_checksums: SELECT test_checksums_on();
 test_checksums_on
 
