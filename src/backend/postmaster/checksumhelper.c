@@ -310,6 +310,11 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 		return FAILED;
 	}
 
+	if (ChecksumHelperShmem->success == ABORTED)
+		ereport(LOG,
+				(errmsg("checksumhelper was aborted during processing in \"%s\"",
+						db->dbname)));
+
 	ereport(DEBUG1,
 			(errmsg("background worker for checksums in \"%s\" completed",
 					db->dbname)));
