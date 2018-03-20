@@ -99,6 +99,19 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	Relation	rel;
 	HeapScanDesc scan;
 
+	if (ChecksumHelperShmem->abort)
+	{
+		ereport(ERROR,
+				(errmsg("could not start checksumhelper: has been cancelled")));
+	}
+
+	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
+	{
+		/* Failed to set means somebody else started */
+		ereport(ERROR,
+				(errmsg("could not start checksumhelper: already running")));
+	}
+
 	/*
 	 * Check that all databases allow connections.  This will be re-checked
 	 * when we build the list of databases to work on, the point of duplicating
@@ -120,13 +133,6 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 
 	heap_endscan(scan);
 	heap_close(rel, AccessShareLock);
-
-	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
-	{
-		/* Failed to set means somebody else started */
-		ereport(ERROR,
-				(errmsg("could not start checksumhelper: already running")));
-	}
 
 	ChecksumHelperShmem->cost_delay = cost_delay;
 	ChecksumHelperShmem->cost_limit = cost_limit;
@@ -314,6 +320,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 static void
 launcher_exit(int code, Datum arg)
 {
+	ChecksumHelperShmem->abort = false;
 	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
 }
 
