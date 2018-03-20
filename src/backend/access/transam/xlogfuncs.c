@@ -704,8 +704,8 @@ Datum
 disable_data_checksums(PG_FUNCTION_ARGS)
 {
 	/*
-	 * If we don't need to write new checksums, then clearly they are
-	 * already disabled.
+	 * If we don't need to write new checksums, then clearly they are already
+	 * disabled.
 	 */
 	if (!DataChecksumsNeedWrite())
 		ereport(ERROR,
@@ -721,8 +721,8 @@ disable_data_checksums(PG_FUNCTION_ARGS)
 Datum
 enable_data_checksums(PG_FUNCTION_ARGS)
 {
-	int cost_delay = PG_GETARG_INT32(0);
-	int cost_limit = PG_GETARG_INT32(1);
+	int			cost_delay = PG_GETARG_INT32(0);
+	int			cost_limit = PG_GETARG_INT32(1);
 
 	if (cost_delay < 0)
 		ereport(ERROR,
@@ -730,6 +730,7 @@ enable_data_checksums(PG_FUNCTION_ARGS)
 	if (cost_limit <= 0)
 		ereport(ERROR,
 				(errmsg("cost limit must be a positive value")));
+
 	/*
 	 * Allow state change from "off" or from "inprogress", since this is how
 	 * we restart the worker if necessary.

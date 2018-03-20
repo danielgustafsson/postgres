@@ -107,7 +107,7 @@ scan_file(char *fn, int segmentno)
 		}
 		blocks++;
 
-		csum = pg_checksum_page(buf, blockno + segmentno*RELSEG_SIZE);
+		csum = pg_checksum_page(buf, blockno + segmentno * RELSEG_SIZE);
 		if (csum != header->pd_checksum)
 		{
 			if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION)
@@ -155,8 +155,9 @@ scan_directory(char *basedir, char *subdir)
 		}
 		if (S_ISREG(st.st_mode))
 		{
-			char *forkpath, *segmentpath;
-			int segmentno = 0;
+			char	   *forkpath,
+					   *segmentpath;
+			int			segmentno = 0;
 
 			/*
 			 * Cut off at the segment boundary (".") to get the segment number

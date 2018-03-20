@@ -115,9 +115,9 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 
 	/*
 	 * Check that all databases allow connections.  This will be re-checked
-	 * when we build the list of databases to work on, the point of duplicating
-	 * this is to catch any databases we won't be able to open while we can
-	 * still send an error message to the client.
+	 * when we build the list of databases to work on, the point of
+	 * duplicating this is to catch any databases we won't be able to open
+	 * while we can still send an error message to the client.
 	 */
 	rel = heap_open(DatabaseRelationId, AccessShareLock);
 	scan = heap_beginscan_catalog(rel, 0, NULL);
@@ -125,6 +125,7 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
 	{
 		Form_pg_database pgdb = (Form_pg_database) GETSTRUCT(tup);
+
 		if (!pgdb->datallowconn)
 			ereport(ERROR,
 					(errmsg("database \"%s\" does not allow connections",
@@ -166,8 +167,8 @@ ShutdownChecksumHelperIfRunning(void)
 		return;
 
 	/*
-	 * We don't need an atomic variable for aborting, setting it multiple times
-	 * will not change the handling.
+	 * We don't need an atomic variable for aborting, setting it multiple
+	 * times will not change the handling.
 	 */
 	ChecksumHelperShmem->abort = true;
 }
@@ -181,7 +182,7 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 {
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
 	BlockNumber b;
-	char 		activity[NAMEDATALEN * 2 + 128];
+	char		activity[NAMEDATALEN * 2 + 128];
 
 	for (b = 0; b < numblocks; b++)
 	{
@@ -192,7 +193,7 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		 */
 		if ((b % 100) == 0)
 		{
-			snprintf(activity, sizeof(activity)-1, "processing: %s.%s (block %d/%d)",
+			snprintf(activity, sizeof(activity) - 1, "processing: %s.%s (block %d/%d)",
 					 get_namespace_name(RelationGetNamespace(reln)), RelationGetRelationName(reln),
 					 b, numblocks);
 			pgstat_report_activity(STATE_RUNNING, activity);
@@ -206,9 +207,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		 * re-write the page to wal even if the checksum hasn't changed,
 		 * because if there is a replica it might have a slightly different
 		 * version of the page with an invalid checksum, caused by unlogged
-		 * changes (e.g. hintbits) on the master happening while checksums were
-		 * off. This can happen if there was a valid checksum on the page at
-		 * one point in the past, so only when checksums are first on, then
+		 * changes (e.g. hintbits) on the master happening while checksums
+		 * were off. This can happen if there was a valid checksum on the page
+		 * at one point in the past, so only when checksums are first on, then
 		 * off, and then turned on again.
 		 */
 		START_CRIT_SECTION();
@@ -317,7 +318,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 			(errmsg("started background worker for checksums in \"%s\"",
 					db->dbname)));
 
-	snprintf(activity, sizeof(activity)-1,
+	snprintf(activity, sizeof(activity) - 1,
 			 "Waiting for worker in database %s (pid %d)", db->dbname, pid);
 	pgstat_report_activity(STATE_RUNNING, activity);
 
@@ -374,7 +375,8 @@ ChecksumHelperLauncherMain(Datum arg)
 	BackgroundWorkerInitializeConnection(NULL, NULL);
 
 	/*
-	 * Set up so first run processes shared catalogs, but not once in every db.
+	 * Set up so first run processes shared catalogs, but not once in every
+	 * db.
 	 */
 	ChecksumHelperShmem->process_shared_catalogs = true;
 
@@ -403,7 +405,7 @@ ChecksumHelperLauncherMain(Datum arg)
 		foreach(lc, DatabaseList)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-			ChecksumHelperResult	processing;
+			ChecksumHelperResult processing;
 
 			processing = ProcessDatabase(db);
 
@@ -440,9 +442,9 @@ ChecksumHelperLauncherMain(Datum arg)
 		 * because they failed for some reason, or because the database was
 		 * dropped between us getting the database list and trying to process
 		 * it. Get a fresh list of databases to detect the second case where
-		 * the database was dropped before we had started processing it.
-		 * Any database that still exists but where enabling checksums failed,
-		 * is retried for a limited number of times before giving up. Any
+		 * the database was dropped before we had started processing it. Any
+		 * database that still exists but where enabling checksums failed, is
+		 * retried for a limited number of times before giving up. Any
 		 * database that remains in failed state after the retries expire will
 		 * fail the entire operation.
 		 */
