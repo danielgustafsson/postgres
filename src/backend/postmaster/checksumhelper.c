@@ -45,11 +45,19 @@
  */
 #define MAX_ATTEMPTS 4
 
+typedef enum
+{
+	SUCCESSFUL = 0,
+	ABORTED,
+	FAILED
+}			ChecksumHelperResult;
+
 typedef struct ChecksumHelperShmemStruct
 {
 	pg_atomic_flag launcher_started;
-	bool		success;
+	ChecksumHelperResult success;
 	bool		process_shared_catalogs;
+	bool		abort;
 	/* Parameter values set on start */
 	int			cost_delay;
 	int			cost_limit;
@@ -77,7 +85,7 @@ typedef struct ChecksumHelperRelation
 /* Prototypes */
 static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool include_shared);
-static bool ProcessDatabase(ChecksumHelperDatabase * db);
+static ChecksumHelperResult ProcessDatabase(ChecksumHelperDatabase * db);
 
 /*
  * Main entry point for checksumhelper launcher process.
@@ -146,22 +154,22 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 void
 ShutdownChecksumHelperIfRunning(void)
 {
+	/* If the launcher isn't started, there is nothing to shut down */
 	if (pg_atomic_unlocked_test_flag(&ChecksumHelperShmem->launcher_started))
-	{
-		/* Launcher not started, so nothing to shut down */
 		return;
-	}
 
-	ereport(ERROR,
-			(errmsg("checksum helper is currently running, cannot disable checksums"),
-			 errhint("Restart the cluster or wait for the worker to finish.")));
+	/*
+	 * We don't need an atomic variable for aborting, setting it multiple times
+	 * will not change the handling.
+	 */
+	ChecksumHelperShmem->abort = true;
 }
 
 /*
  * Enable checksums in a single relation/fork.
  * XXX: must hold a lock on the relation preventing it from being truncated?
  */
-static bool
+static void
 ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy)
 {
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
@@ -193,8 +201,6 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 
 		vacuum_delay_point();
 	}
-
-	return true;
 }
 
 static bool
@@ -202,6 +208,7 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 {
 	Relation	rel;
 	ForkNumber	fnum;
+	bool		aborted = false;
 
 	StartTransactionCommand();
 
@@ -213,13 +220,24 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	{
 		if (smgrexists(rel->rd_smgr, fnum))
 			ProcessSingleRelationFork(rel, fnum, strategy);
+
+		/*
+		 * This is the only place where we check if we are asked to abort, the
+		 * abortion will bubble up from here.
+		 */
+		if (ChecksumHelperShmem->abort)
+		{
+			aborted = true;
+			break;
+		}
 	}
 	relation_close(rel, AccessShareLock);
-	elog(DEBUG2, "Checksumhelper done with relation %d", relationId);
+	elog(DEBUG2, "Checksumhelper done with relation %d: %s",
+		 relationId, (aborted ? "aborted" : "finished"));
 
 	CommitTransactionCommand();
 
-	return true;
+	return !aborted;
 }
 
 /*
@@ -230,7 +248,7 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
  * waiting for it to finish.  We have to do this in a separate worker, since
  * each process can only be connected to one database during its lifetime.
  */
-static bool
+static ChecksumHelperResult
 ProcessDatabase(ChecksumHelperDatabase * db)
 {
 	BackgroundWorker bgw;
@@ -238,7 +256,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	BgwHandleStatus status;
 	pid_t		pid;
 
-	ChecksumHelperShmem->success = false;
+	ChecksumHelperShmem->success = FAILED;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -256,7 +274,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 		ereport(LOG,
 				(errmsg("failed to start worker for checksumhelper in \"%s\"",
 						db->dbname)));
-		return false;
+		return FAILED;
 	}
 
 	status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
@@ -265,7 +283,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 		ereport(LOG,
 				(errmsg("failed to wait for worker startup for checksumhelper in \"%s\"",
 						db->dbname)));
-		return false;
+		return FAILED;
 	}
 
 	ereport(DEBUG1,
@@ -278,7 +296,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 		ereport(LOG,
 				(errmsg("failed to wait for worker shutdown for checksumhelper in \"%s\"",
 						db->dbname)));
-		return false;
+		return FAILED;
 	}
 
 	ereport(DEBUG1,
@@ -345,8 +363,11 @@ ChecksumHelperLauncherMain(Datum arg)
 		foreach(lc, DatabaseList)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+			ChecksumHelperResult	processing;
 
-			if (ProcessDatabase(db))
+			processing = ProcessDatabase(db);
+
+			if (processing == SUCCESSFUL)
 			{
 				pfree(db->dbname);
 				pfree(db);
@@ -359,12 +380,17 @@ ChecksumHelperLauncherMain(Datum arg)
 					 */
 					ChecksumHelperShmem->process_shared_catalogs = false;
 			}
-			else
+			else if (processing == FAILED)
 			{
 				/*
 				 * Put failed databases on the remaining list.
 				 */
 				remaining = lappend(remaining, db);
+			}
+			else
+			{
+				list_free(remaining);
+				goto aborted;
 			}
 		}
 		list_free(DatabaseList);
@@ -452,6 +478,13 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	ereport(LOG,
 			(errmsg("checksums enabled, checksumhelper launcher shutting down")));
+
+	return;
+
+aborted:
+	list_free(DatabaseList);
+	ereport(LOG,
+			(errmsg("checksums aborted, checksumhelper launcher shutting down")));
 }
 
 /*
@@ -640,13 +673,13 @@ ChecksumHelperWorkerMain(Datum arg)
 
 		if (!ProcessSingleRelationByOid(rel->reloid, strategy))
 		{
-			ereport(ERROR,
-					(errmsg("failed to process table with oid %d", rel->reloid)));
+			ChecksumHelperShmem->success = ABORTED;
+			break;
 		}
+		else
+			ChecksumHelperShmem->success = SUCCESSFUL;
 	}
 	list_free_deep(RelationList);
-
-	ChecksumHelperShmem->success = true;
 
 	ereport(DEBUG1,
 			(errmsg("checksum worker completed in database oid %d", dboid)));
