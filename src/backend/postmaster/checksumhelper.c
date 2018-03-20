@@ -193,9 +193,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		 */
 		if ((b % 100) == 0)
 		{
-			snprintf(activity, sizeof(activity) - 1, "processing: %s.%s (block %d/%d)",
+			snprintf(activity, sizeof(activity) - 1, "processing: %s.%s (%s block %d/%d)",
 					 get_namespace_name(RelationGetNamespace(reln)), RelationGetRelationName(reln),
-					 b, numblocks);
+					 forkNames[forkNum], b, numblocks);
 			pgstat_report_activity(STATE_RUNNING, activity);
 		}
 
