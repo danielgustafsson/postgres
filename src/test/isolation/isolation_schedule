@@ -68,4 +68,5 @@ test: timeouts
 test: vacuum-concurrent-drop
 # The checksum_enable suite will enable checksums for the cluster so should
 # not run before anything expecting the cluster to have checksums turned off
+test: checksum_cancel
 test: checksum_enable

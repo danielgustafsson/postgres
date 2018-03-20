@@ -13,7 +13,7 @@ setup
 				generate_series(1, 1000),
 				array_to_string(array(select chr(97 + (random() * 25)::int) from generate_series(1,250)), '')
 			);
-			PERFORM pg_sleep(0.2);
+			PERFORM pg_sleep(0.1);
 		END LOOP;
 		RETURN True;
 	END;
@@ -40,7 +40,7 @@ setup
 	BEGIN
 		FOR counter IN 1..30 LOOP
 			PERFORM count(a) FROM t1;
-			PERFORM pg_sleep(0.5);
+			PERFORM pg_sleep(0.2);
 		END LOOP;
 		RETURN True;
 	END;
