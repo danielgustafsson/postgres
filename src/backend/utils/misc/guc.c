@@ -1003,6 +1003,15 @@ static struct config_bool ConfigureNamesBool[] =
 		check_ssl, NULL, NULL
 	},
 	{
+		{"ssl_passphrase_command_supports_reload", PGC_SIGHUP, CONN_AUTH_SSL,
+			gettext_noop("Also use ssl_passphrase_command during server reload."),
+			NULL
+		},
+		&ssl_passphrase_command_supports_reload,
+		false,
+		NULL, NULL, NULL
+	},
+	{
 		{"ssl_prefer_server_ciphers", PGC_SIGHUP, CONN_AUTH_SSL,
 			gettext_noop("Give priority to server ciphersuite order."),
 			NULL
@@ -3654,6 +3663,16 @@ static struct config_string ConfigureNamesString[] =
 			GUC_SUPERUSER_ONLY
 		},
 		&ssl_dh_params_file,
+		"",
+		NULL, NULL, NULL
+	},
+
+	{
+		{"ssl_passphrase_command", PGC_SIGHUP, CONN_AUTH_SSL,
+			gettext_noop("Command to obtain passphrases for SSL."),
+			NULL
+		},
+		&ssl_passphrase_command,
 		"",
 		NULL, NULL, NULL
 	},
@@ -6927,7 +6946,7 @@ flatten_set_variable_args(const char *name, List *args)
 		switch (nodeTag(&con->val))
 		{
 			case T_Integer:
-				appendStringInfo(&buf, "%ld", intVal(&con->val));
+				appendStringInfo(&buf, "%d", intVal(&con->val));
 				break;
 			case T_Float:
 				/* represented as a string, so just copy it */
@@ -7362,7 +7381,7 @@ ExecSetVariableStmt(VariableSetStmt *stmt, bool isTopLevel)
 		case VAR_SET_VALUE:
 		case VAR_SET_CURRENT:
 			if (stmt->is_local)
-				WarnNoTransactionChain(isTopLevel, "SET LOCAL");
+				WarnNoTransactionBlock(isTopLevel, "SET LOCAL");
 			(void) set_config_option(stmt->name,
 									 ExtractSetVariableArgs(stmt),
 									 (superuser() ? PGC_SUSET : PGC_USERSET),
@@ -7382,7 +7401,7 @@ ExecSetVariableStmt(VariableSetStmt *stmt, bool isTopLevel)
 			{
 				ListCell   *head;
 
-				WarnNoTransactionChain(isTopLevel, "SET TRANSACTION");
+				WarnNoTransactionBlock(isTopLevel, "SET TRANSACTION");
 
 				foreach(head, stmt->args)
 				{
@@ -7433,7 +7452,7 @@ ExecSetVariableStmt(VariableSetStmt *stmt, bool isTopLevel)
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("SET LOCAL TRANSACTION SNAPSHOT is not implemented")));
 
-				WarnNoTransactionChain(isTopLevel, "SET TRANSACTION");
+				WarnNoTransactionBlock(isTopLevel, "SET TRANSACTION");
 				Assert(nodeTag(&con->val) == T_String);
 				ImportSnapshot(strVal(&con->val));
 			}
@@ -7443,11 +7462,11 @@ ExecSetVariableStmt(VariableSetStmt *stmt, bool isTopLevel)
 			break;
 		case VAR_SET_DEFAULT:
 			if (stmt->is_local)
-				WarnNoTransactionChain(isTopLevel, "SET LOCAL");
+				WarnNoTransactionBlock(isTopLevel, "SET LOCAL");
 			/* fall through */
 		case VAR_RESET:
 			if (strcmp(stmt->name, "transaction_isolation") == 0)
-				WarnNoTransactionChain(isTopLevel, "RESET TRANSACTION");
+				WarnNoTransactionBlock(isTopLevel, "RESET TRANSACTION");
 
 			(void) set_config_option(stmt->name,
 									 NULL,
@@ -10573,7 +10592,7 @@ check_cluster_name(char **newval, void **extra, GucSource source)
 static const char *
 show_unix_socket_permissions(void)
 {
-	static char buf[8];
+	static char buf[12];
 
 	snprintf(buf, sizeof(buf), "%04o", Unix_socket_permissions);
 	return buf;
@@ -10582,7 +10601,7 @@ show_unix_socket_permissions(void)
 static const char *
 show_log_file_mode(void)
 {
-	static char buf[8];
+	static char buf[12];
 
 	snprintf(buf, sizeof(buf), "%04o", Log_file_mode);
 	return buf;

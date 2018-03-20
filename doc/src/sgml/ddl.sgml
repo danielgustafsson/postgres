@@ -2962,9 +2962,8 @@ VALUES ('Albany', NULL, NULL, 'NY');
     Partitions may themselves be defined as partitioned tables, using what is
     called <firstterm>sub-partitioning</firstterm>.  Partitions may have their
     own indexes, constraints and default values, distinct from those of other
-    partitions.  Indexes must be created separately for each partition.  See
-    <xref linkend="sql-createtable"/> for more details on creating partitioned
-    tables and partitions.
+    partitions.  See <xref linkend="sql-createtable"/> for more details on
+    creating partitioned tables and partitions.
    </para>
 
    <para>
@@ -3309,7 +3308,7 @@ ALTER TABLE measurement ATTACH PARTITION measurement_y2008m02
     <itemizedlist>
      <listitem>
       <para>
-       There is no way to create a
+       There is no way to create an
        exclusion constraint spanning all partitions; it is only possible
        to constrain each leaf partition individually.
       </para>

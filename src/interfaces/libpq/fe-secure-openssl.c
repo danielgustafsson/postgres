@@ -1188,14 +1188,14 @@ initialize_SSL(PGconn *conn)
 		SSL_set_verify(conn->ssl, SSL_VERIFY_PEER, verify_cb);
 
 	/*
-	 * If the OpenSSL version used supports it (from 1.0.0 on) and the user
-	 * requested it, disable SSL compression.
+	 * Set compression option if the OpenSSL version used supports it (from
+	 * 1.0.0 on).
 	 */
 #ifdef SSL_OP_NO_COMPRESSION
 	if (conn->sslcompression && conn->sslcompression[0] == '0')
-	{
 		SSL_set_options(conn->ssl, SSL_OP_NO_COMPRESSION);
-	}
+	else
+		SSL_clear_options(conn->ssl, SSL_OP_NO_COMPRESSION);
 #endif
 
 	return 0;
@@ -1436,7 +1436,7 @@ PQsslAttribute(PGconn *conn, const char *attribute_name)
 
 	if (strcmp(attribute_name, "key_bits") == 0)
 	{
-		static char sslbits_str[10];
+		static char sslbits_str[12];
 		int			sslbits;
 
 		SSL_get_cipher_bits(conn->ssl, &sslbits);

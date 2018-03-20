@@ -310,7 +310,7 @@ static void CallSubXactCallbacks(SubXactEvent event,
 					 SubTransactionId mySubid,
 					 SubTransactionId parentSubid);
 static void CleanupTransaction(void);
-static void CheckTransactionChain(bool isTopLevel, bool throwError,
+static void CheckTransactionBlock(bool isTopLevel, bool throwError,
 					  const char *stmtType);
 static void CommitTransaction(void);
 static TransactionId RecordTransactionAbort(bool isSubXact);
@@ -3134,7 +3134,7 @@ AbortCurrentTransaction(void)
 }
 
 /*
- *	PreventTransactionChain
+ *	PreventInTransactionBlock
  *
  *	This routine is to be called by statements that must not run inside
  *	a transaction block, typically because they have non-rollback-able
@@ -3151,7 +3151,7 @@ AbortCurrentTransaction(void)
  *	stmtType: statement type name, for error messages.
  */
 void
-PreventTransactionChain(bool isTopLevel, const char *stmtType)
+PreventInTransactionBlock(bool isTopLevel, const char *stmtType)
 {
 	/*
 	 * xact block already started?
@@ -3190,44 +3190,43 @@ PreventTransactionChain(bool isTopLevel, const char *stmtType)
 }
 
 /*
- *	These two functions allow for warnings or errors if a command is
- *	executed outside of a transaction block.
+ *	WarnNoTranactionBlock
+ *	RequireTransactionBlock
  *
- *	While top-level transaction control commands (BEGIN/COMMIT/ABORT) and
- *	SET that have no effect issue warnings, all other no-effect commands
- *	generate errors.
- */
-void
-WarnNoTransactionChain(bool isTopLevel, const char *stmtType)
-{
-	CheckTransactionChain(isTopLevel, false, stmtType);
-}
-
-void
-RequireTransactionChain(bool isTopLevel, const char *stmtType)
-{
-	CheckTransactionChain(isTopLevel, true, stmtType);
-}
-
-/*
- *	RequireTransactionChain
- *
- *	This routine is to be called by statements that must run inside
- *	a transaction block, because they have no effects that persist past
- *	transaction end (and so calling them outside a transaction block
- *	is presumably an error).  DECLARE CURSOR is an example.
+ *	These two functions allow for warnings or errors if a command is executed
+ *	outside of a transaction block.  This is useful for commands that have no
+ *	effects that persist past transaction end (and so calling them outside a
+ *	transaction block is presumably an error).  DECLARE CURSOR is an example.
+ *	While top-level transaction control commands (BEGIN/COMMIT/ABORT) and SET
+ *	that have no effect issue warnings, all other no-effect commands generate
+ *	errors.
  *
  *	If we appear to be running inside a user-defined function, we do not
  *	issue anything, since the function could issue more commands that make
  *	use of the current statement's results.  Likewise subtransactions.
- *	Thus this is an inverse for PreventTransactionChain.
+ *	Thus these are inverses for PreventInTransactionBlock.
  *
  *	isTopLevel: passed down from ProcessUtility to determine whether we are
  *	inside a function.
  *	stmtType: statement type name, for warning or error messages.
  */
+void
+WarnNoTransactionBlock(bool isTopLevel, const char *stmtType)
+{
+	CheckTransactionBlock(isTopLevel, false, stmtType);
+}
+
+void
+RequireTransactionBlock(bool isTopLevel, const char *stmtType)
+{
+	CheckTransactionBlock(isTopLevel, true, stmtType);
+}
+
+/*
+ * This is the implementation of the above two.
+ */
 static void
-CheckTransactionChain(bool isTopLevel, bool throwError, const char *stmtType)
+CheckTransactionBlock(bool isTopLevel, bool throwError, const char *stmtType)
 {
 	/*
 	 * xact block already started?
@@ -3256,7 +3255,7 @@ CheckTransactionChain(bool isTopLevel, bool throwError, const char *stmtType)
 }
 
 /*
- *	IsInTransactionChain
+ *	IsInTransactionBlock
  *
  *	This routine is for statements that need to behave differently inside
  *	a transaction block than when running as single commands.  ANALYZE is
@@ -3266,10 +3265,10 @@ CheckTransactionChain(bool isTopLevel, bool throwError, const char *stmtType)
  *	inside a function.
  */
 bool
-IsInTransactionChain(bool isTopLevel)
+IsInTransactionBlock(bool isTopLevel)
 {
 	/*
-	 * Return true on same conditions that would make PreventTransactionChain
+	 * Return true on same conditions that would make PreventInTransactionBlock
 	 * error out
 	 */
 	if (IsTransactionBlock())
@@ -3909,13 +3908,11 @@ DefineSavepoint(const char *name)
  * As above, we don't actually do anything here except change blockState.
  */
 void
-ReleaseSavepoint(List *options)
+ReleaseSavepoint(const char *name)
 {
 	TransactionState s = CurrentTransactionState;
 	TransactionState target,
 				xact;
-	ListCell   *cell;
-	char	   *name = NULL;
 
 	/*
 	 * Workers synchronize transaction state at the beginning of each parallel
@@ -3937,7 +3934,7 @@ ReleaseSavepoint(List *options)
 		case TBLOCK_INPROGRESS:
 			ereport(ERROR,
 					(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
-					 errmsg("no such savepoint")));
+					 errmsg("savepoint \"%s\" does not exist", name)));
 			break;
 
 		case TBLOCK_IMPLICIT_INPROGRESS:
@@ -3979,16 +3976,6 @@ ReleaseSavepoint(List *options)
 			break;
 	}
 
-	foreach(cell, options)
-	{
-		DefElem    *elem = lfirst(cell);
-
-		if (strcmp(elem->defname, "savepoint_name") == 0)
-			name = strVal(elem->arg);
-	}
-
-	Assert(PointerIsValid(name));
-
 	for (target = s; PointerIsValid(target); target = target->parent)
 	{
 		if (PointerIsValid(target->name) && strcmp(target->name, name) == 0)
@@ -3998,13 +3985,13 @@ ReleaseSavepoint(List *options)
 	if (!PointerIsValid(target))
 		ereport(ERROR,
 				(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
-				 errmsg("no such savepoint")));
+				 errmsg("savepoint \"%s\" does not exist", name)));
 
 	/* disallow crossing savepoint level boundaries */
 	if (target->savepointLevel != s->savepointLevel)
 		ereport(ERROR,
 				(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
-				 errmsg("no such savepoint")));
+				 errmsg("savepoint \"%s\" does not exist within current savepoint level", name)));
 
 	/*
 	 * Mark "commit pending" all subtransactions up to the target
@@ -4030,13 +4017,11 @@ ReleaseSavepoint(List *options)
  * As above, we don't actually do anything here except change blockState.
  */
 void
-RollbackToSavepoint(List *options)
+RollbackToSavepoint(const char *name)
 {
 	TransactionState s = CurrentTransactionState;
 	TransactionState target,
 				xact;
-	ListCell   *cell;
-	char	   *name = NULL;
 
 	/*
 	 * Workers synchronize transaction state at the beginning of each parallel
@@ -4060,7 +4045,7 @@ RollbackToSavepoint(List *options)
 		case TBLOCK_ABORT:
 			ereport(ERROR,
 					(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
-					 errmsg("no such savepoint")));
+					 errmsg("savepoint \"%s\" does not exist", name)));
 			break;
 
 		case TBLOCK_IMPLICIT_INPROGRESS:
@@ -4100,16 +4085,6 @@ RollbackToSavepoint(List *options)
 			break;
 	}
 
-	foreach(cell, options)
-	{
-		DefElem    *elem = lfirst(cell);
-
-		if (strcmp(elem->defname, "savepoint_name") == 0)
-			name = strVal(elem->arg);
-	}
-
-	Assert(PointerIsValid(name));
-
 	for (target = s; PointerIsValid(target); target = target->parent)
 	{
 		if (PointerIsValid(target->name) && strcmp(target->name, name) == 0)
@@ -4119,13 +4094,13 @@ RollbackToSavepoint(List *options)
 	if (!PointerIsValid(target))
 		ereport(ERROR,
 				(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
-				 errmsg("no such savepoint")));
+				 errmsg("savepoint \"%s\" does not exist", name)));
 
 	/* disallow crossing savepoint level boundaries */
 	if (target->savepointLevel != s->savepointLevel)
 		ereport(ERROR,
 				(errcode(ERRCODE_S_E_INVALID_SPECIFICATION),
-				 errmsg("no such savepoint")));
+				 errmsg("savepoint \"%s\" does not exist within current savepoint level", name)));
 
 	/*
 	 * Mark "abort pending" all subtransactions up to the target
@@ -5169,29 +5144,29 @@ BlockStateAsString(TBlockState blockState)
 		case TBLOCK_ABORT:
 			return "ABORT";
 		case TBLOCK_ABORT_END:
-			return "ABORT END";
+			return "ABORT_END";
 		case TBLOCK_ABORT_PENDING:
-			return "ABORT PEND";
+			return "ABORT_PENDING";
 		case TBLOCK_PREPARE:
 			return "PREPARE";
 		case TBLOCK_SUBBEGIN:
-			return "SUB BEGIN";
+			return "SUBBEGIN";
 		case TBLOCK_SUBINPROGRESS:
-			return "SUB INPROGRS";
+			return "SUBINPROGRESS";
 		case TBLOCK_SUBRELEASE:
-			return "SUB RELEASE";
+			return "SUBRELEASE";
 		case TBLOCK_SUBCOMMIT:
-			return "SUB COMMIT";
+			return "SUBCOMMIT";
 		case TBLOCK_SUBABORT:
-			return "SUB ABORT";
+			return "SUBABORT";
 		case TBLOCK_SUBABORT_END:
-			return "SUB ABORT END";
+			return "SUBABORT_END";
 		case TBLOCK_SUBABORT_PENDING:
-			return "SUB ABRT PEND";
+			return "SUBABORT_PENDING";
 		case TBLOCK_SUBRESTART:
-			return "SUB RESTART";
+			return "SUBRESTART";
 		case TBLOCK_SUBABORT_RESTART:
-			return "SUB AB RESTRT";
+			return "SUBABORT_RESTART";
 	}
 	return "UNRECOGNIZED";
 }
@@ -5210,7 +5185,7 @@ TransStateAsString(TransState state)
 		case TRANS_START:
 			return "START";
 		case TRANS_INPROGRESS:
-			return "INPROGR";
+			return "INPROGRESS";
 		case TRANS_COMMIT:
 			return "COMMIT";
 		case TRANS_ABORT:

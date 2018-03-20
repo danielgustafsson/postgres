@@ -130,7 +130,8 @@ static List *reorder_grouping_sets(List *groupingSets, List *sortclause);
 static void standard_qp_callback(PlannerInfo *root, void *extra);
 static double get_number_of_groups(PlannerInfo *root,
 					 double path_rows,
-					 grouping_sets_data *gd);
+					 grouping_sets_data *gd,
+					 List *target_list);
 static Size estimate_hashagg_tablesize(Path *path,
 						   const AggClauseCosts *agg_costs,
 						   double dNumGroups);
@@ -140,6 +141,16 @@ static RelOptInfo *create_grouping_paths(PlannerInfo *root,
 					  bool target_parallel_safe,
 					  const AggClauseCosts *agg_costs,
 					  grouping_sets_data *gd);
+static bool is_degenerate_grouping(PlannerInfo *root);
+static void create_degenerate_grouping_paths(PlannerInfo *root,
+								 RelOptInfo *input_rel,
+								 PathTarget *target, RelOptInfo *grouped_rel);
+static void create_ordinary_grouping_paths(PlannerInfo *root,
+							   RelOptInfo *input_rel,
+							   PathTarget *target, RelOptInfo *grouped_rel,
+							   RelOptInfo *partially_grouped_rel,
+							   const AggClauseCosts *agg_costs,
+							   grouping_sets_data *gd);
 static void consider_groupingsets_paths(PlannerInfo *root,
 							RelOptInfo *grouped_rel,
 							Path *path,
@@ -175,7 +186,8 @@ static RelOptInfo *create_ordered_paths(PlannerInfo *root,
 static PathTarget *make_group_input_target(PlannerInfo *root,
 						PathTarget *final_target);
 static PathTarget *make_partial_grouping_target(PlannerInfo *root,
-							 PathTarget *grouping_target);
+							 PathTarget *grouping_target,
+							 Node *havingQual);
 static List *postprocess_setop_tlist(List *new_tlist, List *orig_tlist);
 static List *select_active_windows(PlannerInfo *root, WindowFuncLists *wflists);
 static PathTarget *make_window_input_target(PlannerInfo *root,
@@ -988,7 +1000,7 @@ preprocess_expression(PlannerInfo *root, Node *expr, int kind)
 	 */
 	if (kind == EXPRKIND_QUAL)
 	{
-		expr = (Node *) canonicalize_qual((Expr *) expr);
+		expr = (Node *) canonicalize_qual((Expr *) expr, false);
 
 #ifdef OPTIMIZER_DEBUG
 		printf("After canonicalize_qual()\n");
@@ -2192,6 +2204,22 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 
 		/* And shove it into final_rel */
 		add_path(final_rel, path);
+	}
+
+	/*
+	 * Generate partial paths for final_rel, too, if outer query levels might
+	 * be able to make use of them.
+	 */
+	if (final_rel->consider_parallel && root->query_level > 1 &&
+		!limit_needed(parse))
+	{
+		Assert(!parse->rowMarks && parse->commandType == CMD_SELECT);
+		foreach(lc, current_rel->partial_pathlist)
+		{
+			Path	   *partial_path = (Path *) lfirst(lc);
+
+			add_partial_path(final_rel, partial_path);
+		}
 	}
 
 	/*
@@ -3488,7 +3516,8 @@ standard_qp_callback(PlannerInfo *root, void *extra)
  * Estimate number of groups produced by grouping clauses (1 if not grouping)
  *
  * path_rows: number of output rows from scan/join step
- * gsets: grouping set data, or NULL if not doing grouping sets
+ * gd: grouping sets data including list of grouping sets and their clauses
+ * target_list: target list containing group clause references
  *
  * If doing grouping sets, we also annotate the gsets data with the estimates
  * for each set and each individual rollup list, with a view to later
@@ -3497,7 +3526,8 @@ standard_qp_callback(PlannerInfo *root, void *extra)
 static double
 get_number_of_groups(PlannerInfo *root,
 					 double path_rows,
-					 grouping_sets_data *gd)
+					 grouping_sets_data *gd,
+					 List *target_list)
 {
 	Query	   *parse = root->parse;
 	double		dNumGroups;
@@ -3522,7 +3552,7 @@ get_number_of_groups(PlannerInfo *root,
 				ListCell   *lc;
 
 				groupExprs = get_sortgrouplist_exprs(rollup->groupClause,
-													 parse->targetList);
+													 target_list);
 
 				rollup->numGroups = 0.0;
 
@@ -3549,7 +3579,7 @@ get_number_of_groups(PlannerInfo *root,
 				gd->dNumHashGroups = 0;
 
 				groupExprs = get_sortgrouplist_exprs(parse->groupClause,
-													 parse->targetList);
+													 target_list);
 
 				forboth(lc, gd->hash_sets_idx, lc2, gd->unsortable_sets)
 				{
@@ -3571,7 +3601,7 @@ get_number_of_groups(PlannerInfo *root,
 		{
 			/* Plain GROUP BY */
 			groupExprs = get_sortgrouplist_exprs(parse->groupClause,
-												 parse->targetList);
+												 target_list);
 
 			dNumGroups = estimate_num_groups(root, groupExprs, path_rows,
 											 NULL);
@@ -3643,17 +3673,10 @@ estimate_hashagg_tablesize(Path *path, const AggClauseCosts *agg_costs,
  * input_rel: contains the source-data Paths
  * target: the pathtarget for the result Paths to compute
  * agg_costs: cost info about all aggregates in query (in AGGSPLIT_SIMPLE mode)
- * rollup_lists: list of grouping sets, or NIL if not doing grouping sets
- * rollup_groupclauses: list of grouping clauses for grouping sets,
- *		or NIL if not doing grouping sets
+ * gd: grouping sets data including list of grouping sets and their clauses
  *
  * Note: all Paths in input_rel are expected to return the target computed
  * by make_group_input_target.
- *
- * We need to consider sorted and hashed aggregation in the same function,
- * because otherwise (1) it would be harder to throw an appropriate error
- * message if neither way works, and (2) we should not allow hashtable size
- * considerations to dissuade us from using hashing if sorting is not possible.
  */
 static RelOptInfo *
 create_grouping_paths(PlannerInfo *root,
@@ -3664,15 +3687,8 @@ create_grouping_paths(PlannerInfo *root,
 					  grouping_sets_data *gd)
 {
 	Query	   *parse = root->parse;
-	Path	   *cheapest_path = input_rel->cheapest_total_path;
 	RelOptInfo *grouped_rel;
 	RelOptInfo *partially_grouped_rel;
-	AggClauseCosts agg_partial_costs;	/* parallel only */
-	AggClauseCosts agg_final_costs; /* parallel only */
-	double		dNumGroups;
-	bool		can_hash;
-	bool		can_sort;
-	bool		try_parallel_aggregation;
 
 	/*
 	 * For now, all aggregated paths are added to the (GROUP_AGG, NULL)
@@ -3710,80 +3726,131 @@ create_grouping_paths(PlannerInfo *root,
 	partially_grouped_rel->fdwroutine = input_rel->fdwroutine;
 
 	/*
-	 * Check for degenerate grouping.
+	 * Create either paths for a degenerate grouping or paths for ordinary
+	 * grouping, as appropriate.
 	 */
-	if ((root->hasHavingQual || parse->groupingSets) &&
-		!parse->hasAggs && parse->groupClause == NIL)
+	if (is_degenerate_grouping(root))
+		create_degenerate_grouping_paths(root, input_rel, target, grouped_rel);
+	else
+		create_ordinary_grouping_paths(root, input_rel, target, grouped_rel,
+									   partially_grouped_rel, agg_costs, gd);
+
+	set_cheapest(grouped_rel);
+	return grouped_rel;
+}
+
+/*
+ * is_degenerate_grouping
+ *
+ * A degenerate grouping is one in which the query has a HAVING qual and/or
+ * grouping sets, but no aggregates and no GROUP BY (which implies that the
+ * grouping sets are all empty).
+ */
+static bool
+is_degenerate_grouping(PlannerInfo *root)
+{
+	Query	   *parse = root->parse;
+
+	return (root->hasHavingQual || parse->groupingSets) &&
+		!parse->hasAggs && parse->groupClause == NIL;
+}
+
+/*
+ * create_degenerate_grouping_paths
+ *
+ * When the grouping is degenerate (see is_degenerate_grouping), we are
+ * supposed to emit either zero or one row for each grouping set depending on
+ * whether HAVING succeeds.  Furthermore, there cannot be any variables in
+ * either HAVING or the targetlist, so we actually do not need the FROM table
+ * at all! We can just throw away the plan-so-far and generate a Result node.
+ * This is a sufficiently unusual corner case that it's not worth contorting
+ * the structure of this module to avoid having to generate the earlier paths
+ * in the first place.
+ */
+static void
+create_degenerate_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
+								 PathTarget *target, RelOptInfo *grouped_rel)
+{
+	Query	   *parse = root->parse;
+	int			nrows;
+	Path	   *path;
+
+	nrows = list_length(parse->groupingSets);
+	if (nrows > 1)
 	{
 		/*
-		 * We have a HAVING qual and/or grouping sets, but no aggregates and
-		 * no GROUP BY (which implies that the grouping sets are all empty).
-		 *
-		 * This is a degenerate case in which we are supposed to emit either
-		 * zero or one row for each grouping set depending on whether HAVING
-		 * succeeds.  Furthermore, there cannot be any variables in either
-		 * HAVING or the targetlist, so we actually do not need the FROM table
-		 * at all!	We can just throw away the plan-so-far and generate a
-		 * Result node.  This is a sufficiently unusual corner case that it's
-		 * not worth contorting the structure of this module to avoid having
-		 * to generate the earlier paths in the first place.
+		 * Doesn't seem worthwhile writing code to cons up a generate_series
+		 * or a values scan to emit multiple rows. Instead just make N clones
+		 * and append them.  (With a volatile HAVING clause, this means you
+		 * might get between 0 and N output rows. Offhand I think that's
+		 * desired.)
 		 */
-		int			nrows = list_length(parse->groupingSets);
-		Path	   *path;
+		List	   *paths = NIL;
 
-		if (nrows > 1)
+		while (--nrows >= 0)
 		{
-			/*
-			 * Doesn't seem worthwhile writing code to cons up a
-			 * generate_series or a values scan to emit multiple rows. Instead
-			 * just make N clones and append them.  (With a volatile HAVING
-			 * clause, this means you might get between 0 and N output rows.
-			 * Offhand I think that's desired.)
-			 */
-			List	   *paths = NIL;
-
-			while (--nrows >= 0)
-			{
-				path = (Path *)
-					create_result_path(root, grouped_rel,
-									   target,
-									   (List *) parse->havingQual);
-				paths = lappend(paths, path);
-			}
-			path = (Path *)
-				create_append_path(grouped_rel,
-								   paths,
-								   NIL,
-								   NULL,
-								   0,
-								   false,
-								   NIL,
-								   -1);
-			path->pathtarget = target;
-		}
-		else
-		{
-			/* No grouping sets, or just one, so one output row */
 			path = (Path *)
 				create_result_path(root, grouped_rel,
 								   target,
 								   (List *) parse->havingQual);
+			paths = lappend(paths, path);
 		}
-
-		add_path(grouped_rel, path);
-
-		/* No need to consider any other alternatives. */
-		set_cheapest(grouped_rel);
-
-		return grouped_rel;
+		path = (Path *)
+			create_append_path(grouped_rel,
+							   paths,
+							   NIL,
+							   NULL,
+							   0,
+							   false,
+							   NIL,
+							   -1);
+		path->pathtarget = target;
 	}
+	else
+	{
+		/* No grouping sets, or just one, so one output row */
+		path = (Path *)
+			create_result_path(root, grouped_rel,
+							   target,
+							   (List *) parse->havingQual);
+	}
+
+	add_path(grouped_rel, path);
+}
+
+/*
+ * create_ordinary_grouping_paths
+ *
+ * Create grouping paths for the ordinary (that is, non-degenerate) case.
+ *
+ * We need to consider sorted and hashed aggregation in the same function,
+ * because otherwise (1) it would be harder to throw an appropriate error
+ * message if neither way works, and (2) we should not allow hashtable size
+ * considerations to dissuade us from using hashing if sorting is not possible.
+ */
+static void
+create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
+							   PathTarget *target, RelOptInfo *grouped_rel,
+							   RelOptInfo *partially_grouped_rel,
+							   const AggClauseCosts *agg_costs,
+							   grouping_sets_data *gd)
+{
+	Query	   *parse = root->parse;
+	Path	   *cheapest_path = input_rel->cheapest_total_path;
+	AggClauseCosts agg_partial_costs;	/* parallel only */
+	AggClauseCosts agg_final_costs; /* parallel only */
+	double		dNumGroups;
+	bool		can_hash;
+	bool		can_sort;
+	bool		try_parallel_aggregation;
 
 	/*
 	 * Estimate number of groups.
 	 */
 	dNumGroups = get_number_of_groups(root,
 									  cheapest_path->rows,
-									  gd);
+									  gd,
+									  parse->targetList);
 
 	/*
 	 * Determine whether it's possible to perform sort-based implementations
@@ -3845,7 +3912,8 @@ create_grouping_paths(PlannerInfo *root,
 		 * appear in the result tlist, and (2) the Aggrefs must be set in
 		 * partial mode.
 		 */
-		partial_grouping_target = make_partial_grouping_target(root, target);
+		partial_grouping_target = make_partial_grouping_target(root, target,
+															   (Node *) parse->havingQual);
 		partially_grouped_rel->reltarget = partial_grouping_target;
 
 		/*
@@ -3902,13 +3970,7 @@ create_grouping_paths(PlannerInfo *root,
 	if (create_upper_paths_hook)
 		(*create_upper_paths_hook) (root, UPPERREL_GROUP_AGG,
 									input_rel, grouped_rel);
-
-	/* Now choose the best path(s) */
-	set_cheapest(grouped_rel);
-
-	return grouped_rel;
 }
-
 
 /*
  * For a given input path, consider the possible ways of doing grouping sets on
@@ -4898,10 +4960,12 @@ make_group_input_target(PlannerInfo *root, PathTarget *final_target)
  * these would be Vars that are grouped by or used in grouping expressions.)
  *
  * grouping_target is the tlist to be emitted by the topmost aggregation step.
- * We get the HAVING clause out of *root.
+ * havingQual represents the HAVING clause.
  */
 static PathTarget *
-make_partial_grouping_target(PlannerInfo *root, PathTarget *grouping_target)
+make_partial_grouping_target(PlannerInfo *root,
+							 PathTarget *grouping_target,
+							 Node *havingQual)
 {
 	Query	   *parse = root->parse;
 	PathTarget *partial_target;
@@ -4943,8 +5007,8 @@ make_partial_grouping_target(PlannerInfo *root, PathTarget *grouping_target)
 	/*
 	 * If there's a HAVING clause, we'll need the Vars/Aggrefs it uses, too.
 	 */
-	if (parse->havingQual)
-		non_group_cols = lappend(non_group_cols, parse->havingQual);
+	if (havingQual)
+		non_group_cols = lappend(non_group_cols, havingQual);
 
 	/*
 	 * Pull out all the Vars, PlaceHolderVars, and Aggrefs mentioned in
@@ -6269,7 +6333,8 @@ add_paths_to_partial_grouping_rel(PlannerInfo *root,
 	/* Estimate number of partial groups. */
 	dNumPartialGroups = get_number_of_groups(root,
 											 cheapest_partial_path->rows,
-											 gd);
+											 gd,
+											 parse->targetList);
 
 	if (can_sort)
 	{
