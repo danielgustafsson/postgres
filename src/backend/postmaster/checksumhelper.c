@@ -37,6 +37,7 @@
 #include "storage/ipc.h"
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
+#include "utils/lsyscache.h"
 #include "utils/ps_status.h"
 
 /*
@@ -180,10 +181,22 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 {
 	BlockNumber numblocks = RelationGetNumberOfBlocksInFork(reln, forkNum);
 	BlockNumber b;
+	char 		activity[NAMEDATALEN * 2 + 128];
 
 	for (b = 0; b < numblocks; b++)
 	{
 		Buffer		buf = ReadBufferExtended(reln, forkNum, b, RBM_NORMAL, strategy);
+
+		/*
+		 * Report to pgstat every 100 blocks (so as not to "spam")
+		 */
+		if ((b % 100) == 0)
+		{
+			snprintf(activity, sizeof(activity)-1, "processing: %s.%s (block %d/%d)",
+					 get_namespace_name(RelationGetNamespace(reln)), RelationGetRelationName(reln),
+					 b, numblocks);
+			pgstat_report_activity(STATE_RUNNING, activity);
+		}
 
 		/* Need to get an exclusive lock before we can flag as dirty */
 		LockBuffer(buf, BUFFER_LOCK_EXCLUSIVE);
@@ -248,6 +261,8 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 
 	CommitTransactionCommand();
 
+	pgstat_report_activity(STATE_IDLE, NULL);
+
 	return !aborted;
 }
 
@@ -266,6 +281,7 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	BackgroundWorkerHandle *bgw_handle;
 	BgwHandleStatus status;
 	pid_t		pid;
+	char		activity[NAMEDATALEN + 64];
 
 	ChecksumHelperShmem->success = FAILED;
 
@@ -301,6 +317,11 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 			(errmsg("started background worker for checksums in \"%s\"",
 					db->dbname)));
 
+	snprintf(activity, sizeof(activity)-1,
+			 "Waiting for worker in database %s (pid %d)", db->dbname, pid);
+	pgstat_report_activity(STATE_RUNNING, activity);
+
+
 	status = WaitForBackgroundWorkerShutdown(bgw_handle);
 	if (status != BGWH_STOPPED)
 	{
@@ -318,6 +339,8 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 	ereport(DEBUG1,
 			(errmsg("background worker for checksums in \"%s\" completed",
 					db->dbname)));
+
+	pgstat_report_activity(STATE_IDLE, NULL);
 
 	return ChecksumHelperShmem->success;
 }
