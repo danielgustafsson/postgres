@@ -4735,6 +4735,11 @@ bool
 DataChecksumsNeedVerify(void)
 {
 	Assert(ControlFile != NULL);
+
+	/*
+	 * Only verify checksums if they are fully enabled in the cluster.
+	 * In inprogress state they are only updated, not verified.
+	 */
 	return (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION);
 }
 
