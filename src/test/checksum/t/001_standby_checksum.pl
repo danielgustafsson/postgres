@@ -3,7 +3,7 @@ use strict;
 use warnings;
 use PostgresNode;
 use TestLib;
-use Test::More tests => 7;
+use Test::More tests => 10;
 
 my $MAX_TRIES = 30;
 
@@ -54,13 +54,14 @@ is($result, "inprogress", 'ensure checksums are in progress on master');
 # Wait for checksum enable to be replayed
 $node_master->wait_for_catchup($node_standby_1, 'replay');
 
-# Ensure that both standbys have switched to inprogress
+# Ensure that the standby has switched to inprogress
 $result = $node_standby_1->safe_psql('postgres',
 	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
 is($result, "inprogress", 'ensure checksums are in progress on standby_1');
 
 # Insert some more data which should be checksummed on INSERT
-$node_master->safe_psql('postgres', "INSERT INTO t VALUES (generate_series(1,10000));");
+$node_master->safe_psql('postgres',
+	"INSERT INTO t VALUES (generate_series(1,10000));");
 
 # Wait for checksums enabled on the master
 for (my $i = 0; $i < $MAX_TRIES; $i++)
@@ -83,4 +84,22 @@ for (my $i = 0; $i < $MAX_TRIES; $i++)
 is ($result, "on", 'ensure checksums are enabled on standby');
 
 $result = $node_master->safe_psql('postgres', "SELECT count(a) FROM t");
-is ($result, "20000", 'ensure we can safely read all data');
+is ($result, "20000", 'ensure we can safely read all data with checksums');
+
+# Disable checksums and ensure it's propagated to standby and that we can
+# still read all data
+$node_master->safe_psql('postgres', "SELECT pg_disable_data_checksums();");
+$result = $node_master->safe_psql('postgres',
+	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
+is($result, "off", 'ensure checksums are in progress on master');
+
+# Wait for checksum disable to be replayed
+$node_master->wait_for_catchup($node_standby_1, 'replay');
+
+# Ensure that the standby has switched to off
+$result = $node_standby_1->safe_psql('postgres',
+	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
+is($result, "off", 'ensure checksums are in progress on standby_1');
+
+$result = $node_master->safe_psql('postgres', "SELECT count(a) FROM t");
+is ($result, "20000", 'ensure we can safely read all data without checksums');
