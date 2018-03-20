@@ -4725,10 +4725,17 @@ GetMockAuthenticationNonce(void)
  * Are checksums enabled for data pages?
  */
 bool
-DataChecksumsEnabledOrInProgress(void)
+DataChecksumsNeedWrite(void)
 {
 	Assert(ControlFile != NULL);
 	return (ControlFile->data_checksum_version > 0);
+}
+
+bool
+DataChecksumsNeedVerify(void)
+{
+	Assert(ControlFile != NULL);
+	return (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION);
 }
 
 bool
@@ -4738,17 +4745,11 @@ DataChecksumsInProgress(void)
 	return (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION);
 }
 
-bool
-DataChecksumsDisabled(void)
-{
-	Assert(ControlFile != NULL);
-	return (ControlFile->data_checksum_version == 0);
-}
-
 void
 SetDataChecksumsInProgress(void)
 {
-	if (DataChecksumsEnabledOrInProgress())
+	Assert(ControlFile != NULL);
+	if (ControlFile->data_checksum_version > 0)
 		return;
 
 	XlogChecksums(PG_DATA_CHECKSUM_INPROGRESS_VERSION);
@@ -4762,8 +4763,7 @@ SetDataChecksumsInProgress(void)
 void
 SetDataChecksumsOn(void)
 {
-	if (!DataChecksumsEnabledOrInProgress())
-		elog(ERROR, "Checksums not enabled or in progress");
+	Assert(ControlFile != NULL);
 
 	LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 

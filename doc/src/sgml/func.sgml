@@ -19509,7 +19509,7 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
         <literal><function>pg_enable_data_checksums(<optional><parameter>cost_delay</parameter> <type>int</type>, <parameter>cost_limit</parameter> <type>int</type></optional>)</function></literal>
        </entry>
        <entry>
-        bool
+        void
        </entry>
        <entry>
         <para>
@@ -19534,7 +19534,7 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
         <literal><function>pg_disable_data_checksums()</function></literal>
        </entry>
        <entry>
-        bool
+        void
        </entry>
        <entry>
         Disables data checksums for the cluster.
