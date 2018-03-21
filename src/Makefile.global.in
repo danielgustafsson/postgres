@@ -191,6 +191,7 @@ with_krb_srvnam	= @with_krb_srvnam@
 with_ldap	= @with_ldap@
 with_libxml	= @with_libxml@
 with_libxslt	= @with_libxslt@
+with_llvm	= @with_llvm@
 with_system_tzdata = @with_system_tzdata@
 with_uuid	= @with_uuid@
 with_zlib	= @with_zlib@
@@ -225,6 +226,11 @@ TCL_SHLIB_LD_LIBS	= @TCL_SHLIB_LD_LIBS@
 PTHREAD_CFLAGS		= @PTHREAD_CFLAGS@
 PTHREAD_LIBS		= @PTHREAD_LIBS@
 
+LLVM_CONFIG = @LLVM_CONFIG@
+LLVM_BINPATH = @LLVM_BINPATH@
+CLANG = @CLANG@
+BITCODE_CFLAGS = @BITCODE_CFLAGS@
+BITCODE_CXXFLAGS = @BITCODE_CXXFLAGS@
 
 ##########################################################################
 #
@@ -249,9 +255,15 @@ endif # not PGXS
 CC = @CC@
 GCC = @GCC@
 SUN_STUDIO_CC = @SUN_STUDIO_CC@
+CXX = @CXX@
 CFLAGS = @CFLAGS@
 CFLAGS_VECTOR = @CFLAGS_VECTOR@
 CFLAGS_SSE42 = @CFLAGS_SSE42@
+CXXFLAGS = @CXXFLAGS@
+
+LLVM_CPPFLAGS = @LLVM_CPPFLAGS@
+LLVM_CFLAGS = @LLVM_CFLAGS@
+LLVM_CXXFLAGS = @LLVM_CXXFLAGS@
 
 # Kind-of compilers
 
@@ -273,6 +285,7 @@ LDAP_LIBS_FE = @LDAP_LIBS_FE@
 LDAP_LIBS_BE = @LDAP_LIBS_BE@
 UUID_LIBS = @UUID_LIBS@
 UUID_EXTRA_OBJS = @UUID_EXTRA_OBJS@
+LLVM_LIBS=@LLVM_LIBS@
 LD = @LD@
 with_gnu_ld = @with_gnu_ld@
 
@@ -813,6 +826,10 @@ ifndef COMPILE.c
 COMPILE.c = $(CC) $(CFLAGS) $(CPPFLAGS) -c
 endif
 
+ifndef COMPILE.cc
+COMPILE.cc = $(CXX) $(CXXFLAGS) $(CPPFLAGS) -c
+endif
+
 DEPDIR = .deps
 
 ifeq ($(GCC), yes)
@@ -821,6 +838,10 @@ ifeq ($(GCC), yes)
 %.o : %.c
 	@if test ! -d $(DEPDIR); then mkdir -p $(DEPDIR); fi
 	$(COMPILE.c) -o $@ $< -MMD -MP -MF $(DEPDIR)/$(*F).Po
+
+%.o : %.cpp
+	@if test ! -d $(DEPDIR); then mkdir -p $(DEPDIR); fi
+	$(COMPILE.cc) -o $@ $< -MMD -MP -MF $(DEPDIR)/$(*F).Po
 
 endif # GCC
 
