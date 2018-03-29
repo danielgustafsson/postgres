@@ -175,7 +175,6 @@ ShutdownChecksumHelperIfRunning(void)
 
 /*
  * Enable checksums in a single relation/fork.
- * XXX: must hold a lock on the relation preventing it from being truncated?
  */
 static bool
 ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy)
