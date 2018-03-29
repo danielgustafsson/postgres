@@ -12761,7 +12761,7 @@ SELECT NULLIF(value, '(none)') ...
        <row>
         <entry>
          <literal>
-          <function>array_fill</function>(<type>anyelement</type>, <type>int[]</type>,
+          <function>array_fill</function>(<type>anyelement</type>, <type>int[]</type>
           <optional>, <type>int[]</type></optional>)
          </literal>
         </entry>
@@ -15940,6 +15940,14 @@ SELECT * FROM pg_ls_dir('.') WITH ORDINALITY AS t(ls,n);
        <entry><literal><function>pg_is_other_temp_schema(<type>oid</type>)</function></literal></entry>
        <entry><type>boolean</type></entry>
        <entry>is schema another session's temporary schema?</entry>
+      </row>
+
+      <row>
+       <entry><literal><function>pg_jit_available()</function></literal></entry>
+       <entry><type>boolean</type></entry>
+       <entry>is <acronym>JIT</acronym> available in this session (see <xref
+       linkend="jit"/>)? Returns <literal>false</literal> if <xref
+       linkend="guc-jit"/> is set to false.</entry>
       </row>
 
       <row>

@@ -64,12 +64,15 @@ typedef struct ExprState
 	 * Storage for result value of a scalar expression, or for individual
 	 * column results within expressions built by ExecBuildProjectionInfo().
 	 */
+#define FIELDNO_EXPRSTATE_RESNULL 2
 	bool		resnull;
+#define FIELDNO_EXPRSTATE_RESVALUE 3
 	Datum		resvalue;
 
 	/*
 	 * If projecting a tuple result, this slot holds the result; else NULL.
 	 */
+#define FIELDNO_EXPRSTATE_RESULTSLOT 4
 	TupleTableSlot *resultslot;
 
 	/*
@@ -208,8 +211,11 @@ typedef struct ExprContext
 	NodeTag		type;
 
 	/* Tuples that Var nodes in expression may refer to */
+#define FIELDNO_EXPRCONTEXT_SCANTUPLE 1
 	TupleTableSlot *ecxt_scantuple;
+#define FIELDNO_EXPRCONTEXT_INNERTUPLE 2
 	TupleTableSlot *ecxt_innertuple;
+#define FIELDNO_EXPRCONTEXT_OUTERTUPLE 3
 	TupleTableSlot *ecxt_outertuple;
 
 	/* Memory contexts for expression evaluation --- see notes above */
@@ -224,15 +230,21 @@ typedef struct ExprContext
 	 * Values to substitute for Aggref nodes in the expressions of an Agg
 	 * node, or for WindowFunc nodes within a WindowAgg node.
 	 */
+#define FIELDNO_EXPRCONTEXT_AGGVALUES 8
 	Datum	   *ecxt_aggvalues; /* precomputed values for aggs/windowfuncs */
+#define FIELDNO_EXPRCONTEXT_AGGNULLS 9
 	bool	   *ecxt_aggnulls;	/* null flags for aggs/windowfuncs */
 
 	/* Value to substitute for CaseTestExpr nodes in expression */
+#define FIELDNO_EXPRCONTEXT_CASEDATUM 10
 	Datum		caseValue_datum;
+#define FIELDNO_EXPRCONTEXT_CASENULL 11
 	bool		caseValue_isNull;
 
 	/* Value to substitute for CoerceToDomainValue nodes in expression */
+#define FIELDNO_EXPRCONTEXT_DOMAINDATUM 12
 	Datum		domainValue_datum;
+#define FIELDNO_EXPRCONTEXT_DOMAINNULL 13
 	bool		domainValue_isNull;
 
 	/* Link to containing EState (NULL if a standalone ExprContext) */
@@ -351,6 +363,20 @@ typedef struct JunkFilter
 } JunkFilter;
 
 /*
+ * OnConflictSetState
+ *
+ * Executor state of an ON CONFLICT DO UPDATE operation.
+ */
+typedef struct OnConflictSetState
+{
+	NodeTag		type;
+
+	ProjectionInfo *oc_ProjInfo;	/* for ON CONFLICT DO UPDATE SET */
+	TupleDesc	oc_ProjTupdesc; /* TupleDesc for the above projection */
+	ExprState  *oc_WhereClause; /* state for the WHERE clause */
+} OnConflictSetState;
+
+/*
  * ResultRelInfo
  *
  * Whenever we update an existing relation, we have to update indexes on the
@@ -412,11 +438,11 @@ typedef struct ResultRelInfo
 	/* for computing a RETURNING list */
 	ProjectionInfo *ri_projectReturning;
 
-	/* for computing ON CONFLICT DO UPDATE SET */
-	ProjectionInfo *ri_onConflictSetProj;
+	/* list of arbiter indexes to use to check conflicts */
+	List	   *ri_onConflictArbiterIndexes;
 
-	/* list of ON CONFLICT DO UPDATE exprs (qual) */
-	ExprState  *ri_onConflictSetWhere;
+	/* ON CONFLICT evaluation state */
+	OnConflictSetState *ri_onConflict;
 
 	/* partition check expression */
 	List	   *ri_PartitionCheck;
@@ -528,6 +554,14 @@ typedef struct EState
 
 	/* The per-query shared memory area to use for parallel execution. */
 	struct dsa_area *es_query_dsa;
+
+	/*
+	 * JIT information. es_jit_flags indicates whether JIT should be performed
+	 * and with which options.  es_jit is created on-demand when JITing is
+	 * performed.
+	 */
+	int			es_jit_flags;
+	struct JitContext *es_jit;
 } EState;
 
 
@@ -886,6 +920,7 @@ typedef struct PlanState
 	ExprState  *qual;			/* boolean qual condition */
 	struct PlanState *lefttree; /* input plan tree(s) */
 	struct PlanState *righttree;
+
 	List	   *initPlan;		/* Init SubPlanState nodes (un-correlated expr
 								 * subselects) */
 	List	   *subPlan;		/* SubPlanState nodes in my expressions */
@@ -901,6 +936,13 @@ typedef struct PlanState
 	TupleTableSlot *ps_ResultTupleSlot; /* slot for my result tuples */
 	ExprContext *ps_ExprContext;	/* node's expression-evaluation context */
 	ProjectionInfo *ps_ProjInfo;	/* info for doing tuple projection */
+
+	/*
+	 * Scanslot's descriptor if known. This is a bit of a hack, but otherwise
+	 * it's hard for expression compilation to optimize based on the
+	 * descriptor, without encoding knowledge about all executor nodes.
+	 */
+	TupleDesc	scandesc;
 } PlanState;
 
 /* ----------------
@@ -1839,12 +1881,15 @@ typedef struct AggState
 	ExprContext *hashcontext;	/* econtexts for long-lived data (hashtable) */
 	ExprContext **aggcontexts;	/* econtexts for long-lived data (per GS) */
 	ExprContext *tmpcontext;	/* econtext for input expressions */
+#define FIELDNO_AGGSTATE_CURAGGCONTEXT 14
 	ExprContext *curaggcontext; /* currently active aggcontext */
 	AggStatePerAgg curperagg;	/* currently active aggregate, if any */
+#define FIELDNO_AGGSTATE_CURPERTRANS 16
 	AggStatePerTrans curpertrans;	/* currently active trans state, if any */
 	bool		input_done;		/* indicates end of input */
 	bool		agg_done;		/* indicates completion of Agg scan */
 	int			projected_set;	/* The last projected grouping set */
+#define FIELDNO_AGGSTATE_CURRENT_SET 20
 	int			current_set;	/* The current grouping set being evaluated */
 	Bitmapset  *grouped_cols;	/* grouped cols in current projection */
 	List	   *all_grouped_cols;	/* list of all grouped cols in DESC order */
@@ -1866,6 +1911,7 @@ typedef struct AggState
 										 * per-group pointers */
 
 	/* support for evaluation of agg input expressions: */
+#define FIELDNO_AGGSTATE_ALL_PERGROUPS 34
 	AggStatePerGroup *all_pergroups;	/* array of first ->pergroups, than
 										 * ->hash_pergroup */
 	ProjectionInfo *combinedproj;	/* projection machinery */
