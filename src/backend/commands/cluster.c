@@ -115,7 +115,7 @@ cluster(ClusterStmt *stmt, bool isTopLevel)
 		/* Find, lock, and check permissions on the table */
 		tableOid = RangeVarGetRelidExtended(stmt->relation,
 											AccessExclusiveLock,
-											false, false,
+											0,
 											RangeVarCallbackOwnsTable, NULL);
 		rel = heap_open(tableOid, NoLock);
 
@@ -1539,7 +1539,7 @@ finish_heap_swap(Oid OIDOldHeap, Oid OIDNewHeap,
 						frozenXid, cutoffMulti, mapped_tables);
 
 	/*
-	 * If it's a system catalog, queue an sinval message to flush all
+	 * If it's a system catalog, queue a sinval message to flush all
 	 * catcaches on the catalog when we reach CommandCounterIncrement.
 	 */
 	if (is_system_catalog)
