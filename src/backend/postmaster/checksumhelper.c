@@ -173,6 +173,8 @@ ShutdownChecksumHelperIfRunning(void)
 
 /*
  * Enable checksums in a single relation/fork.
+ * Returns true if successful, and false if *aborted*. On error, an actual error
+ * is raised in the lower levels.
  */
 static bool
 ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy)
@@ -229,6 +231,11 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	return true;
 }
 
+/*
+ * Process a single relation based on oid.
+ * Returns true if successful, and false if *aborted*. On error, an actual error
+ * is raised in the lower levels.
+ */
 static bool
 ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 {
@@ -438,6 +445,7 @@ ChecksumHelperLauncherMain(Datum arg)
 				remaining = lappend(remaining, db);
 			}
 			else
+				/* aborted */
 				return;
 		}
 		list_free(DatabaseList);
@@ -678,7 +686,7 @@ ChecksumHelperWorkerMain(Datum arg)
 	List	   *RelationList = NIL;
 	ListCell   *lc;
 	BufferAccessStrategy strategy;
-	bool		fail = false;
+	bool		aborted = false;
 
 	pqsignal(SIGTERM, die);
 
@@ -714,13 +722,13 @@ ChecksumHelperWorkerMain(Datum arg)
 
 		if (!ProcessSingleRelationByOid(rel->reloid, strategy))
 		{
-			fail = true;
+			aborted = true;
 			break;
 		}
 	}
 	list_free_deep(RelationList);
 
-	if (fail)
+	if (aborted)
 		ChecksumHelperShmem->success = ABORTED;
 	else
 		ChecksumHelperShmem->success = SUCCESSFUL;
