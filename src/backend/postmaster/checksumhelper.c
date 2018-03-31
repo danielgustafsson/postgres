@@ -73,14 +73,12 @@ typedef struct ChecksumHelperDatabase
 	Oid			dboid;
 	char	   *dbname;
 	int			attempts;
-	bool		success;
 }			ChecksumHelperDatabase;
 
 typedef struct ChecksumHelperRelation
 {
 	Oid			reloid;
 	char		relkind;
-	bool		success;
 }			ChecksumHelperRelation;
 
 /* Prototypes */
