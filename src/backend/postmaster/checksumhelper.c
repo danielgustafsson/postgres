@@ -241,7 +241,16 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	StartTransactionCommand();
 
 	elog(DEBUG2, "Checksumhelper starting to process relation %d", relationId);
-	rel = relation_open(relationId, AccessShareLock);
+	rel = try_relation_open(relationId, AccessShareLock);
+	if (rel == NULL)
+	{
+		/*
+		 * Relation no longer exist. We consider this a success, since there are no
+		 * pages in it that need checksums, and thus return true.
+		 */
+		elog(DEBUG2, "Checksumhelper skipping relation %d as it no longer exists", relationId);
+		return true;
+	}
 	RelationOpenSmgr(rel);
 
 	for (fnum = 0; fnum <= MAX_FORKNUM; fnum++)
