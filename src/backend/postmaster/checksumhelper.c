@@ -247,6 +247,8 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 		 * pages in it that need checksums, and thus return true.
 		 */
 		elog(DEBUG1, "Checksumhelper skipping relation %d as it no longer exists", relationId);
+		CommitTransactionCommand();
+		pgstat_report_activity(STATE_IDLE, NULL);
 		return true;
 	}
 	RelationOpenSmgr(rel);
