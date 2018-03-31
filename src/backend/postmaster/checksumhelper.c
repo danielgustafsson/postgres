@@ -35,6 +35,7 @@
 #include "storage/checksum.h"
 #include "storage/lmgr.h"
 #include "storage/ipc.h"
+#include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
 #include "utils/lsyscache.h"
@@ -368,6 +369,43 @@ launcher_exit(int code, Datum arg)
 	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
 }
 
+static void
+WaitForAllTransactionsToFinish(void)
+{
+	TransactionId waitforxid;
+
+	LWLockAcquire(XidGenLock, LW_SHARED);
+	waitforxid = ShmemVariableCache->nextXid;
+	LWLockRelease(XidGenLock);
+
+	while (true)
+	{
+		TransactionId oldestxid = GetOldestActiveTransactionId();
+
+		elog(DEBUG1, "Checking old transactions");
+		if (TransactionIdPrecedes(oldestxid, waitforxid))
+		{
+			char activity[64];
+
+			/* Oldest running xid is older than us, so wait */
+			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (oldest is %d)", oldestxid);
+			pgstat_report_activity(STATE_RUNNING, activity);
+
+			/* Retry every 5 seconds */
+			ResetLatch(MyLatch);
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT,
+							 5000,
+							 WAIT_EVENT_PG_SLEEP);
+		}
+		else
+		{
+			pgstat_report_activity(STATE_IDLE, NULL);
+			return;
+		}
+	}
+}
+
 void
 ChecksumHelperLauncherMain(Datum arg)
 {
@@ -394,6 +432,14 @@ ChecksumHelperLauncherMain(Datum arg)
 	 * db.
 	 */
 	ChecksumHelperShmem->process_shared_catalogs = true;
+
+	/*
+	 * Wait for all existing transactions to finish. This will make sure that
+	 * we can see all tables all databases, so we don't miss any.
+	 * Anything created after this point is known to have checksums on
+	 * all pages already, so we don't have to care about those.
+	 */
+	WaitForAllTransactionsToFinish();
 
 	/*
 	 * Create a database list.  We don't need to concern ourselves with
