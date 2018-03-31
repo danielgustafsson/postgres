@@ -678,6 +678,7 @@ ChecksumHelperWorkerMain(Datum arg)
 	List	   *RelationList = NIL;
 	ListCell   *lc;
 	BufferAccessStrategy strategy;
+	bool		fail = false;
 
 	pqsignal(SIGTERM, die);
 
@@ -713,13 +714,16 @@ ChecksumHelperWorkerMain(Datum arg)
 
 		if (!ProcessSingleRelationByOid(rel->reloid, strategy))
 		{
-			ChecksumHelperShmem->success = ABORTED;
+			fail = true;
 			break;
 		}
-		else
-			ChecksumHelperShmem->success = SUCCESSFUL;
 	}
 	list_free_deep(RelationList);
+
+	if (fail)
+		ChecksumHelperShmem->success = ABORTED;
+	else
+		ChecksumHelperShmem->success = SUCCESSFUL;
 
 	ereport(DEBUG1,
 			(errmsg("checksum worker completed in database oid %d", dboid)));
