@@ -246,7 +246,7 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 		 * Relation no longer exist. We consider this a success, since there are no
 		 * pages in it that need checksums, and thus return true.
 		 */
-		elog(DEBUG2, "Checksumhelper skipping relation %d as it no longer exists", relationId);
+		elog(DEBUG1, "Checksumhelper skipping relation %d as it no longer exists", relationId);
 		return true;
 	}
 	RelationOpenSmgr(rel);
