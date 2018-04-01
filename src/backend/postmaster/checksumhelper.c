@@ -85,6 +85,7 @@ typedef struct ChecksumHelperRelation
 /* Prototypes */
 static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool include_shared);
+static List *BuildTempTableList(void);
 static ChecksumHelperResult ProcessDatabase(ChecksumHelperDatabase * db);
 
 /*
@@ -672,6 +673,7 @@ BuildDatabaseList(void)
  *
  * If shared is true, both shared relations and local ones are returned, else
  * all non-shared relations are returned.
+ * Temp tables are not included.
  */
 static List *
 BuildRelationList(bool include_shared)
@@ -692,6 +694,9 @@ BuildRelationList(bool include_shared)
 	{
 		Form_pg_class pgc = (Form_pg_class) GETSTRUCT(tup);
 		ChecksumHelperRelation *relentry;
+
+		if (pgc->relpersistence == 't')
+			continue;
 
 		if (pgc->relisshared && !include_shared)
 			continue;
@@ -723,6 +728,47 @@ BuildRelationList(bool include_shared)
 }
 
 /*
+ * BuildTempTableList
+ *		Compile a list of all temporary tables in database
+ *
+ * Returns a List of oids.
+ */
+static List *
+BuildTempTableList(void)
+{
+	List	   *RelationList = NIL;
+	Relation	rel;
+	HeapScanDesc scan;
+	HeapTuple	tup;
+	MemoryContext ctx = CurrentMemoryContext;
+	MemoryContext oldctx;
+
+	StartTransactionCommand();
+
+	rel = heap_open(RelationRelationId, AccessShareLock);
+	scan = heap_beginscan_catalog(rel, 0, NULL);
+
+	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
+	{
+		Form_pg_class pgc = (Form_pg_class) GETSTRUCT(tup);
+
+		if (pgc->relpersistence != 't')
+			continue;
+
+		oldctx = MemoryContextSwitchTo(ctx);
+		RelationList = lappend_oid(RelationList, HeapTupleGetOid(tup));
+		MemoryContextSwitchTo(oldctx);
+	}
+
+	heap_endscan(scan);
+	heap_close(rel, AccessShareLock);
+
+	CommitTransactionCommand();
+
+	return RelationList;
+}
+
+/*
  * Main function for enabling checksums in a single database
  */
 void
@@ -730,6 +776,7 @@ ChecksumHelperWorkerMain(Datum arg)
 {
 	Oid			dboid = DatumGetObjectId(arg);
 	List	   *RelationList = NIL;
+	List	   *InitialTempTableList = NIL;
 	ListCell   *lc;
 	BufferAccessStrategy strategy;
 	bool		aborted = false;
@@ -744,6 +791,13 @@ ChecksumHelperWorkerMain(Datum arg)
 			(errmsg("checksum worker starting for database oid %d", dboid)));
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
+
+	/*
+	 * Get a list of all temp tables present as we start in this database.
+	 * We need to wait until they are all gone until we are done, since
+	 * we cannot access those files and modify them.
+	 */
+	InitialTempTableList = BuildTempTableList();
 
 	/*
 	 * Enable vacuum cost delay, if any.
@@ -775,10 +829,53 @@ ChecksumHelperWorkerMain(Datum arg)
 	list_free_deep(RelationList);
 
 	if (aborted)
+	{
 		ChecksumHelperShmem->success = ABORTED;
-	else
-		ChecksumHelperShmem->success = SUCCESSFUL;
+		ereport(DEBUG1,
+				(errmsg("checksum worker aborted in database oid %d", dboid)));
+		return;
+	}
 
+	/*
+	 * Wait for all temp tables that existed when we started to go away. This
+	 * is necessary since we cannot "reach" them to enable checksums.
+	 * Any temp tables created after we started will already have checksums
+	 * in them (due to the inprogress state), so those are safe.
+	 */
+	while (true)
+	{
+		List *CurrentTempTables;
+		ListCell *lc;
+		int numleft;
+		char activity[64];
+
+		CurrentTempTables = BuildTempTableList();
+		numleft = 0;
+		foreach(lc, InitialTempTableList)
+		{
+			if (list_member_oid(CurrentTempTables, lfirst_oid(lc)))
+				numleft++;
+		}
+		list_free(CurrentTempTables);
+
+		if (numleft == 0)
+			break;
+
+		/* At least one temp table left to wait for */
+		snprintf(activity, sizeof(activity), "Waiting for %d temp tables to be removed", numleft);
+		pgstat_report_activity(STATE_RUNNING, activity);
+
+		/* Retry every 5 seconds */
+		ResetLatch(MyLatch);
+		(void) WaitLatch(MyLatch,
+						 WL_LATCH_SET | WL_TIMEOUT,
+						 5000,
+						 WAIT_EVENT_PG_SLEEP);
+	}
+
+	list_free(InitialTempTableList);
+
+	ChecksumHelperShmem->success = SUCCESSFUL;
 	ereport(DEBUG1,
 			(errmsg("checksum worker completed in database oid %d", dboid)));
 }
