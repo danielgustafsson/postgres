@@ -389,7 +389,7 @@ WaitForAllTransactionsToFinish(void)
 			char activity[64];
 
 			/* Oldest running xid is older than us, so wait */
-			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (oldest is %d)", oldestxid);
+			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (waiting for %d)", waitforxid);
 			pgstat_report_activity(STATE_RUNNING, activity);
 
 			/* Retry every 5 seconds */
