@@ -794,6 +794,24 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 		/* exclRelTlist contains only Vars, so no preprocessing needed */
 	}
 
+	foreach(l, parse->mergeActionList)
+	{
+		MergeAction *action = (MergeAction *) lfirst(l);
+
+		action->targetList = (List *)
+			preprocess_expression(root,
+								  (Node *) action->targetList,
+								  EXPRKIND_TARGET);
+		action->qual =
+			preprocess_expression(root,
+								  (Node *) action->qual,
+								  EXPRKIND_QUAL);
+	}
+
+	parse->mergeSourceTargetList = (List *)
+		preprocess_expression(root, (Node *) parse->mergeSourceTargetList,
+							  EXPRKIND_TARGET);
+
 	root->append_rel_list = (List *)
 		preprocess_expression(root, (Node *) root->append_rel_list,
 							  EXPRKIND_APPINFO);
@@ -1535,6 +1553,7 @@ inheritance_planner(PlannerInfo *root)
 									 subroot->parse->returningList);
 
 		Assert(!parse->onConflict);
+		Assert(parse->mergeActionList == NIL);
 	}
 
 	/* Result path must go into outer query's FINAL upperrel */
@@ -1593,11 +1612,14 @@ inheritance_planner(PlannerInfo *root)
 									 partitioned_rels,
 									 partColsUpdated,
 									 resultRelations,
+									 0,
 									 subpaths,
 									 subroots,
 									 withCheckOptionLists,
 									 returningLists,
 									 rowMarks,
+									 NULL,
+									 NULL,
 									 NULL,
 									 SS_assign_special_param(root)));
 }
@@ -2129,8 +2151,8 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		}
 
 		/*
-		 * If this is an INSERT/UPDATE/DELETE, and we're not being called from
-		 * inheritance_planner, add the ModifyTable node.
+		 * If this is an INSERT/UPDATE/DELETE/MERGE, and we're not being
+		 * called from inheritance_planner, add the ModifyTable node.
 		 */
 		if (parse->commandType != CMD_SELECT && !inheritance_update)
 		{
@@ -2170,12 +2192,15 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 										NIL,
 										false,
 										list_make1_int(parse->resultRelation),
+										parse->mergeTarget_relation,
 										list_make1(path),
 										list_make1(root),
 										withCheckOptionLists,
 										returningLists,
 										rowMarks,
 										parse->onConflict,
+										parse->mergeSourceTargetList,
+										parse->mergeActionList,
 										SS_assign_special_param(root));
 		}
 
@@ -2206,12 +2231,13 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 	if (final_rel->fdwroutine &&
 		final_rel->fdwroutine->GetForeignUpperPaths)
 		final_rel->fdwroutine->GetForeignUpperPaths(root, UPPERREL_FINAL,
-													current_rel, final_rel);
+													current_rel, final_rel,
+													NULL);
 
 	/* Let extensions possibly add some more paths */
 	if (create_upper_paths_hook)
 		(*create_upper_paths_hook) (root, UPPERREL_FINAL,
-									current_rel, final_rel);
+									current_rel, final_rel, NULL);
 
 	/* Note: currently, we leave it to callers to do set_cheapest() */
 }
@@ -4024,12 +4050,14 @@ create_ordinary_grouping_paths(PlannerInfo *root, RelOptInfo *input_rel,
 	if (grouped_rel->fdwroutine &&
 		grouped_rel->fdwroutine->GetForeignUpperPaths)
 		grouped_rel->fdwroutine->GetForeignUpperPaths(root, UPPERREL_GROUP_AGG,
-													  input_rel, grouped_rel);
+													  input_rel, grouped_rel,
+													  extra);
 
 	/* Let extensions possibly add some more paths */
 	if (create_upper_paths_hook)
 		(*create_upper_paths_hook) (root, UPPERREL_GROUP_AGG,
-									input_rel, grouped_rel);
+									input_rel, grouped_rel,
+									extra);
 }
 
 /*
@@ -4461,12 +4489,13 @@ create_window_paths(PlannerInfo *root,
 	if (window_rel->fdwroutine &&
 		window_rel->fdwroutine->GetForeignUpperPaths)
 		window_rel->fdwroutine->GetForeignUpperPaths(root, UPPERREL_WINDOW,
-													 input_rel, window_rel);
+													 input_rel, window_rel,
+													 NULL);
 
 	/* Let extensions possibly add some more paths */
 	if (create_upper_paths_hook)
 		(*create_upper_paths_hook) (root, UPPERREL_WINDOW,
-									input_rel, window_rel);
+									input_rel, window_rel, NULL);
 
 	/* Now choose the best path(s) */
 	set_cheapest(window_rel);
@@ -4765,12 +4794,13 @@ create_distinct_paths(PlannerInfo *root,
 	if (distinct_rel->fdwroutine &&
 		distinct_rel->fdwroutine->GetForeignUpperPaths)
 		distinct_rel->fdwroutine->GetForeignUpperPaths(root, UPPERREL_DISTINCT,
-													   input_rel, distinct_rel);
+													   input_rel, distinct_rel,
+													   NULL);
 
 	/* Let extensions possibly add some more paths */
 	if (create_upper_paths_hook)
 		(*create_upper_paths_hook) (root, UPPERREL_DISTINCT,
-									input_rel, distinct_rel);
+									input_rel, distinct_rel, NULL);
 
 	/* Now choose the best path(s) */
 	set_cheapest(distinct_rel);
@@ -4908,12 +4938,13 @@ create_ordered_paths(PlannerInfo *root,
 	if (ordered_rel->fdwroutine &&
 		ordered_rel->fdwroutine->GetForeignUpperPaths)
 		ordered_rel->fdwroutine->GetForeignUpperPaths(root, UPPERREL_ORDERED,
-													  input_rel, ordered_rel);
+													  input_rel, ordered_rel,
+													  NULL);
 
 	/* Let extensions possibly add some more paths */
 	if (create_upper_paths_hook)
 		(*create_upper_paths_hook) (root, UPPERREL_ORDERED,
-									input_rel, ordered_rel);
+									input_rel, ordered_rel, NULL);
 
 	/*
 	 * No need to bother with set_cheapest here; grouping_planner does not
@@ -6694,7 +6725,8 @@ create_partial_grouping_paths(PlannerInfo *root,
 
 		fdwroutine->GetForeignUpperPaths(root,
 										 UPPERREL_PARTIAL_GROUP_AGG,
-										 input_rel, partially_grouped_rel);
+										 input_rel, partially_grouped_rel,
+										 extra);
 	}
 
 	return partially_grouped_rel;
@@ -6709,7 +6741,7 @@ create_partial_grouping_paths(PlannerInfo *root,
  * Gather Merge.
  *
  * NB: This function shouldn't be used for anything other than a grouped or
- * partially grouped relation not only because of the fact that it explcitly
+ * partially grouped relation not only because of the fact that it explicitly
  * references group_pathkeys but we pass "true" as the third argument to
  * generate_gather_paths().
  */
@@ -6841,7 +6873,7 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	 */
 	rel->reltarget = llast_node(PathTarget, scanjoin_targets);
 
-	/* Special case: handly dummy relations separately. */
+	/* Special case: handle dummy relations separately. */
 	if (is_dummy_rel)
 	{
 		/*
