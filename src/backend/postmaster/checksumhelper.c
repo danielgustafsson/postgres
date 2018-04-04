@@ -159,6 +159,13 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	return true;
 }
 
+/*
+ * ShutdownChecksumHelperIfRunning
+ *		Request shutdown of the checksumhelper
+ *
+ * This does not turn off processing immediately, it signals the checksum
+ * process to end when done with the current block.
+ */
 void
 ShutdownChecksumHelperIfRunning(void)
 {
@@ -174,9 +181,11 @@ ShutdownChecksumHelperIfRunning(void)
 }
 
 /*
- * Enable checksums in a single relation/fork.
- * Returns true if successful, and false if *aborted*. On error, an actual error
- * is raised in the lower levels.
+ * ProcessSingleRelationFork
+ *		Enable checksums in a single relation/fork.
+ *
+ * Returns true if successful, and false if *aborted*. On error, an actual
+ * error is raised in the lower levels.
  */
 static bool
 ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy)
@@ -234,7 +243,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 }
 
 /*
- * Process a single relation based on oid.
+ * ProcessSingleRelationByOid
+ *		Process a single relation based on oid.
+ *
  * Returns true if successful, and false if *aborted*. On error, an actual error
  * is raised in the lower levels.
  */
