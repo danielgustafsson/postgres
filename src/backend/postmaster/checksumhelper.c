@@ -653,6 +653,8 @@ BuildDatabaseList(void)
 
 		db->dboid = HeapTupleGetOid(tup);
 		db->dbname = pstrdup(NameStr(pgdb->datname));
+		elog(WARNING, "attempts = %d", db->attempts);
+		db->attempts = 0;
 
 		DatabaseList = lappend(DatabaseList, db);
 

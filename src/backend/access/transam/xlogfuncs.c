@@ -700,6 +700,11 @@ pg_backup_start_time(PG_FUNCTION_ARGS)
 	PG_RETURN_DATUM(xtime);
 }
 
+/*
+ * Disables checksums for the cluster, unless already disabled.
+ *
+ * Has immediate effect - the checksums are set to off right away.
+ */
 Datum
 disable_data_checksums(PG_FUNCTION_ARGS)
 {
@@ -718,6 +723,12 @@ disable_data_checksums(PG_FUNCTION_ARGS)
 	PG_RETURN_VOID();
 }
 
+/*
+ * Enables checksums for the cluster, unless already enabled.
+ *
+ * Supports vacuum-like cost-based throttling, to limit system load.
+ * Starts a background worker that updates checksums on existing data.
+ */
 Datum
 enable_data_checksums(PG_FUNCTION_ARGS)
 {

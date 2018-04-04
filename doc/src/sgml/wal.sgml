@@ -257,7 +257,7 @@
   </para>
 
   <para>
-   When attempting to recover from corrupt data it may be necessarily to bypass the checksum
+   When attempting to recover from corrupt data it may be necessary to bypass the checksum
    protection in order to recover data. To do this, temporarily set the configuration parameter
    <xref linkend="guc-ignore-checksum-failure" />.
   </para>
@@ -287,15 +287,17 @@
     be visible to the process enabling checksums. It will also, for each database,
     wait for all pre-existing temporary tables to get removed before it finishes.
     If long-lived temporary tables are used in the application it may be necessary
-    to terminate these application connections to allow the checksummer process
-    to complete.
+    to terminate these application connections to allow the process to complete.
+    Information about open transactions and connections with temporary tables is
+    written to log.
    </para>
 
    <para>
     If the cluster is stopped while in <literal>inprogress</literal> mode, for
     any reason, then this process must be restarted manually. To do this,
     re-execute the function <function>pg_enable_data_checksums()</function>
-    once the cluster has been restarted.
+    once the cluster has been restarted. It is not possible to resume the work,
+    the process has to start from scratch.
    </para>
 
    <note>
@@ -317,6 +319,7 @@
     <para>
      <literal>template0</literal> is by default not accepting connections, to
      enable checksums you'll need to temporarily make it accept connections.
+     See <xref linkend="sql-alterdatabase" /> for details.
     </para>
    </note>
 
