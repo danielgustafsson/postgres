@@ -41,11 +41,6 @@
 #include "utils/lsyscache.h"
 #include "utils/ps_status.h"
 
-/*
- * Maximum number of times to try enabling checksums in a specific database
- * before giving up.
- */
-#define MAX_ATTEMPTS 4
 
 typedef enum
 {
@@ -73,7 +68,6 @@ typedef struct ChecksumHelperDatabase
 {
 	Oid			dboid;
 	char	   *dbname;
-	int			attempts;
 }			ChecksumHelperDatabase;
 
 typedef struct ChecksumHelperRelation
@@ -422,6 +416,11 @@ void
 ChecksumHelperLauncherMain(Datum arg)
 {
 	List	   *DatabaseList;
+	List	   *remaining = NIL;
+	ListCell   *lc,
+			   *lc2;
+	List	   *CurrentDatabases = NIL;
+	bool		found = false;
 
 	on_shmem_exit(launcher_exit, 0);
 
@@ -468,115 +467,94 @@ ChecksumHelperLauncherMain(Datum arg)
 	if (DatabaseList == NIL || list_length(DatabaseList) == 0)
 		return;
 
-	while (true)
+	foreach(lc, DatabaseList)
 	{
-		List	   *remaining = NIL;
-		ListCell   *lc,
-				   *lc2;
-		List	   *CurrentDatabases = NIL;
+		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+		ChecksumHelperResult processing;
 
-		foreach(lc, DatabaseList)
+		processing = ProcessDatabase(db);
+
+		if (processing == SUCCESSFUL)
 		{
-			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-			ChecksumHelperResult processing;
+			pfree(db->dbname);
+			pfree(db);
 
-			processing = ProcessDatabase(db);
+			if (ChecksumHelperShmem->process_shared_catalogs)
 
-			if (processing == SUCCESSFUL)
-			{
-				pfree(db->dbname);
-				pfree(db);
-
-				if (ChecksumHelperShmem->process_shared_catalogs)
-
-					/*
-					 * Now that one database has completed shared catalogs, we
-					 * don't have to process them again.
-					 */
-					ChecksumHelperShmem->process_shared_catalogs = false;
-			}
-			else if (processing == FAILED)
-			{
 				/*
-				 * Put failed databases on the remaining list.
+				 * Now that one database has completed shared catalogs, we
+				 * don't have to process them again.
 				 */
-				remaining = lappend(remaining, db);
+				ChecksumHelperShmem->process_shared_catalogs = false;
+		}
+		else if (processing == FAILED)
+		{
+			/*
+			 * Put failed databases on the remaining list.
+			 */
+			remaining = lappend(remaining, db);
+		}
+		else
+			/* aborted */
+			return;
+	}
+	list_free(DatabaseList);
+
+	DatabaseList = remaining;
+
+	/*
+	 * DatabaseList now has all databases not yet processed. This can be
+	 * because they failed for some reason, or because the database was
+	 * dropped between us getting the database list and trying to process
+	 * it. Get a fresh list of databases to detect the second case where
+	 * the database was dropped before we had started processing it. If a
+	 * database still exists, but enabling checksums failed then we fail
+	 * the entire checksumming process and exit with an error.
+	 */
+	CurrentDatabases = BuildDatabaseList();
+
+	foreach(lc, DatabaseList)
+	{
+		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+
+		foreach(lc2, CurrentDatabases)
+		{
+			ChecksumHelperDatabase *db2 = (ChecksumHelperDatabase *) lfirst(lc2);
+
+			if (db->dboid == db2->dboid)
+			{
+				found = true;
+				ereport(WARNING,
+						(errmsg("failed to enable checksums in \"%s\"",
+								db->dbname)));
 			}
 			else
-				/* aborted */
-				return;
-		}
-		list_free(DatabaseList);
-
-		DatabaseList = remaining;
-		remaining = NIL;
-
-		/*
-		 * DatabaseList now has all databases not yet processed. This can be
-		 * because they failed for some reason, or because the database was
-		 * dropped between us getting the database list and trying to process
-		 * it. Get a fresh list of databases to detect the second case where
-		 * the database was dropped before we had started processing it. Any
-		 * database that still exists but where enabling checksums failed, is
-		 * retried for a limited number of times before giving up. Any
-		 * database that remains in failed state after the retries expire will
-		 * fail the entire operation.
-		 */
-		CurrentDatabases = BuildDatabaseList();
-
-		foreach(lc, DatabaseList)
-		{
-			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-			bool		found = false;
-
-			foreach(lc2, CurrentDatabases)
-			{
-				ChecksumHelperDatabase *db2 = (ChecksumHelperDatabase *) lfirst(lc2);
-
-				if (db->dboid == db2->dboid)
-				{
-					/* Database still exists, time to give up? */
-					if (++db->attempts > MAX_ATTEMPTS)
-					{
-						/* Disable checksums on cluster, because we failed */
-						SetDataChecksumsOff();
-
-						ereport(ERROR,
-								(errmsg("failed to enable checksums in \"%s\", giving up.",
-										db->dbname)));
-					}
-					else
-						/* Try again with this db */
-						remaining = lappend(remaining, db);
-					found = true;
-					break;
-				}
-			}
-			if (!found)
-			{
 				ereport(LOG,
 						(errmsg("database \"%s\" has been dropped, skipping",
 								db->dbname)));
-				pfree(db->dbname);
-				pfree(db);
-			}
-		}
-
-		/* Free the extra list of databases */
-		foreach(lc, CurrentDatabases)
-		{
-			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 
 			pfree(db->dbname);
 			pfree(db);
 		}
-		list_free(CurrentDatabases);
+	}
+	list_free(DatabaseList);
 
-		/* All databases processed yet? */
-		if (remaining == NIL || list_length(remaining) == 0)
-			break;
+	/* Free the extra list of databases */
+	foreach(lc, CurrentDatabases)
+	{
+		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 
-		DatabaseList = remaining;
+		pfree(db->dbname);
+		pfree(db);
+	}
+	list_free(CurrentDatabases);
+
+	if (found)
+	{
+		/* Disable checksums on cluster, because we failed */
+		SetDataChecksumsOff();
+		ereport(ERROR,
+				(errmsg("checksumhelper failed to enable checksums in all databases, aborting")));
 	}
 
 	/*
@@ -664,8 +642,6 @@ BuildDatabaseList(void)
 
 		db->dboid = HeapTupleGetOid(tup);
 		db->dbname = pstrdup(NameStr(pgdb->datname));
-		elog(WARNING, "attempts = %d", db->attempts);
-		db->attempts = 0;
 
 		DatabaseList = lappend(DatabaseList, db);
 
