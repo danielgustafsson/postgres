@@ -208,7 +208,7 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 
 		/*
 		 * Mark the buffer as dirty and force a full page write.  We have to
-		 * re-write the page to wal even if the checksum hasn't changed,
+		 * re-write the page to WAL even if the checksum hasn't changed,
 		 * because if there is a replica it might have a slightly different
 		 * version of the page with an invalid checksum, caused by unlogged
 		 * changes (e.g. hintbits) on the master happening while checksums
