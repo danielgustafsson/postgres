@@ -81,6 +81,7 @@ static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool include_shared);
 static List *BuildTempTableList(void);
 static ChecksumHelperResult ProcessDatabase(ChecksumHelperDatabase * db);
+static void launcher_cancel_handler(SIGNAL_ARGS);
 
 /*
  * Main entry point for checksumhelper launcher process.
@@ -376,6 +377,12 @@ launcher_exit(int code, Datum arg)
 }
 
 static void
+launcher_cancel_handler(SIGNAL_ARGS)
+{
+	ChecksumHelperShmem->abort = true;
+}
+
+static void
 WaitForAllTransactionsToFinish(void)
 {
 	TransactionId waitforxid;
@@ -428,6 +435,7 @@ ChecksumHelperLauncherMain(Datum arg)
 			(errmsg("checksumhelper launcher started")));
 
 	pqsignal(SIGTERM, die);
+	pqsignal(SIGINT, launcher_cancel_handler);
 
 	BackgroundWorkerUnblockSignals();
 
