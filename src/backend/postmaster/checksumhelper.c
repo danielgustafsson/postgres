@@ -420,7 +420,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	ListCell   *lc,
 			   *lc2;
 	List	   *CurrentDatabases = NIL;
-	bool		found = false;
+	bool		found_failed = false;
 
 	on_shmem_exit(launcher_exit, 0);
 
@@ -500,10 +500,8 @@ ChecksumHelperLauncherMain(Datum arg)
 	}
 	list_free(DatabaseList);
 
-	DatabaseList = remaining;
-
 	/*
-	 * DatabaseList now has all databases not yet processed. This can be
+	 * remaining now has all databases not yet processed. This can be
 	 * because they failed for some reason, or because the database was
 	 * dropped between us getting the database list and trying to process
 	 * it. Get a fresh list of databases to detect the second case where
@@ -513,7 +511,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	 */
 	CurrentDatabases = BuildDatabaseList();
 
-	foreach(lc, DatabaseList)
+	foreach(lc, remaining)
 	{
 		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 
@@ -523,7 +521,7 @@ ChecksumHelperLauncherMain(Datum arg)
 
 			if (db->dboid == db2->dboid)
 			{
-				found = true;
+				found_failed = true;
 				ereport(WARNING,
 						(errmsg("failed to enable checksums in \"%s\"",
 								db->dbname)));
@@ -532,12 +530,12 @@ ChecksumHelperLauncherMain(Datum arg)
 				ereport(LOG,
 						(errmsg("database \"%s\" has been dropped, skipping",
 								db->dbname)));
-
-			pfree(db->dbname);
-			pfree(db);
 		}
+
+		pfree(db->dbname);
+		pfree(db);
 	}
-	list_free(DatabaseList);
+	list_free(remaining);
 
 	/* Free the extra list of databases */
 	foreach(lc, CurrentDatabases)
@@ -549,7 +547,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	}
 	list_free(CurrentDatabases);
 
-	if (found)
+	if (found_failed)
 	{
 		/* Disable checksums on cluster, because we failed */
 		SetDataChecksumsOff();
