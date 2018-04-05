@@ -30,10 +30,6 @@ $node_master->safe_psql('postgres',
 $node_master->wait_for_catchup($node_standby_1, 'replay',
 	$node_master->lsn('insert'));
 
-# Prep cluster for enabling checksums
-$node_master->safe_psql('postgres',
-	"ALTER DATABASE template0 WITH ALLOW_CONNECTIONS true;");
-
 # Check that checksums are turned off
 my $result = $node_master->safe_psql('postgres',
 	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");

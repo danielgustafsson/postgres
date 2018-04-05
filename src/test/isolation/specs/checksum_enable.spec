@@ -1,6 +1,5 @@
 setup
 {
-	ALTER DATABASE template0 WITH ALLOW_CONNECTIONS true;
 	CREATE TABLE t1 (a serial, b integer, c text);
 	INSERT INTO t1 (b, c) VALUES (generate_series(1,10000), 'starting values');
 

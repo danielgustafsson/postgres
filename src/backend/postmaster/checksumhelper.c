@@ -91,38 +91,12 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 {
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
-	HeapTuple	tup;
-	Relation	rel;
-	HeapScanDesc scan;
 
 	if (ChecksumHelperShmem->abort)
 	{
 		ereport(ERROR,
 				(errmsg("could not start checksumhelper: has been cancelled")));
 	}
-
-	/*
-	 * Check that all databases allow connections.  This will be re-checked
-	 * when we build the list of databases to work on, the point of
-	 * duplicating this is to catch any databases we won't be able to open
-	 * while we can still send an error message to the client.
-	 */
-	rel = heap_open(DatabaseRelationId, AccessShareLock);
-	scan = heap_beginscan_catalog(rel, 0, NULL);
-
-	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
-	{
-		Form_pg_database pgdb = (Form_pg_database) GETSTRUCT(tup);
-
-		if (!pgdb->datallowconn)
-			ereport(ERROR,
-					(errmsg("database \"%s\" does not allow connections",
-							NameStr(pgdb->datname)),
-					 errhint("Allow connections using ALTER DATABASE and try again.")));
-	}
-
-	heap_endscan(scan);
-	heap_close(rel, AccessShareLock);
 
 	ChecksumHelperShmem->cost_delay = cost_delay;
 	ChecksumHelperShmem->cost_limit = cost_limit;
@@ -444,7 +418,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	/*
 	 * Initialize a connection to shared catalogs only.
 	 */
-	BackgroundWorkerInitializeConnection(NULL, NULL);
+	BackgroundWorkerInitializeConnection(NULL, NULL, 0);
 
 	/*
 	 * Set up so first run processes shared catalogs, but not once in every
@@ -647,12 +621,6 @@ BuildDatabaseList(void)
 		Form_pg_database pgdb = (Form_pg_database) GETSTRUCT(tup);
 		ChecksumHelperDatabase *db;
 
-		if (!pgdb->datallowconn)
-			ereport(ERROR,
-					(errmsg("database \"%s\" does not allow connections",
-							NameStr(pgdb->datname)),
-					 errhint("Allow connections using ALTER DATABASE and try again.")));
-
 		oldctx = MemoryContextSwitchTo(ctx);
 
 		db = (ChecksumHelperDatabase *) palloc(sizeof(ChecksumHelperDatabase));
@@ -796,7 +764,7 @@ ChecksumHelperWorkerMain(Datum arg)
 	ereport(DEBUG1,
 			(errmsg("checksum worker starting for database oid %d", dboid)));
 
-	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid);
+	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid, BGWORKER_BYPASS_ALLOWCONN);
 
 	/*
 	 * Get a list of all temp tables present as we start in this database.

@@ -308,21 +308,6 @@
     </para>
    </note>
 
-   <para>
-    Since checksums are clusterwide, all databases will get checksums added.
-    It is thus important that the worker is allowed to connect to all databases
-    for the process to succeed, see the <xref linkend="sql-alterdatabase"/>
-    command for how to allow connections.
-   </para>
-
-   <note>
-    <para>
-     <literal>template0</literal> is by default not accepting connections, to
-     enable checksums you'll need to temporarily make it accept connections.
-     See <xref linkend="sql-alterdatabase" /> for details.
-    </para>
-   </note>
-
   </sect2>
  </sect1>
 
