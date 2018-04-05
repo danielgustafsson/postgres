@@ -297,7 +297,7 @@
     any reason, then this process must be restarted manually. To do this,
     re-execute the function <function>pg_enable_data_checksums()</function>
     once the cluster has been restarted. It is not possible to resume the work,
-    the process has to start from scratch.
+    the process has to start over and re-process the cluster.
    </para>
 
    <note>
