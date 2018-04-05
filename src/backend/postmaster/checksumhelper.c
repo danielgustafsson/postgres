@@ -100,13 +100,6 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 				(errmsg("could not start checksumhelper: has been cancelled")));
 	}
 
-	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
-	{
-		/* Failed to set means somebody else started */
-		ereport(ERROR,
-				(errmsg("could not start checksumhelper: already running")));
-	}
-
 	/*
 	 * Check that all databases allow connections.  This will be re-checked
 	 * when we build the list of databases to work on, the point of
@@ -143,6 +136,13 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	bgw.bgw_restart_time = BGW_NEVER_RESTART;
 	bgw.bgw_notify_pid = MyProcPid;
 	bgw.bgw_main_arg = (Datum) 0;
+
+	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
+	{
+		/* Failed to set means somebody else started */
+		ereport(ERROR,
+				(errmsg("could not start checksumhelper: already running")));
+	}
 
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
 	{
