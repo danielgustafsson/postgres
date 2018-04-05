@@ -514,6 +514,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	foreach(lc, remaining)
 	{
 		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+		bool found = false;
 
 		foreach(lc2, CurrentDatabases)
 		{
@@ -521,15 +522,21 @@ ChecksumHelperLauncherMain(Datum arg)
 
 			if (db->dboid == db2->dboid)
 			{
-				found_failed = true;
+				found = true;
 				ereport(WARNING,
 						(errmsg("failed to enable checksums in \"%s\"",
 								db->dbname)));
+				break;
 			}
-			else
-				ereport(LOG,
-						(errmsg("database \"%s\" has been dropped, skipping",
-								db->dbname)));
+		}
+
+		if (found)
+			found_failed = true;
+		else
+		{
+			ereport(LOG,
+					(errmsg("database \"%s\" has been dropped, skipping",
+							db->dbname)));
 		}
 
 		pfree(db->dbname);
