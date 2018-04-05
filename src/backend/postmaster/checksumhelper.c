@@ -605,7 +605,11 @@ ChecksumHelperShmemInit(void)
 						ChecksumHelperShmemSize(),
 						&found);
 
-	pg_atomic_init_flag(&ChecksumHelperShmem->launcher_started);
+	if (!found)
+	{
+		MemSet(ChecksumHelperShmem, 0, ChecksumHelperShmemSize());
+		pg_atomic_init_flag(&ChecksumHelperShmem->launcher_started);
+	}
 }
 
 /*
