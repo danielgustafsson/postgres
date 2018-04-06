@@ -232,8 +232,8 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 	if (rel == NULL)
 	{
 		/*
-		 * Relation no longer exist. We consider this a success, since there are no
-		 * pages in it that need checksums, and thus return true.
+		 * Relation no longer exist. We consider this a success, since there
+		 * are no pages in it that need checksums, and thus return true.
 		 */
 		elog(DEBUG1, "Checksumhelper skipping relation %d as it no longer exists", relationId);
 		CommitTransactionCommand();
@@ -372,7 +372,7 @@ WaitForAllTransactionsToFinish(void)
 		elog(DEBUG1, "Checking old transactions");
 		if (TransactionIdPrecedes(oldestxid, waitforxid))
 		{
-			char activity[64];
+			char		activity[64];
 
 			/* Oldest running xid is older than us, so wait */
 			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (waiting for %d)", waitforxid);
@@ -428,9 +428,9 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	/*
 	 * Wait for all existing transactions to finish. This will make sure that
-	 * we can see all tables all databases, so we don't miss any.
-	 * Anything created after this point is known to have checksums on
-	 * all pages already, so we don't have to care about those.
+	 * we can see all tables all databases, so we don't miss any. Anything
+	 * created after this point is known to have checksums on all pages
+	 * already, so we don't have to care about those.
 	 */
 	WaitForAllTransactionsToFinish();
 
@@ -483,20 +483,20 @@ ChecksumHelperLauncherMain(Datum arg)
 	list_free(DatabaseList);
 
 	/*
-	 * remaining now has all databases not yet processed. This can be
-	 * because they failed for some reason, or because the database was
-	 * dropped between us getting the database list and trying to process
-	 * it. Get a fresh list of databases to detect the second case where
-	 * the database was dropped before we had started processing it. If a
-	 * database still exists, but enabling checksums failed then we fail
-	 * the entire checksumming process and exit with an error.
+	 * remaining now has all databases not yet processed. This can be because
+	 * they failed for some reason, or because the database was dropped
+	 * between us getting the database list and trying to process it. Get a
+	 * fresh list of databases to detect the second case where the database
+	 * was dropped before we had started processing it. If a database still
+	 * exists, but enabling checksums failed then we fail the entire
+	 * checksumming process and exit with an error.
 	 */
 	CurrentDatabases = BuildDatabaseList();
 
 	foreach(lc, remaining)
 	{
 		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-		bool found = false;
+		bool		found = false;
 
 		foreach(lc2, CurrentDatabases)
 		{
@@ -767,9 +767,9 @@ ChecksumHelperWorkerMain(Datum arg)
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid, BGWORKER_BYPASS_ALLOWCONN);
 
 	/*
-	 * Get a list of all temp tables present as we start in this database.
-	 * We need to wait until they are all gone until we are done, since
-	 * we cannot access those files and modify them.
+	 * Get a list of all temp tables present as we start in this database. We
+	 * need to wait until they are all gone until we are done, since we cannot
+	 * access those files and modify them.
 	 */
 	InitialTempTableList = BuildTempTableList();
 
@@ -812,16 +812,16 @@ ChecksumHelperWorkerMain(Datum arg)
 
 	/*
 	 * Wait for all temp tables that existed when we started to go away. This
-	 * is necessary since we cannot "reach" them to enable checksums.
-	 * Any temp tables created after we started will already have checksums
-	 * in them (due to the inprogress state), so those are safe.
+	 * is necessary since we cannot "reach" them to enable checksums. Any temp
+	 * tables created after we started will already have checksums in them
+	 * (due to the inprogress state), so those are safe.
 	 */
 	while (true)
 	{
-		List *CurrentTempTables;
-		ListCell *lc;
-		int numleft;
-		char activity[64];
+		List	   *CurrentTempTables;
+		ListCell   *lc;
+		int			numleft;
+		char		activity[64];
 
 		CurrentTempTables = BuildTempTableList();
 		numleft = 0;
