@@ -193,6 +193,10 @@ typedef enum NodeTag
 	T_FromExpr,
 	T_OnConflictExpr,
 	T_IntoClause,
+	T_PartitionPruneStep,
+	T_PartitionPruneStepOp,
+	T_PartitionPruneStepCombine,
+	T_PartitionPruneInfo,
 
 	/*
 	 * TAGS FOR EXPRESSION STATE NODES (execnodes.h)
@@ -262,7 +266,6 @@ typedef enum NodeTag
 	T_PlaceHolderVar,
 	T_SpecialJoinInfo,
 	T_AppendRelInfo,
-	T_PartitionedChildRelInfo,
 	T_PlaceHolderInfo,
 	T_MinMaxAggInfo,
 	T_PlannerParamItem,

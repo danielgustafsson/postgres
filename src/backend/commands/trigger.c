@@ -24,8 +24,7 @@
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
 #include "catalog/pg_constraint.h"
-#include "catalog/pg_constraint_fn.h"
-#include "catalog/pg_inherits_fn.h"
+#include "catalog/pg_inherits.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_trigger.h"
 #include "catalog/pg_type.h"
@@ -741,6 +740,7 @@ CreateTrigger(CreateTrigStmt *stmt, const char *queryString,
 											  InvalidOid,	/* no parent */
 											  RelationGetRelid(rel),
 											  NULL, /* no conkey */
+											  0,
 											  0,
 											  InvalidOid,	/* no domain */
 											  InvalidOid,	/* no index */
@@ -3314,6 +3314,11 @@ ltrmark:;
 					ereport(ERROR,
 							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
 							 errmsg("could not serialize access due to concurrent update")));
+				if (ItemPointerIndicatesMovedPartitions(&hufd.ctid))
+					ereport(ERROR,
+							(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+							 errmsg("tuple to be locked was already moved to another partition due to concurrent update")));
+
 				if (!ItemPointerEquals(&hufd.ctid, &tuple.t_self))
 				{
 					/* it was updated, so look at the updated version */

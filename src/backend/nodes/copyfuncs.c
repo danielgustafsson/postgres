@@ -248,6 +248,7 @@ _copyAppend(const Append *from)
 	COPY_NODE_FIELD(partitioned_rels);
 	COPY_NODE_FIELD(appendplans);
 	COPY_SCALAR_FIELD(first_partial_plan);
+	COPY_NODE_FIELD(part_prune_infos);
 
 	return newnode;
 }
@@ -2150,6 +2151,55 @@ _copyMergeAction(const MergeAction *from)
 	return newnode;
 }
 
+/*
+ * _copyPartitionPruneStepOp
+ */
+static PartitionPruneStepOp *
+_copyPartitionPruneStepOp(const PartitionPruneStepOp *from)
+{
+	PartitionPruneStepOp *newnode = makeNode(PartitionPruneStepOp);
+
+	COPY_SCALAR_FIELD(step.step_id);
+	COPY_SCALAR_FIELD(opstrategy);
+	COPY_NODE_FIELD(exprs);
+	COPY_NODE_FIELD(cmpfns);
+	COPY_BITMAPSET_FIELD(nullkeys);
+
+	return newnode;
+}
+
+/*
+ * _copyPartitionPruneStepCombine
+ */
+static PartitionPruneStepCombine *
+_copyPartitionPruneStepCombine(const PartitionPruneStepCombine *from)
+{
+	PartitionPruneStepCombine *newnode = makeNode(PartitionPruneStepCombine);
+
+	COPY_SCALAR_FIELD(step.step_id);
+	COPY_SCALAR_FIELD(combineOp);
+	COPY_NODE_FIELD(source_stepids);
+
+	return newnode;
+}
+
+static PartitionPruneInfo *
+_copyPartitionPruneInfo(const PartitionPruneInfo *from)
+{
+	PartitionPruneInfo *newnode = makeNode(PartitionPruneInfo);
+
+	COPY_SCALAR_FIELD(reloid);
+	COPY_NODE_FIELD(pruning_steps);
+	COPY_BITMAPSET_FIELD(present_parts);
+	COPY_SCALAR_FIELD(nparts);
+	COPY_POINTER_FIELD(subnode_map, from->nparts * sizeof(int));
+	COPY_POINTER_FIELD(subpart_map, from->nparts * sizeof(int));
+	COPY_BITMAPSET_FIELD(extparams);
+	COPY_BITMAPSET_FIELD(execparams);
+
+	return newnode;
+}
+
 /* ****************************************************************
  *						relation.h copy functions
  *
@@ -2273,21 +2323,6 @@ _copyAppendRelInfo(const AppendRelInfo *from)
 	COPY_SCALAR_FIELD(child_reltype);
 	COPY_NODE_FIELD(translated_vars);
 	COPY_SCALAR_FIELD(parent_reloid);
-
-	return newnode;
-}
-
-/*
- * _copyPartitionedChildRelInfo
- */
-static PartitionedChildRelInfo *
-_copyPartitionedChildRelInfo(const PartitionedChildRelInfo *from)
-{
-	PartitionedChildRelInfo *newnode = makeNode(PartitionedChildRelInfo);
-
-	COPY_SCALAR_FIELD(parent_relid);
-	COPY_NODE_FIELD(child_rels);
-	COPY_SCALAR_FIELD(part_cols_updated);
 
 	return newnode;
 }
@@ -2872,6 +2907,7 @@ _copyConstraint(const Constraint *from)
 	COPY_STRING_FIELD(cooked_expr);
 	COPY_SCALAR_FIELD(generated_when);
 	COPY_NODE_FIELD(keys);
+	COPY_NODE_FIELD(including);
 	COPY_NODE_FIELD(exclusions);
 	COPY_NODE_FIELD(options);
 	COPY_STRING_FIELD(indexname);
@@ -3447,6 +3483,7 @@ _copyIndexStmt(const IndexStmt *from)
 	COPY_STRING_FIELD(accessMethod);
 	COPY_STRING_FIELD(tableSpace);
 	COPY_NODE_FIELD(indexParams);
+	COPY_NODE_FIELD(indexIncludingParams);
 	COPY_NODE_FIELD(options);
 	COPY_NODE_FIELD(whereClause);
 	COPY_NODE_FIELD(excludeOpNames);
@@ -5076,6 +5113,12 @@ copyObjectImpl(const void *from)
 		case T_MergeAction:
 			retval = _copyMergeAction(from);
 			break;
+		case T_PartitionPruneStepOp:
+			retval = _copyPartitionPruneStepOp(from);
+			break;
+		case T_PartitionPruneStepCombine:
+			retval = _copyPartitionPruneStepCombine(from);
+			break;
 
 			/*
 			 * RELATION NODES
@@ -5095,11 +5138,11 @@ copyObjectImpl(const void *from)
 		case T_AppendRelInfo:
 			retval = _copyAppendRelInfo(from);
 			break;
-		case T_PartitionedChildRelInfo:
-			retval = _copyPartitionedChildRelInfo(from);
-			break;
 		case T_PlaceHolderInfo:
 			retval = _copyPlaceHolderInfo(from);
+			break;
+		case T_PartitionPruneInfo:
+			retval = _copyPartitionPruneInfo(from);
 			break;
 
 			/*
