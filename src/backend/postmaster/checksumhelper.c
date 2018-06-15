@@ -120,9 +120,6 @@ ChecksumHelperLauncherRegister(void)
 void
 ShutdownChecksumHelperIfRunning(void)
 {
-	/*
-	 * Tell any running process to quit.
-	 */
 	ChecksumHelperShmem->abort = true;
 }
 
@@ -186,7 +183,7 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 
 		/*
 		 * This is the only place where we check if we are asked to abort, the
-		 * abortion will bubble up from here.
+		 * aborting will bubble up from here.
 		 */
 		if (ChecksumHelperShmem->abort)
 			return false;
@@ -645,8 +642,7 @@ BuildRelationList(bool include_shared)
 			continue;
 
 		/*
-		 * Foreign tables have by definition no local storage that can be
-		 * checksummed, so skip.
+		 * Only include relation types that has local storage.
 		 */
 		if (pgc->relkind == RELKIND_VIEW ||
 			pgc->relkind == RELKIND_COMPOSITE_TYPE ||
