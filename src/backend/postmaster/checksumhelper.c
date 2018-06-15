@@ -76,6 +76,7 @@ typedef struct ChecksumHelperRelation
 static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool include_shared);
 static ChecksumHelperResult ProcessDatabase(ChecksumHelperDatabase * db);
+static void WaitForAllTransactionsToFinish(void);
 static void launcher_cancel_handler(SIGNAL_ARGS);
 static void checksumhelper_sighup(SIGNAL_ARGS);
 
@@ -362,6 +363,43 @@ checksumhelper_sighup(SIGNAL_ARGS)
 {
 	got_SIGHUP = true;
 }
+
+static void
+WaitForAllTransactionsToFinish(void)
+{
+	TransactionId waitforxid;
+
+	LWLockAcquire(XidGenLock, LW_SHARED);
+	waitforxid = ShmemVariableCache->nextXid;
+	LWLockRelease(XidGenLock);
+
+	while (true)
+	{
+		TransactionId oldestxid = GetOldestActiveTransactionId();
+
+		elog(DEBUG1, "Waiting for old transactions to finish");
+		if (TransactionIdPrecedes(oldestxid, waitforxid))
+		{
+			char        activity[64];
+
+			/* Oldest running xid is older than us, so wait */
+			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (waiting for %d)", waitforxid);
+			pgstat_report_activity(STATE_RUNNING, activity);
+
+			/* Retry every 5 seconds */
+			ResetLatch(MyLatch);
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT,
+							 5000,
+							 WAIT_EVENT_PG_SLEEP);
+		}
+		else
+		{
+			pgstat_report_activity(STATE_IDLE, NULL);
+			return;
+		}
+	}
+ }
 
 void
 ChecksumHelperLauncherMain(Datum arg)
