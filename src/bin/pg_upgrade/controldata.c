@@ -11,6 +11,8 @@
 
 #include "pg_upgrade.h"
 
+#include "storage/bufpage.h"
+
 #include <ctype.h>
 
 /*
@@ -596,7 +598,7 @@ check_control_data(ControlData *oldctrl,
 	 * should either let the process finish, or turn off checksums, before
 	 * retrying.
 	 */
-	if (oldctrl->data_checksum_version == 2)
+	if (oldctrl->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
 		pg_fatal("transition to data checksums not completed in old cluster\n");
 
 	/*
