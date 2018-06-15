@@ -746,14 +746,17 @@ pg_enable_data_checksums(PG_FUNCTION_ARGS)
 	if (DataChecksumsNeedVerify())
 		ereport(ERROR,
 				(errmsg("data checksums already enabled")));
+
 	if (DataChecksumsNeedWrite())
 		ereport(ERROR,
-				(errmsg("data checksums already pending. A restart may be required to complete the process")));
+				(errmsg("data checksums already pending"),
+				 errhint("A restart may be required to complete the process")));
 
 	SetDataChecksumsInProgress();
 
 	ereport(NOTICE,
-			(errmsg("data checksums set to pending. To complete the operation, a restart of PostgreSQL is required")));
+			(errmsg("data checksums set to pending"),
+			 errhint("To complete the operation, a restart of PostgreSQL is required")));
 
 	PG_RETURN_VOID();
 }
