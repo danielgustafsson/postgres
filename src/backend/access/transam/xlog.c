@@ -1034,7 +1034,7 @@ XLogInsertRecord(XLogRecData *rdata,
 		Assert(RedoRecPtr < Insert->RedoRecPtr);
 		RedoRecPtr = Insert->RedoRecPtr;
 	}
-	doPageWrites = (Insert->fullPageWrites || Insert->forcePageWrites || DataChecksumsInProgress());
+	doPageWrites = (Insert->fullPageWrites || Insert->forcePageWrites);
 
 	if (fpw_lsn != InvalidXLogRecPtr && fpw_lsn <= RedoRecPtr && doPageWrites)
 	{
