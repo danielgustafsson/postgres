@@ -428,9 +428,9 @@ static const struct config_enum_entry password_encryption_options[] = {
  * no need to support variants of boolean input.
  */
 static const struct config_enum_entry data_checksum_options[] = {
-	{"on", DATA_CHECKSUMS_ON, true},
-	{"off", DATA_CHECKSUMS_OFF, true},
-	{"inprogress", DATA_CHECKSUMS_INPROGRESS, true},
+	{"on", PG_DATA_CHECKSUM_VERSION, true},
+	{"off", 0, true},
+	{"inprogress", PG_DATA_CHECKSUM_INPROGRESS_VERSION, true},
 	{NULL, 0, false}
 };
 
@@ -4181,7 +4181,7 @@ static struct config_enum ConfigureNamesEnum[] =
 			GUC_NOT_IN_SAMPLE | GUC_DISALLOW_IN_FILE
 		},
 		&data_checksums_tmp,
-		DATA_CHECKSUMS_OFF, data_checksum_options,
+		0, data_checksum_options,
 		NULL, NULL, show_data_checksums
 	},
 

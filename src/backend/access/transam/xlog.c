@@ -856,7 +856,7 @@ static void SetLatestXTime(TimestampTz xtime);
 static void SetCurrentChunkStartTime(TimestampTz xtime);
 static void CheckRequiredParameterValues(void);
 static void XLogReportParameters(void);
-static void XlogChecksums(ChecksumType new_type);
+static void XlogChecksums(uint32 new_type);
 static void checkTimeLineSwitch(XLogRecPtr lsn, TimeLineID newTLI,
 					TimeLineID prevTLI);
 static void LocalSetXLogInsertAllowed(void);
@@ -9650,7 +9650,7 @@ XLogReportParameters(void)
  * Log the new state of checksums
  */
 static void
-XlogChecksums(ChecksumType new_type)
+XlogChecksums(uint32 new_type)
 {
 	xl_checksum_state xlrec;
 
