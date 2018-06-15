@@ -999,6 +999,7 @@ ReplicationSlotReserveWal(void)
 	while (true)
 	{
 		XLogSegNo	segno;
+		XLogRecPtr	restart_lsn;
 
 		/*
 		 * For logical slots log a standby snapshot and start logical decoding
@@ -1016,7 +1017,10 @@ ReplicationSlotReserveWal(void)
 			XLogRecPtr	flushptr;
 
 			/* start at current insert position */
-			slot->data.restart_lsn = GetXLogInsertRecPtr();
+			restart_lsn = GetXLogInsertRecPtr();
+			SpinLockAcquire(&slot->mutex);
+			slot->data.restart_lsn = restart_lsn;
+			SpinLockRelease(&slot->mutex);
 
 			/* make sure we have enough information to start */
 			flushptr = LogStandbySnapshot();
@@ -1026,7 +1030,10 @@ ReplicationSlotReserveWal(void)
 		}
 		else
 		{
-			slot->data.restart_lsn = GetRedoRecPtr();
+			restart_lsn = GetRedoRecPtr();
+			SpinLockAcquire(&slot->mutex);
+			slot->data.restart_lsn = restart_lsn;
+			SpinLockRelease(&slot->mutex);
 		}
 
 		/* prevent WAL removal as fast as possible */

@@ -239,7 +239,7 @@ index_check_primary_key(Relation heapRel,
 	cmds = NIL;
 	for (i = 0; i < indexInfo->ii_NumIndexKeyAttrs; i++)
 	{
-		AttrNumber	attnum = indexInfo->ii_KeyAttrNumbers[i];
+		AttrNumber	attnum = indexInfo->ii_IndexAttrNumbers[i];
 		HeapTuple	atttuple;
 		Form_pg_attribute attform;
 
@@ -297,6 +297,7 @@ ConstructTupleDescriptor(Relation heapRelation,
 						 Oid *classObjectId)
 {
 	int			numatts = indexInfo->ii_NumIndexAttrs;
+	int			numkeyatts = indexInfo->ii_NumIndexKeyAttrs;
 	ListCell   *colnames_item = list_head(indexColNames);
 	ListCell   *indexpr_item = list_head(indexInfo->ii_Expressions);
 	IndexAmRoutine *amroutine;
@@ -324,7 +325,7 @@ ConstructTupleDescriptor(Relation heapRelation,
 	 */
 	for (i = 0; i < numatts; i++)
 	{
-		AttrNumber	atnum = indexInfo->ii_KeyAttrNumbers[i];
+		AttrNumber	atnum = indexInfo->ii_IndexAttrNumbers[i];
 		Form_pg_attribute to = TupleDescAttr(indexTupDesc, i);
 		HeapTuple	tuple;
 		Form_pg_type typeTup;
@@ -375,7 +376,8 @@ ConstructTupleDescriptor(Relation heapRelation,
 			to->attidentity = '\0';
 			to->attislocal = true;
 			to->attinhcount = 0;
-			to->attcollation = collationObjectId[i];
+			to->attcollation = (i < numkeyatts) ?
+				collationObjectId[i] : InvalidOid;
 		}
 		else
 		{
@@ -411,7 +413,8 @@ ConstructTupleDescriptor(Relation heapRelation,
 			to->attcacheoff = -1;
 			to->atttypmod = exprTypmod(indexkey);
 			to->attislocal = true;
-			to->attcollation = collationObjectId[i];
+			to->attcollation = (i < numkeyatts) ?
+				collationObjectId[i] : InvalidOid;
 
 			ReleaseSysCache(tuple);
 
@@ -607,10 +610,10 @@ UpdateIndexRelation(Oid indexoid,
 	 */
 	indkey = buildint2vector(NULL, indexInfo->ii_NumIndexAttrs);
 	for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
-		indkey->values[i] = indexInfo->ii_KeyAttrNumbers[i];
-	indcollation = buildoidvector(collationOids, indexInfo->ii_NumIndexAttrs);
+		indkey->values[i] = indexInfo->ii_IndexAttrNumbers[i];
+	indcollation = buildoidvector(collationOids, indexInfo->ii_NumIndexKeyAttrs);
 	indclass = buildoidvector(classOids, indexInfo->ii_NumIndexKeyAttrs);
-	indoption = buildint2vector(coloptions, indexInfo->ii_NumIndexAttrs);
+	indoption = buildint2vector(coloptions, indexInfo->ii_NumIndexKeyAttrs);
 
 	/*
 	 * Convert the index expressions (if any) to a text datum
@@ -933,6 +936,7 @@ index_create(Relation heapRelation,
 	indexRelation->rd_rel->relowner = heapRelation->rd_rel->relowner;
 	indexRelation->rd_rel->relam = accessMethodObjectId;
 	indexRelation->rd_rel->relhasoids = false;
+	indexRelation->rd_rel->relispartition = OidIsValid(parentIndexRelid);
 
 	/*
 	 * store index's pg_class entry
@@ -1019,32 +1023,32 @@ index_create(Relation heapRelation,
 			}
 
 			localaddr = index_constraint_create(heapRelation,
-									indexRelationId,
-									parentConstraintId,
-									indexInfo,
-									indexRelationName,
-									constraintType,
-									constr_flags,
-									allow_system_table_mods,
-									is_internal);
+												indexRelationId,
+												parentConstraintId,
+												indexInfo,
+												indexRelationName,
+												constraintType,
+												constr_flags,
+												allow_system_table_mods,
+												is_internal);
 			if (constraintId)
 				*constraintId = localaddr.objectId;
 		}
 		else
 		{
 			bool		have_simple_col = false;
-			DependencyType	deptype;
+			DependencyType deptype;
 
 			deptype = OidIsValid(parentIndexRelid) ? DEPENDENCY_INTERNAL_AUTO : DEPENDENCY_AUTO;
 
 			/* Create auto dependencies on simply-referenced columns */
 			for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
 			{
-				if (indexInfo->ii_KeyAttrNumbers[i] != 0)
+				if (indexInfo->ii_IndexAttrNumbers[i] != 0)
 				{
 					referenced.classId = RelationRelationId;
 					referenced.objectId = heapRelationId;
-					referenced.objectSubId = indexInfo->ii_KeyAttrNumbers[i];
+					referenced.objectSubId = indexInfo->ii_IndexAttrNumbers[i];
 
 					recordDependencyOn(&myself, &referenced, deptype);
 
@@ -1080,7 +1084,7 @@ index_create(Relation heapRelation,
 
 		/* Store dependency on collations */
 		/* The default collation is pinned, so don't bother recording it */
-		for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
+		for (i = 0; i < indexInfo->ii_NumIndexKeyAttrs; i++)
 		{
 			if (OidIsValid(collationObjectId[i]) &&
 				collationObjectId[i] != DEFAULT_COLLATION_OID)
@@ -1296,7 +1300,7 @@ index_constraint_create(Relation heapRelation,
 								   true,
 								   parentConstraintId,
 								   RelationGetRelid(heapRelation),
-								   indexInfo->ii_KeyAttrNumbers,
+								   indexInfo->ii_IndexAttrNumbers,
 								   indexInfo->ii_NumIndexKeyAttrs,
 								   indexInfo->ii_NumIndexAttrs,
 								   InvalidOid,	/* no domain */
@@ -1336,12 +1340,12 @@ index_constraint_create(Relation heapRelation,
 	recordDependencyOn(&myself, &referenced, DEPENDENCY_INTERNAL);
 
 	/*
-	 * Also, if this is a constraint on a partition, mark it as depending
-	 * on the constraint in the parent.
+	 * Also, if this is a constraint on a partition, mark it as depending on
+	 * the constraint in the parent.
 	 */
 	if (OidIsValid(parentConstraintId))
 	{
-		ObjectAddress	parentConstr;
+		ObjectAddress parentConstr;
 
 		ObjectAddressSet(parentConstr, ConstraintRelationId, parentConstraintId);
 		recordDependencyOn(&referenced, &parentConstr, DEPENDENCY_INTERNAL_AUTO);
@@ -1756,7 +1760,7 @@ BuildIndexInfo(Relation index)
 	Assert(ii->ii_NumIndexKeyAttrs <= ii->ii_NumIndexAttrs);
 
 	for (i = 0; i < numAtts; i++)
-		ii->ii_KeyAttrNumbers[i] = indexStruct->indkey.values[i];
+		ii->ii_IndexAttrNumbers[i] = indexStruct->indkey.values[i];
 
 	/* fetch any expressions needed for expressional indexes */
 	ii->ii_Expressions = RelationGetIndexExpressions(index);
@@ -1818,7 +1822,7 @@ CompareIndexInfo(IndexInfo *info1, IndexInfo *info2,
 				 Oid *opfamilies1, Oid *opfamilies2,
 				 AttrNumber *attmap, int maplen)
 {
-	int		i;
+	int			i;
 
 	if (info1->ii_Unique != info2->ii_Unique)
 		return false;
@@ -1831,6 +1835,11 @@ CompareIndexInfo(IndexInfo *info1, IndexInfo *info2,
 	if (info1->ii_NumIndexAttrs != info2->ii_NumIndexAttrs)
 		return false;
 
+	/* and same number of key attributes */
+	if (info1->ii_NumIndexKeyAttrs != info2->ii_NumIndexKeyAttrs)
+		return false;
+
+
 	/*
 	 * and columns match through the attribute map (actual attribute numbers
 	 * might differ!)  Note that this implies that index columns that are
@@ -1839,14 +1848,18 @@ CompareIndexInfo(IndexInfo *info1, IndexInfo *info2,
 	 */
 	for (i = 0; i < info1->ii_NumIndexAttrs; i++)
 	{
-		if (maplen < info2->ii_KeyAttrNumbers[i])
+		if (maplen < info2->ii_IndexAttrNumbers[i])
 			elog(ERROR, "incorrect attribute map");
 
 		/* ignore expressions at this stage */
-		if ((info1->ii_KeyAttrNumbers[i] != InvalidAttrNumber) &&
-			(attmap[info2->ii_KeyAttrNumbers[i] - 1] !=
-			info1->ii_KeyAttrNumbers[i]))
+		if ((info1->ii_IndexAttrNumbers[i] != InvalidAttrNumber) &&
+			(attmap[info2->ii_IndexAttrNumbers[i] - 1] !=
+			 info1->ii_IndexAttrNumbers[i]))
 			return false;
+
+		/* collation and opfamily is not valid for including columns */
+		if (i >= info1->ii_NumIndexKeyAttrs)
+			continue;
 
 		if (collations1[i] != collations2[i])
 			return false;
@@ -1862,8 +1875,8 @@ CompareIndexInfo(IndexInfo *info1, IndexInfo *info2,
 		return false;
 	if (info1->ii_Expressions != NIL)
 	{
-		bool	found_whole_row;
-		Node   *mapped;
+		bool		found_whole_row;
+		Node	   *mapped;
 
 		mapped = map_variable_attnos((Node *) info2->ii_Expressions,
 									 1, 0, attmap, maplen,
@@ -1886,8 +1899,8 @@ CompareIndexInfo(IndexInfo *info1, IndexInfo *info2,
 		return false;
 	if (info1->ii_Predicate != NULL)
 	{
-		bool	found_whole_row;
-		Node   *mapped;
+		bool		found_whole_row;
+		Node	   *mapped;
 
 		mapped = map_variable_attnos((Node *) info2->ii_Predicate,
 									 1, 0, attmap, maplen,
@@ -2006,7 +2019,7 @@ FormIndexDatum(IndexInfo *indexInfo,
 
 	for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
 	{
-		int			keycol = indexInfo->ii_KeyAttrNumbers[i];
+		int			keycol = indexInfo->ii_IndexAttrNumbers[i];
 		Datum		iDatum;
 		bool		isNull;
 
@@ -2092,11 +2105,11 @@ index_update_stats(Relation rel,
 	 * It is safe to use a non-transactional update even though our
 	 * transaction could still fail before committing.  Setting relhasindex
 	 * true is safe even if there are no indexes (VACUUM will eventually fix
-	 * it).  And of course the new relpages and
-	 * reltuples counts are correct regardless.  However, we don't want to
-	 * change relpages (or relallvisible) if the caller isn't providing an
-	 * updated reltuples count, because that would bollix the
-	 * reltuples/relpages ratio which is what's really important.
+	 * it).  And of course the new relpages and reltuples counts are correct
+	 * regardless.  However, we don't want to change relpages (or
+	 * relallvisible) if the caller isn't providing an updated reltuples
+	 * count, because that would bollix the reltuples/relpages ratio which is
+	 * what's really important.
 	 */
 
 	pg_class = heap_open(RelationRelationId, RowExclusiveLock);
@@ -2837,6 +2850,7 @@ IndexBuildHeapRangeScan(Relation heapRelation,
 		{
 			/* heap_getnext did the time qual check */
 			tupleIsAlive = true;
+			reltuples += 1;
 		}
 
 		MemoryContextReset(econtext->ecxt_per_tuple_memory);
@@ -4123,7 +4137,7 @@ RestoreReindexState(void *reindexstate)
 {
 	SerializedReindexState *sistate = (SerializedReindexState *) reindexstate;
 	int			c = 0;
-	MemoryContext	oldcontext;
+	MemoryContext oldcontext;
 
 	currentlyReindexedHeap = sistate->currentlyReindexedHeap;
 	currentlyReindexedIndex = sistate->currentlyReindexedIndex;

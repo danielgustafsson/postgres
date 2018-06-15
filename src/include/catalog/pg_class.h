@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * pg_class.h
- *	  definition of the system "relation" relation (pg_class)
+ *	  definition of the "relation" system catalog (pg_class)
  *
  *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
@@ -67,7 +67,8 @@ CATALOG(pg_class,1259,RelationRelationId) BKI_BOOTSTRAP BKI_ROWTYPE_OID(83,Relat
 	bool		relispopulated; /* matview currently holds query results */
 	char		relreplident;	/* see REPLICA_IDENTITY_xxx constants  */
 	bool		relispartition; /* is relation a partition? */
-	Oid			relrewrite;		/* heap for rewrite during DDL, link to original rel */
+	Oid			relrewrite;		/* heap for rewrite during DDL, link to
+								 * original rel */
 	TransactionId relfrozenxid; /* all Xids < this are frozen in this rel */
 	TransactionId relminmxid;	/* all multixacts in this rel are >= this.
 								 * this is really a MultiXactId */

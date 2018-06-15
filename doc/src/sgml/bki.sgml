@@ -129,19 +129,19 @@
   </para>
 
   <para>
-   Frontend code should not include any <structname>pg_xxx.h</structname>
+   Frontend code should not include any <filename>pg_xxx.h</filename>
    catalog header file, as these files may contain C code that won't compile
    outside the backend.  (Typically, that happens because these files also
    contain declarations for functions
    in <filename>src/backend/catalog/</filename> files.)
    Instead, frontend code may include the corresponding
-   generated <structname>pg_xxx_d.h</structname> header, which will contain
+   generated <filename>pg_xxx_d.h</filename> header, which will contain
    OID <literal>#define</literal>s and any other data that might be of use
    on the client side.  If you want macros or other code in a catalog header
    to be visible to frontend code, write <literal>#ifdef
    EXPOSE_TO_CLIENT_CODE</literal> ... <literal>#endif</literal> around that
    section to instruct <filename>genbki.pl</filename> to copy that section
-   to the <structname>pg_xxx_d.h</structname> header.
+   to the <filename>pg_xxx_d.h</filename> header.
   </para>
 
   <para>
@@ -184,13 +184,11 @@
 <programlisting>
 [
 
-# LC_COLLATE and LC_CTYPE will be replaced at initdb time with user choices
-# that might contain non-word characters, so we must double-quote them.
-
+# A comment could appear here.
 { oid =&gt; '1', oid_symbol =&gt; 'TemplateDbOid',
   descr =&gt; 'database\'s default template',
   datname =&gt; 'template1', datdba =&gt; 'PGUID', encoding =&gt; 'ENCODING',
-  datcollate =&gt; '"LC_COLLATE"', datctype =&gt; '"LC_CTYPE"', datistemplate =&gt; 't',
+  datcollate =&gt; 'LC_COLLATE', datctype =&gt; 'LC_CTYPE', datistemplate =&gt; 't',
   datallowconn =&gt; 't', datconnlimit =&gt; '-1', datlastsysoid =&gt; '0',
   datfrozenxid =&gt; '0', datminmxid =&gt; '1', dattablespace =&gt; '1663',
   datacl =&gt; '_null_' },
@@ -234,25 +232,24 @@
 
     <listitem>
      <para>
-      All values must be single-quoted.  Escape single quotes used within
-      a value with a backslash.  (Backslashes meant as data need not be
-      doubled, however; this follows Perl's rules for simple quoted
-      literals.)
+      All values must be single-quoted.  Escape single quotes used within a
+      value with a backslash.  Backslashes meant as data can, but need not,
+      be doubled; this follows Perl's rules for simple quoted literals.
+      Note that backslashes appearing as data will be treated as escapes by
+      the bootstrap scanner, according to the same rules as for escape string
+      constants (see <xref linkend="sql-syntax-strings-escape"/>); for
+      example <literal>\t</literal> converts to a tab character.  If you
+      actually want a backslash in the final value, you will need to write
+      four of them: Perl strips two, leaving <literal>\\</literal> for the
+      bootstrap scanner to see.
      </para>
     </listitem>
 
     <listitem>
      <para>
       Null values are represented by <literal>_null_</literal>.
-     </para>
-    </listitem>
-
-    <listitem>
-     <para>
-      If a value is a macro to be expanded
-      by <application>initdb</application>, it should also contain double
-      quotes as shown above, unless we know that no special characters can
-      appear within the string that will be substituted.
+      (Note that there is no way to create a value that is just that
+      string.)
      </para>
     </listitem>
 
@@ -387,8 +384,8 @@
     through the catalog headers and <filename>.dat</filename> files
     to see which ones do not appear.  You can also use
     the <filename>duplicate_oids</filename> script to check for mistakes.
-    (That script is run automatically at compile time, and will stop the
-    build if a duplicate is found.)
+    (<filename>genbki.pl</filename> will also detect duplicate OIDs
+    at compile time.)
    </para>
 
    <para>
@@ -419,11 +416,9 @@
       Use of symbolic references is enabled in a particular catalog column
       by attaching <literal>BKI_LOOKUP(<replaceable>lookuprule</replaceable>)</literal>
       to the column's definition, where <replaceable>lookuprule</replaceable>
-      is <structname>pg_am</structname>, <structname>pg_proc</structname>,
-      <structname>pg_operator</structname>,
-      <structname>pg_opclass</structname>,
-      <structname>pg_opfamily</structname>,
-      or <structname>pg_type</structname>.
+      is <literal>pg_am</literal>, <literal>pg_proc</literal>,
+      <literal>pg_operator</literal>, <literal>pg_opclass</literal>,
+      <literal>pg_opfamily</literal>, or <literal>pg_type</literal>.
       <literal>BKI_LOOKUP</literal> can be attached to columns of
       type <type>Oid</type>, <type>regproc</type>, <type>oidvector</type>,
       or <type>Oid[]</type>; in the latter two cases it implies performing a
@@ -601,7 +596,7 @@
         Run the new script:
 <programlisting>
 $ cd src/include/catalog
-$ perl -I ../../backend/catalog  rewrite_dat_with_prokind.pl  pg_proc.dat
+$ perl  rewrite_dat_with_prokind.pl  pg_proc.dat
 </programlisting>
         At this point <filename>pg_proc.dat</filename> has all three
         columns, <structfield>prokind</structfield>,
@@ -759,13 +754,13 @@ $ perl -I ../../backend/catalog  rewrite_dat_with_prokind.pl  pg_proc.dat
 
    <varlistentry>
     <term>
-     <literal>close</literal> <optional><replaceable class="parameter">tablename</replaceable></optional>
+     <literal>close</literal> <replaceable class="parameter">tablename</replaceable>
     </term>
 
     <listitem>
      <para>
-      Close the open table.  The name of the table can be given as a
-      cross-check, but this is not required.
+      Close the open table.  The name of the table must be given as a
+      cross-check.
      </para>
     </listitem>
    </varlistentry>
@@ -789,8 +784,8 @@ $ perl -I ../../backend/catalog  rewrite_dat_with_prokind.pl  pg_proc.dat
 
      <para>
       NULL values can be specified using the special key word
-      <literal>_null_</literal>.  Values containing spaces must be
-      double quoted.
+      <literal>_null_</literal>.  Values that do not look like
+      identifiers or digit strings must be double quoted.
      </para>
     </listitem>
    </varlistentry>

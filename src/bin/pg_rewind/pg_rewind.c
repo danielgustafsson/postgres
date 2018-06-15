@@ -186,16 +186,6 @@ main(int argc, char **argv)
 		exit(1);
 	}
 
-	/* Set mask based on PGDATA permissions */
-	if (!GetDataDirectoryCreatePerm(datadir_target))
-	{
-		fprintf(stderr, _("%s: unable to read permissions from \"%s\"\n"),
-				progname, datadir_target);
-		exit(1);
-	}
-
-	umask(pg_mode_mask);
-
 	/*
 	 * Don't allow pg_rewind to be run as root, to avoid overwriting the
 	 * ownership of files in the data directory. We need only check for root
@@ -208,10 +198,21 @@ main(int argc, char **argv)
 		fprintf(stderr, _("cannot be executed by \"root\"\n"));
 		fprintf(stderr, _("You must run %s as the PostgreSQL superuser.\n"),
 				progname);
+		exit(1);
 	}
 #endif
 
 	get_restricted_token(progname);
+
+	/* Set mask based on PGDATA permissions */
+	if (!GetDataDirectoryCreatePerm(datadir_target))
+	{
+		fprintf(stderr, _("%s: could not read permissions of directory \"%s\": %s\n"),
+				progname, datadir_target, strerror(errno));
+		exit(1);
+	}
+
+	umask(pg_mode_mask);
 
 	/* Connect to remote server */
 	if (connstr_source)
@@ -647,7 +648,9 @@ digestControlFile(ControlFileData *ControlFile, char *src, size_t size)
 	WalSegSz = ControlFile->xlog_seg_size;
 
 	if (!IsValidWalSegSize(WalSegSz))
-		pg_fatal("WAL segment size must be a power of two between 1MB and 1GB, but the control file specifies %d bytes\n",
+		pg_fatal(ngettext("WAL segment size must be a power of two between 1 MB and 1 GB, but the control file specifies %d byte\n",
+						  "WAL segment size must be a power of two between 1 MB and 1 GB, but the control file specifies %d bytes\n",
+						  WalSegSz),
 				 WalSegSz);
 
 	/* Additional checks on control file */

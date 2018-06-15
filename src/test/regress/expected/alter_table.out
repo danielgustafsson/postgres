@@ -1844,7 +1844,7 @@ select * from foo;
 (1 row)
 
 drop domain mytype cascade;
-NOTICE:  drop cascades to table foo column f2
+NOTICE:  drop cascades to column f2 of table foo
 select * from foo;
  f1 | f3 
 ----+----
@@ -2680,11 +2680,11 @@ drop cascades to operator family alter2.ctype_hash_ops for access method hash
 drop cascades to type alter2.ctype
 drop cascades to function alter2.same(alter2.ctype,alter2.ctype)
 drop cascades to operator alter2.=(alter2.ctype,alter2.ctype)
-drop cascades to conversion ascii_to_utf8
-drop cascades to text search parser prs
-drop cascades to text search configuration cfg
-drop cascades to text search template tmpl
-drop cascades to text search dictionary dict
+drop cascades to conversion alter2.ascii_to_utf8
+drop cascades to text search parser alter2.prs
+drop cascades to text search configuration alter2.cfg
+drop cascades to text search template alter2.tmpl
+drop cascades to text search dictionary alter2.dict
 --
 -- composite types
 --
@@ -2870,8 +2870,8 @@ DROP TABLE test_tbl2_subclass;
 CREATE TYPE test_typex AS (a int, b text);
 CREATE TABLE test_tblx (x int, y test_typex check ((y).a > 0));
 ALTER TYPE test_typex DROP ATTRIBUTE a; -- fails
-ERROR:  cannot drop composite type test_typex column a because other objects depend on it
-DETAIL:  constraint test_tblx_y_check on table test_tblx depends on composite type test_typex column a
+ERROR:  cannot drop column a of composite type test_typex because other objects depend on it
+DETAIL:  constraint test_tblx_y_check on table test_tblx depends on column a of composite type test_typex
 HINT:  Use DROP ... CASCADE to drop the dependent objects too.
 ALTER TYPE test_typex DROP ATTRIBUTE a CASCADE;
 NOTICE:  drop cascades to constraint test_tblx_y_check on table test_tblx
@@ -3662,20 +3662,13 @@ CREATE TABLE quuux2 PARTITION OF quuux FOR VALUES IN (2);
 INFO:  updated partition constraint for default partition "quuux_default1" is implied by existing constraints
 DROP TABLE quuux;
 -- check validation when attaching hash partitions
--- The default hash functions as they exist today aren't portable; they can
--- return different results on different machines.  Depending upon how the
--- values are hashed, the row may map to different partitions, which result in
--- regression failure.  To avoid this, let's create a non-default hash function
--- that just returns the input value unchanged.
-CREATE OR REPLACE FUNCTION dummy_hashint4(a int4, seed int8) RETURNS int8 AS
-$$ BEGIN RETURN (a + 1 + seed); END; $$ LANGUAGE 'plpgsql' IMMUTABLE;
-CREATE OPERATOR CLASS custom_opclass FOR TYPE int4 USING HASH AS
-OPERATOR 1 = , FUNCTION 2 dummy_hashint4(int4, int8);
+-- Use hand-rolled hash functions and operator class to get predictable result
+-- on different matchines. part_test_int4_ops is defined in insert.sql.
 -- check that the new partition won't overlap with an existing partition
 CREATE TABLE hash_parted (
 	a int,
 	b int
-) PARTITION BY HASH (a custom_opclass);
+) PARTITION BY HASH (a part_test_int4_ops);
 CREATE TABLE hpart_1 PARTITION OF hash_parted FOR VALUES WITH (MODULUS 4, REMAINDER 0);
 CREATE TABLE fail_part (LIKE hpart_1);
 ALTER TABLE hash_parted ATTACH PARTITION fail_part FOR VALUES WITH (MODULUS 8, REMAINDER 4);
@@ -3840,8 +3833,6 @@ SELECT * FROM list_parted;
 DROP TABLE list_parted, list_parted2, range_parted;
 DROP TABLE fail_def_part;
 DROP TABLE hash_parted;
-DROP OPERATOR CLASS custom_opclass USING HASH;
-DROP FUNCTION dummy_hashint4(a int4, seed int8);
 -- more tests for certain multi-level partitioning scenarios
 create table p (a int, b int) partition by range (a, b);
 create table p1 (b int, a int not null) partition by range (b);
@@ -3887,3 +3878,19 @@ ALTER TABLE attmp ALTER COLUMN i RESET (n_distinct_inherited);
 ANALYZE attmp;
 DROP TABLE attmp;
 DROP USER regress_alter_table_user1;
+-- check that violating rows are correctly reported when attaching as the
+-- default partition
+create table defpart_attach_test (a int) partition by list (a);
+create table defpart_attach_test1 partition of defpart_attach_test for values in (1);
+create table defpart_attach_test_d (like defpart_attach_test);
+insert into defpart_attach_test_d values (1), (2);
+-- error because its constraint as the default partition would be violated
+-- by the row containing 1
+alter table defpart_attach_test attach partition defpart_attach_test_d default;
+ERROR:  partition constraint is violated by some row
+delete from defpart_attach_test_d where a = 1;
+alter table defpart_attach_test_d add check (a > 1);
+-- should be attached successfully and without needing to be scanned
+alter table defpart_attach_test attach partition defpart_attach_test_d default;
+INFO:  partition constraint for table "defpart_attach_test_d" is implied by existing constraints
+drop table defpart_attach_test;

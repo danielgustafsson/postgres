@@ -2062,8 +2062,8 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * get_object_address is pretty sensitive to the length its input lists;
-	 * check that they're what it wants.
+	 * get_object_address is pretty sensitive to the length of its input
+	 * lists; check that they're what it wants.
 	 */
 	switch (type)
 	{
@@ -2092,6 +2092,7 @@ pg_get_object_address(PG_FUNCTION_ARGS)
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("name list length must be at least %d", 3)));
 			/* fall through to check args length */
+			/* FALLTHROUGH */
 		case OBJECT_OPERATOR:
 			if (list_length(args) != 2)
 				ereport(ERROR,
@@ -2680,12 +2681,23 @@ getObjectDescription(const ObjectAddress *object)
 	switch (getObjectClass(object))
 	{
 		case OCLASS_CLASS:
-			getRelationDescription(&buffer, object->objectId);
-			if (object->objectSubId != 0)
-				appendStringInfo(&buffer, _(" column %s"),
+			if (object->objectSubId == 0)
+				getRelationDescription(&buffer, object->objectId);
+			else
+			{
+				/* column, not whole relation */
+				StringInfoData rel;
+
+				initStringInfo(&rel);
+				getRelationDescription(&rel, object->objectId);
+				/* translator: second %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("column %s of %s"),
 								 get_attname(object->objectId,
 											 object->objectSubId,
-											 false));
+											 false),
+								 rel.data);
+				pfree(rel.data);
+			}
 			break;
 
 		case OCLASS_PROC:
@@ -2737,6 +2749,7 @@ getObjectDescription(const ObjectAddress *object)
 			{
 				HeapTuple	collTup;
 				Form_pg_collation coll;
+				char	   *nspname;
 
 				collTup = SearchSysCache1(COLLOID,
 										  ObjectIdGetDatum(object->objectId));
@@ -2744,8 +2757,16 @@ getObjectDescription(const ObjectAddress *object)
 					elog(ERROR, "cache lookup failed for collation %u",
 						 object->objectId);
 				coll = (Form_pg_collation) GETSTRUCT(collTup);
+
+				/* Qualify the name if not visible in search path */
+				if (CollationIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(coll->collnamespace);
+
 				appendStringInfo(&buffer, _("collation %s"),
-								 NameStr(coll->collname));
+								 quote_qualified_identifier(nspname,
+															NameStr(coll->collname)));
 				ReleaseSysCache(collTup);
 				break;
 			}
@@ -2768,6 +2789,7 @@ getObjectDescription(const ObjectAddress *object)
 
 					initStringInfo(&rel);
 					getRelationDescription(&rel, con->conrelid);
+					/* translator: second %s is, e.g., "table %s" */
 					appendStringInfo(&buffer, _("constraint %s on %s"),
 									 NameStr(con->conname), rel.data);
 					pfree(rel.data);
@@ -2785,14 +2807,25 @@ getObjectDescription(const ObjectAddress *object)
 		case OCLASS_CONVERSION:
 			{
 				HeapTuple	conTup;
+				Form_pg_conversion conv;
+				char	   *nspname;
 
 				conTup = SearchSysCache1(CONVOID,
 										 ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(conTup))
 					elog(ERROR, "cache lookup failed for conversion %u",
 						 object->objectId);
+				conv = (Form_pg_conversion) GETSTRUCT(conTup);
+
+				/* Qualify the name if not visible in search path */
+				if (ConversionIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(conv->connamespace);
+
 				appendStringInfo(&buffer, _("conversion %s"),
-								 NameStr(((Form_pg_conversion) GETSTRUCT(conTup))->conname));
+								 quote_qualified_identifier(nspname,
+															NameStr(conv->conname)));
 				ReleaseSysCache(conTup);
 				break;
 			}
@@ -2828,7 +2861,8 @@ getObjectDescription(const ObjectAddress *object)
 				colobject.objectId = attrdef->adrelid;
 				colobject.objectSubId = attrdef->adnum;
 
-				appendStringInfo(&buffer, _("default for %s"),
+				/* translator: %s is typically "column %s of table %s" */
+				appendStringInfo(&buffer, _("default value for %s"),
 								 getObjectDescription(&colobject));
 
 				systable_endscan(adscan);
@@ -3015,6 +3049,7 @@ getObjectDescription(const ObjectAddress *object)
 				SysScanDesc rcscan;
 				HeapTuple	tup;
 				Form_pg_rewrite rule;
+				StringInfoData rel;
 
 				ruleDesc = heap_open(RewriteRelationId, AccessShareLock);
 
@@ -3031,13 +3066,15 @@ getObjectDescription(const ObjectAddress *object)
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "could not find tuple for rule %u",
 						 object->objectId);
-
 				rule = (Form_pg_rewrite) GETSTRUCT(tup);
 
-				appendStringInfo(&buffer, _("rule %s on "),
-								 NameStr(rule->rulename));
-				getRelationDescription(&buffer, rule->ev_class);
+				initStringInfo(&rel);
+				getRelationDescription(&rel, rule->ev_class);
 
+				/* translator: second %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("rule %s on %s"),
+								 NameStr(rule->rulename), rel.data);
+				pfree(rel.data);
 				systable_endscan(rcscan);
 				heap_close(ruleDesc, AccessShareLock);
 				break;
@@ -3050,6 +3087,7 @@ getObjectDescription(const ObjectAddress *object)
 				SysScanDesc tgscan;
 				HeapTuple	tup;
 				Form_pg_trigger trig;
+				StringInfoData rel;
 
 				trigDesc = heap_open(TriggerRelationId, AccessShareLock);
 
@@ -3066,13 +3104,15 @@ getObjectDescription(const ObjectAddress *object)
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "could not find tuple for trigger %u",
 						 object->objectId);
-
 				trig = (Form_pg_trigger) GETSTRUCT(tup);
 
-				appendStringInfo(&buffer, _("trigger %s on "),
-								 NameStr(trig->tgname));
-				getRelationDescription(&buffer, trig->tgrelid);
+				initStringInfo(&rel);
+				getRelationDescription(&rel, trig->tgrelid);
 
+				/* translator: second %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("trigger %s on %s"),
+								 NameStr(trig->tgname), rel.data);
+				pfree(rel.data);
 				systable_endscan(tgscan);
 				heap_close(trigDesc, AccessShareLock);
 				break;
@@ -3094,17 +3134,24 @@ getObjectDescription(const ObjectAddress *object)
 			{
 				HeapTuple	stxTup;
 				Form_pg_statistic_ext stxForm;
+				char	   *nspname;
 
 				stxTup = SearchSysCache1(STATEXTOID,
 										 ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(stxTup))
 					elog(ERROR, "could not find tuple for statistics object %u",
 						 object->objectId);
-
 				stxForm = (Form_pg_statistic_ext) GETSTRUCT(stxTup);
 
+				/* Qualify the name if not visible in search path */
+				if (StatisticsObjIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(stxForm->stxnamespace);
+
 				appendStringInfo(&buffer, _("statistics object %s"),
-								 NameStr(stxForm->stxname));
+								 quote_qualified_identifier(nspname,
+															NameStr(stxForm->stxname)));
 
 				ReleaseSysCache(stxTup);
 				break;
@@ -3113,14 +3160,25 @@ getObjectDescription(const ObjectAddress *object)
 		case OCLASS_TSPARSER:
 			{
 				HeapTuple	tup;
+				Form_pg_ts_parser prsForm;
+				char	   *nspname;
 
 				tup = SearchSysCache1(TSPARSEROID,
 									  ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for text search parser %u",
 						 object->objectId);
+				prsForm = (Form_pg_ts_parser) GETSTRUCT(tup);
+
+				/* Qualify the name if not visible in search path */
+				if (TSParserIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(prsForm->prsnamespace);
+
 				appendStringInfo(&buffer, _("text search parser %s"),
-								 NameStr(((Form_pg_ts_parser) GETSTRUCT(tup))->prsname));
+								 quote_qualified_identifier(nspname,
+															NameStr(prsForm->prsname)));
 				ReleaseSysCache(tup);
 				break;
 			}
@@ -3128,14 +3186,25 @@ getObjectDescription(const ObjectAddress *object)
 		case OCLASS_TSDICT:
 			{
 				HeapTuple	tup;
+				Form_pg_ts_dict dictForm;
+				char	   *nspname;
 
 				tup = SearchSysCache1(TSDICTOID,
 									  ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for text search dictionary %u",
 						 object->objectId);
+				dictForm = (Form_pg_ts_dict) GETSTRUCT(tup);
+
+				/* Qualify the name if not visible in search path */
+				if (TSDictionaryIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(dictForm->dictnamespace);
+
 				appendStringInfo(&buffer, _("text search dictionary %s"),
-								 NameStr(((Form_pg_ts_dict) GETSTRUCT(tup))->dictname));
+								 quote_qualified_identifier(nspname,
+															NameStr(dictForm->dictname)));
 				ReleaseSysCache(tup);
 				break;
 			}
@@ -3143,14 +3212,25 @@ getObjectDescription(const ObjectAddress *object)
 		case OCLASS_TSTEMPLATE:
 			{
 				HeapTuple	tup;
+				Form_pg_ts_template tmplForm;
+				char	   *nspname;
 
 				tup = SearchSysCache1(TSTEMPLATEOID,
 									  ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for text search template %u",
 						 object->objectId);
+				tmplForm = (Form_pg_ts_template) GETSTRUCT(tup);
+
+				/* Qualify the name if not visible in search path */
+				if (TSTemplateIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(tmplForm->tmplnamespace);
+
 				appendStringInfo(&buffer, _("text search template %s"),
-								 NameStr(((Form_pg_ts_template) GETSTRUCT(tup))->tmplname));
+								 quote_qualified_identifier(nspname,
+															NameStr(tmplForm->tmplname)));
 				ReleaseSysCache(tup);
 				break;
 			}
@@ -3158,14 +3238,25 @@ getObjectDescription(const ObjectAddress *object)
 		case OCLASS_TSCONFIG:
 			{
 				HeapTuple	tup;
+				Form_pg_ts_config cfgForm;
+				char	   *nspname;
 
 				tup = SearchSysCache1(TSCONFIGOID,
 									  ObjectIdGetDatum(object->objectId));
 				if (!HeapTupleIsValid(tup))
 					elog(ERROR, "cache lookup failed for text search configuration %u",
 						 object->objectId);
+				cfgForm = (Form_pg_ts_config) GETSTRUCT(tup);
+
+				/* Qualify the name if not visible in search path */
+				if (TSConfigIsVisible(object->objectId))
+					nspname = NULL;
+				else
+					nspname = get_namespace_name(cfgForm->cfgnamespace);
+
 				appendStringInfo(&buffer, _("text search configuration %s"),
-								 NameStr(((Form_pg_ts_config) GETSTRUCT(tup))->cfgname));
+								 quote_qualified_identifier(nspname,
+															NameStr(cfgForm->cfgname)));
 				ReleaseSysCache(tup);
 				break;
 			}
@@ -3255,6 +3346,8 @@ getObjectDescription(const ObjectAddress *object)
 				SysScanDesc rcscan;
 				HeapTuple	tup;
 				Form_pg_default_acl defacl;
+				char	   *rolename;
+				char	   *nspname;
 
 				defaclrel = heap_open(DefaultAclRelationId, AccessShareLock);
 
@@ -3274,46 +3367,72 @@ getObjectDescription(const ObjectAddress *object)
 
 				defacl = (Form_pg_default_acl) GETSTRUCT(tup);
 
+				rolename = GetUserNameFromId(defacl->defaclrole, false);
+
+				if (OidIsValid(defacl->defaclnamespace))
+					nspname = get_namespace_name(defacl->defaclnamespace);
+				else
+					nspname = NULL;
+
 				switch (defacl->defaclobjtype)
 				{
 					case DEFACLOBJ_RELATION:
-						appendStringInfo(&buffer,
-										 _("default privileges on new relations belonging to role %s"),
-										 GetUserNameFromId(defacl->defaclrole, false));
+						if (nspname)
+							appendStringInfo(&buffer,
+											 _("default privileges on new relations belonging to role %s in schema %s"),
+											 rolename, nspname);
+						else
+							appendStringInfo(&buffer,
+											 _("default privileges on new relations belonging to role %s"),
+											 rolename);
 						break;
 					case DEFACLOBJ_SEQUENCE:
-						appendStringInfo(&buffer,
-										 _("default privileges on new sequences belonging to role %s"),
-										 GetUserNameFromId(defacl->defaclrole, false));
+						if (nspname)
+							appendStringInfo(&buffer,
+											 _("default privileges on new sequences belonging to role %s in schema %s"),
+											 rolename, nspname);
+						else
+							appendStringInfo(&buffer,
+											 _("default privileges on new sequences belonging to role %s"),
+											 rolename);
 						break;
 					case DEFACLOBJ_FUNCTION:
-						appendStringInfo(&buffer,
-										 _("default privileges on new functions belonging to role %s"),
-										 GetUserNameFromId(defacl->defaclrole, false));
+						if (nspname)
+							appendStringInfo(&buffer,
+											 _("default privileges on new functions belonging to role %s in schema %s"),
+											 rolename, nspname);
+						else
+							appendStringInfo(&buffer,
+											 _("default privileges on new functions belonging to role %s"),
+											 rolename);
 						break;
 					case DEFACLOBJ_TYPE:
-						appendStringInfo(&buffer,
-										 _("default privileges on new types belonging to role %s"),
-										 GetUserNameFromId(defacl->defaclrole, false));
+						if (nspname)
+							appendStringInfo(&buffer,
+											 _("default privileges on new types belonging to role %s in schema %s"),
+											 rolename, nspname);
+						else
+							appendStringInfo(&buffer,
+											 _("default privileges on new types belonging to role %s"),
+											 rolename);
 						break;
 					case DEFACLOBJ_NAMESPACE:
+						Assert(!nspname);
 						appendStringInfo(&buffer,
 										 _("default privileges on new schemas belonging to role %s"),
-										 GetUserNameFromId(defacl->defaclrole, false));
+										 rolename);
 						break;
 					default:
 						/* shouldn't get here */
-						appendStringInfo(&buffer,
-										 _("default privileges belonging to role %s"),
-										 GetUserNameFromId(defacl->defaclrole, false));
+						if (nspname)
+							appendStringInfo(&buffer,
+											 _("default privileges belonging to role %s in schema %s"),
+											 rolename, nspname);
+						else
+							appendStringInfo(&buffer,
+											 _("default privileges belonging to role %s"),
+											 rolename);
 						break;
-				}
-
-				if (OidIsValid(defacl->defaclnamespace))
-				{
-					appendStringInfo(&buffer,
-									 _(" in schema %s"),
-									 get_namespace_name(defacl->defaclnamespace));
 				}
 
 				systable_endscan(rcscan);
@@ -3355,6 +3474,7 @@ getObjectDescription(const ObjectAddress *object)
 				SysScanDesc sscan;
 				HeapTuple	tuple;
 				Form_pg_policy form_policy;
+				StringInfoData rel;
 
 				policy_rel = heap_open(PolicyRelationId, AccessShareLock);
 
@@ -3371,13 +3491,15 @@ getObjectDescription(const ObjectAddress *object)
 				if (!HeapTupleIsValid(tuple))
 					elog(ERROR, "could not find tuple for policy %u",
 						 object->objectId);
-
 				form_policy = (Form_pg_policy) GETSTRUCT(tuple);
 
-				appendStringInfo(&buffer, _("policy %s on "),
-								 NameStr(form_policy->polname));
-				getRelationDescription(&buffer, form_policy->polrelid);
+				initStringInfo(&rel);
+				getRelationDescription(&rel, form_policy->polrelid);
 
+				/* translator: second %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("policy %s on %s"),
+								 NameStr(form_policy->polname), rel.data);
+				pfree(rel.data);
 				systable_endscan(sscan);
 				heap_close(policy_rel, AccessShareLock);
 				break;
@@ -3395,6 +3517,7 @@ getObjectDescription(const ObjectAddress *object)
 				HeapTuple	tup;
 				char	   *pubname;
 				Form_pg_publication_rel prform;
+				StringInfoData rel;
 
 				tup = SearchSysCache1(PUBLICATIONREL,
 									  ObjectIdGetDatum(object->objectId));
@@ -3405,8 +3528,13 @@ getObjectDescription(const ObjectAddress *object)
 				prform = (Form_pg_publication_rel) GETSTRUCT(tup);
 				pubname = get_publication_name(prform->prpubid);
 
-				appendStringInfo(&buffer, _("publication table %s in publication %s"),
-								 get_rel_name(prform->prrelid), pubname);
+				initStringInfo(&rel);
+				getRelationDescription(&rel, prform->prrelid);
+
+				/* translator: first %s is, e.g., "table %s" */
+				appendStringInfo(&buffer, _("publication of %s in publication %s"),
+								 rel.data, pubname);
+				pfree(rel.data);
 				ReleaseSysCache(tup);
 				break;
 			}
@@ -3465,6 +3593,8 @@ getObjectDescriptionOids(Oid classid, Oid objid)
 
 /*
  * subroutine for getObjectDescription: describe a relation
+ *
+ * The result is appended to "buffer".
  */
 static void
 getRelationDescription(StringInfo buffer, Oid relid)
@@ -4935,14 +5065,11 @@ getObjectIdentityParts(const ObjectAddress *object,
 				prform = (Form_pg_publication_rel) GETSTRUCT(tup);
 				pubname = get_publication_name(prform->prpubid);
 
-				appendStringInfo(&buffer, _("%s in publication %s"),
-								 get_rel_name(prform->prrelid), pubname);
+				getRelationIdentity(&buffer, prform->prrelid, objname);
+				appendStringInfo(&buffer, " in publication %s", pubname);
 
-				if (objname)
-				{
-					getRelationIdentity(&buffer, prform->prrelid, objname);
+				if (objargs)
 					*objargs = list_make1(pubname);
-				}
 
 				ReleaseSysCache(tup);
 				break;
@@ -5130,7 +5257,11 @@ get_relkind_objtype(char relkind)
 			return OBJECT_MATVIEW;
 		case RELKIND_FOREIGN_TABLE:
 			return OBJECT_FOREIGN_TABLE;
-		/* other relkinds are not supported here because they don't map to OBJECT_* values */
+
+			/*
+			 * other relkinds are not supported here because they don't map to
+			 * OBJECT_* values
+			 */
 		default:
 			elog(ERROR, "unexpected relkind: %d", relkind);
 			return 0;

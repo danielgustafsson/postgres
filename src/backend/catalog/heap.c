@@ -77,6 +77,7 @@
 #include "utils/fmgroids.h"
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
+#include "utils/partcache.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
@@ -3405,7 +3406,7 @@ RemovePartitionKeyByRelId(Oid relid)
  * pg_partitioned_table.
  *
  * Also, invalidate the parent's relcache, so that the next rebuild will load
- * the new partition's info into its partition descriptor.  If there is a
+ * the new partition's info into its partition descriptor.  If there is a
  * default partition, we must invalidate its relcache entry as well.
  */
 void

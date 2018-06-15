@@ -3248,7 +3248,6 @@ l1:
 			   result == HeapTupleUpdated ||
 			   result == HeapTupleBeingUpdated);
 		Assert(!(tp.t_data->t_infomask & HEAP_XMAX_INVALID));
-		hufd->result = result;
 		hufd->ctid = tp.t_data->t_ctid;
 		hufd->xmax = HeapTupleHeaderGetUpdateXid(tp.t_data);
 		if (result == HeapTupleSelfUpdated)
@@ -3461,7 +3460,7 @@ simple_heap_delete(Relation relation, ItemPointer tid)
 	result = heap_delete(relation, tid,
 						 GetCurrentCommandId(true), InvalidSnapshot,
 						 true /* wait for commit */ ,
-						 &hufd, false /* changingPart */);
+						 &hufd, false /* changingPart */ );
 	switch (result)
 	{
 		case HeapTupleSelfUpdated:
@@ -3519,7 +3518,7 @@ simple_heap_delete(Relation relation, ItemPointer tid)
 HTSU_Result
 heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 			CommandId cid, Snapshot crosscheck, bool wait,
-			HeapUpdateFailureData *hufd)
+			HeapUpdateFailureData *hufd, LockTupleMode *lockmode)
 {
 	HTSU_Result result;
 	TransactionId xid = GetCurrentTransactionId();
@@ -3559,10 +3558,8 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 				infomask2_old_tuple,
 				infomask_new_tuple,
 				infomask2_new_tuple;
-	LockTupleMode	lockmode;
 
 	Assert(ItemPointerIsValid(otid));
-	Assert(hufd != NULL);
 
 	/*
 	 * Forbid this during a parallel operation, lest it allocate a combocid.
@@ -3678,7 +3675,7 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	 */
 	if (!bms_overlap(modified_attrs, key_attrs))
 	{
-		lockmode = hufd->lockmode = LockTupleNoKeyExclusive;
+		*lockmode = LockTupleNoKeyExclusive;
 		mxact_status = MultiXactStatusNoKeyUpdate;
 		key_intact = true;
 
@@ -3695,7 +3692,7 @@ heap_update(Relation relation, ItemPointer otid, HeapTuple newtup,
 	}
 	else
 	{
-		lockmode = hufd->lockmode = LockTupleExclusive;
+		*lockmode = LockTupleExclusive;
 		mxact_status = MultiXactStatusUpdate;
 		key_intact = false;
 	}
@@ -3773,12 +3770,12 @@ l2:
 			int			remain;
 
 			if (DoesMultiXactIdConflict((MultiXactId) xwait, infomask,
-										lockmode))
+										*lockmode))
 			{
 				LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
 
 				/* acquire tuple lock, if necessary */
-				heap_acquire_tuplock(relation, &(oldtup.t_self), lockmode,
+				heap_acquire_tuplock(relation, &(oldtup.t_self), *lockmode,
 									 LockWaitBlock, &have_tuple_lock);
 
 				/* wait for multixact */
@@ -3862,7 +3859,7 @@ l2:
 			 * lock.
 			 */
 			LockBuffer(buffer, BUFFER_LOCK_UNLOCK);
-			heap_acquire_tuplock(relation, &(oldtup.t_self), lockmode,
+			heap_acquire_tuplock(relation, &(oldtup.t_self), *lockmode,
 								 LockWaitBlock, &have_tuple_lock);
 			XactLockTableWait(xwait, relation, &oldtup.t_self,
 							  XLTW_Update);
@@ -3901,7 +3898,6 @@ l2:
 			   result == HeapTupleUpdated ||
 			   result == HeapTupleBeingUpdated);
 		Assert(!(oldtup.t_data->t_infomask & HEAP_XMAX_INVALID));
-		hufd->result = result;
 		hufd->ctid = oldtup.t_data->t_ctid;
 		hufd->xmax = HeapTupleHeaderGetUpdateXid(oldtup.t_data);
 		if (result == HeapTupleSelfUpdated)
@@ -3910,7 +3906,7 @@ l2:
 			hufd->cmax = InvalidCommandId;
 		UnlockReleaseBuffer(buffer);
 		if (have_tuple_lock)
-			UnlockTupleTuplock(relation, &(oldtup.t_self), lockmode);
+			UnlockTupleTuplock(relation, &(oldtup.t_self), *lockmode);
 		if (vmbuffer != InvalidBuffer)
 			ReleaseBuffer(vmbuffer);
 		bms_free(hot_attrs);
@@ -3948,7 +3944,7 @@ l2:
 	compute_new_xmax_infomask(HeapTupleHeaderGetRawXmax(oldtup.t_data),
 							  oldtup.t_data->t_infomask,
 							  oldtup.t_data->t_infomask2,
-							  xid, lockmode, true,
+							  xid, *lockmode, true,
 							  &xmax_old_tuple, &infomask_old_tuple,
 							  &infomask2_old_tuple);
 
@@ -4065,7 +4061,7 @@ l2:
 		compute_new_xmax_infomask(HeapTupleHeaderGetRawXmax(oldtup.t_data),
 								  oldtup.t_data->t_infomask,
 								  oldtup.t_data->t_infomask2,
-								  xid, lockmode, false,
+								  xid, *lockmode, false,
 								  &xmax_lock_old_tuple, &infomask_lock_old_tuple,
 								  &infomask2_lock_old_tuple);
 
@@ -4377,7 +4373,7 @@ l2:
 	 * Release the lmgr tuple lock, if we had it.
 	 */
 	if (have_tuple_lock)
-		UnlockTupleTuplock(relation, &(oldtup.t_self), lockmode);
+		UnlockTupleTuplock(relation, &(oldtup.t_self), *lockmode);
 
 	pgstat_count_heap_update(relation, use_hot_update);
 
@@ -4487,29 +4483,31 @@ heap_tuple_attr_equals(TupleDesc tupdesc, int attrnum,
  * functional index. Compare the new and old values of the indexed
  * expression to see if we are able to use a HOT update or not.
  */
-static bool ProjIndexIsUnchanged(Relation relation, HeapTuple oldtup, HeapTuple newtup)
+static bool
+ProjIndexIsUnchanged(Relation relation, HeapTuple oldtup, HeapTuple newtup)
 {
-	ListCell       *l;
-	List	       *indexoidlist = RelationGetIndexList(relation);
-	EState         *estate = CreateExecutorState();
-	ExprContext    *econtext = GetPerTupleExprContext(estate);
+	ListCell   *l;
+	List	   *indexoidlist = RelationGetIndexList(relation);
+	EState	   *estate = CreateExecutorState();
+	ExprContext *econtext = GetPerTupleExprContext(estate);
 	TupleTableSlot *slot = MakeSingleTupleTableSlot(RelationGetDescr(relation));
-	bool            equals = true;
-	Datum	   	    old_values[INDEX_MAX_KEYS];
-	bool		    old_isnull[INDEX_MAX_KEYS];
-	Datum	   	    new_values[INDEX_MAX_KEYS];
-	bool		    new_isnull[INDEX_MAX_KEYS];
-	int             indexno = 0;
+	bool		equals = true;
+	Datum		old_values[INDEX_MAX_KEYS];
+	bool		old_isnull[INDEX_MAX_KEYS];
+	Datum		new_values[INDEX_MAX_KEYS];
+	bool		new_isnull[INDEX_MAX_KEYS];
+	int			indexno = 0;
+
 	econtext->ecxt_scantuple = slot;
 
 	foreach(l, indexoidlist)
 	{
 		if (bms_is_member(indexno, relation->rd_projidx))
 		{
-			Oid		    indexOid = lfirst_oid(l);
-			Relation    indexDesc = index_open(indexOid, AccessShareLock);
+			Oid			indexOid = lfirst_oid(l);
+			Relation	indexDesc = index_open(indexOid, AccessShareLock);
 			IndexInfo  *indexInfo = BuildIndexInfo(indexDesc);
-			int         i;
+			int			i;
 
 			ResetExprContext(econtext);
 			ExecStoreTuple(oldtup, slot, InvalidBuffer, false);
@@ -4536,6 +4534,7 @@ static bool ProjIndexIsUnchanged(Relation relation, HeapTuple oldtup, HeapTuple 
 				else if (!old_isnull[i])
 				{
 					Form_pg_attribute att = TupleDescAttr(RelationGetDescr(indexDesc), i);
+
 					if (!datumIsEqual(old_values[i], new_values[i], att->attbyval, att->attlen))
 					{
 						equals = false;
@@ -4601,11 +4600,12 @@ simple_heap_update(Relation relation, ItemPointer otid, HeapTuple tup)
 {
 	HTSU_Result result;
 	HeapUpdateFailureData hufd;
+	LockTupleMode lockmode;
 
 	result = heap_update(relation, otid, tup,
 						 GetCurrentCommandId(true), InvalidSnapshot,
 						 true /* wait for commit */ ,
-						 &hufd);
+						 &hufd, &lockmode);
 	switch (result)
 	{
 		case HeapTupleSelfUpdated:
@@ -5191,7 +5191,6 @@ failed:
 		Assert(result == HeapTupleSelfUpdated || result == HeapTupleUpdated ||
 			   result == HeapTupleWouldBlock);
 		Assert(!(tuple->t_data->t_infomask & HEAP_XMAX_INVALID));
-		hufd->result = result;
 		hufd->ctid = tuple->t_data->t_ctid;
 		hufd->xmax = HeapTupleHeaderGetUpdateXid(tuple->t_data);
 		if (result == HeapTupleSelfUpdated)
@@ -6537,8 +6536,8 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 		/*
 		 * This old multi cannot possibly have members still running, but
 		 * verify just in case.  If it was a locker only, it can be removed
-		 * without any further consideration; but if it contained an update, we
-		 * might need to preserve it.
+		 * without any further consideration; but if it contained an update,
+		 * we might need to preserve it.
 		 */
 		if (MultiXactIdIsRunning(multi,
 								 HEAP_XMAX_IS_LOCKED_ONLY(t_infomask)))
@@ -6685,8 +6684,8 @@ FreezeMultiXactId(MultiXactId multi, uint16 t_infomask,
 			else
 			{
 				/*
-				 * Not in progress, not committed -- must be aborted or crashed;
-				 * we can ignore it.
+				 * Not in progress, not committed -- must be aborted or
+				 * crashed; we can ignore it.
 				 */
 			}
 
@@ -6804,9 +6803,10 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 						  xl_heap_freeze_tuple *frz, bool *totally_frozen_p)
 {
 	bool		changed = false;
-	bool		freeze_xmax = false;
+	bool		xmax_already_frozen = false;
+	bool		xmin_frozen;
+	bool		freeze_xmax;
 	TransactionId xid;
-	bool		totally_frozen = true;
 
 	frz->frzflags = 0;
 	frz->t_infomask2 = tuple->t_infomask2;
@@ -6815,6 +6815,8 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 
 	/* Process xmin */
 	xid = HeapTupleHeaderGetXmin(tuple);
+	xmin_frozen = ((xid == FrozenTransactionId) ||
+				   HeapTupleHeaderXminFrozen(tuple));
 	if (TransactionIdIsNormal(xid))
 	{
 		if (TransactionIdPrecedes(xid, relfrozenxid))
@@ -6833,9 +6835,8 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 
 			frz->t_infomask |= HEAP_XMIN_FROZEN;
 			changed = true;
+			xmin_frozen = true;
 		}
-		else
-			totally_frozen = false;
 	}
 
 	/*
@@ -6858,9 +6859,9 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 									relfrozenxid, relminmxid,
 									cutoff_xid, cutoff_multi, &flags);
 
-		if (flags & FRM_INVALIDATE_XMAX)
-			freeze_xmax = true;
-		else if (flags & FRM_RETURN_IS_XID)
+		freeze_xmax = (flags & FRM_INVALIDATE_XMAX);
+
+		if (flags & FRM_RETURN_IS_XID)
 		{
 			/*
 			 * NB -- some of these transformations are only valid because we
@@ -6874,7 +6875,6 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 			if (flags & FRM_MARK_COMMITTED)
 				frz->t_infomask |= HEAP_XMAX_COMMITTED;
 			changed = true;
-			totally_frozen = false;
 		}
 		else if (flags & FRM_RETURN_IS_MULTI)
 		{
@@ -6896,11 +6896,6 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 			frz->xmax = newxmax;
 
 			changed = true;
-			totally_frozen = false;
-		}
-		else
-		{
-			Assert(flags & FRM_NOOP);
 		}
 	}
 	else if (TransactionIdIsNormal(xid))
@@ -6928,11 +6923,24 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 			freeze_xmax = true;
 		}
 		else
-			totally_frozen = false;
+			freeze_xmax = false;
 	}
+	else if ((tuple->t_infomask & HEAP_XMAX_INVALID) ||
+			 !TransactionIdIsValid(HeapTupleHeaderGetRawXmax(tuple)))
+	{
+		freeze_xmax = false;
+		xmax_already_frozen = true;
+	}
+	else
+		ereport(ERROR,
+				(errcode(ERRCODE_DATA_CORRUPTED),
+				 errmsg_internal("found xmax %u (infomask 0x%04x) not frozen, not multi, not normal",
+								 xid, tuple->t_infomask)));
 
 	if (freeze_xmax)
 	{
+		Assert(!xmax_already_frozen);
+
 		frz->xmax = InvalidTransactionId;
 
 		/*
@@ -6985,7 +6993,8 @@ heap_prepare_freeze_tuple(HeapTupleHeader tuple,
 		}
 	}
 
-	*totally_frozen_p = totally_frozen;
+	*totally_frozen_p = (xmin_frozen &&
+						 (freeze_xmax || xmax_already_frozen));
 	return changed;
 }
 
@@ -9279,6 +9288,7 @@ heap_redo(XLogReaderState *record)
 			heap_xlog_update(record, false);
 			break;
 		case XLOG_HEAP_TRUNCATE:
+
 			/*
 			 * TRUNCATE is a no-op because the actions are already logged as
 			 * SMGR WAL records.  TRUNCATE WAL record only exists for logical

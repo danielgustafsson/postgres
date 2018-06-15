@@ -114,8 +114,8 @@ run_ssl_passphrase_command(const char *prompt, bool is_server_start, char *buf, 
 
 	/* strip trailing newline */
 	len = strlen(buf);
-	if (buf[len - 1] == '\n')
-		buf[len-- -1] = '\0';
+	if (len > 0 && buf[len - 1] == '\n')
+		buf[--len] = '\0';
 
 error:
 	pfree(command.data);
@@ -130,7 +130,7 @@ bool
 check_ssl_key_file_permissions(const char *ssl_key_file, bool isServerStart)
 {
 	int			loglevel = isServerStart ? FATAL : LOG;
-	struct stat	buf;
+	struct stat buf;
 
 	if (stat(ssl_key_file, &buf) != 0)
 	{

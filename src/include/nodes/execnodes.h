@@ -150,7 +150,7 @@ typedef struct IndexInfo
 	NodeTag		type;
 	int			ii_NumIndexAttrs;	/* total number of columns in index */
 	int			ii_NumIndexKeyAttrs;	/* number of key columns in index */
-	AttrNumber	ii_KeyAttrNumbers[INDEX_MAX_KEYS];
+	AttrNumber	ii_IndexAttrNumbers[INDEX_MAX_KEYS];
 	List	   *ii_Expressions; /* list of Expr */
 	List	   *ii_ExpressionsState;	/* list of ExprState */
 	List	   *ii_Predicate;	/* list of Expr */
@@ -363,16 +363,7 @@ typedef struct JunkFilter
 	AttrNumber *jf_cleanMap;
 	TupleTableSlot *jf_resultSlot;
 	AttrNumber	jf_junkAttNo;
-	AttrNumber	jf_otherJunkAttNo;
 } JunkFilter;
-
-typedef struct MergeState
-{
-	/* List of MERGE MATCHED action states */
-	List		   *matchedActionStates;
-	/* List of MERGE NOT MATCHED action states */
-	List		   *notMatchedActionStates;
-} MergeState;
 
 /*
  * OnConflictSetState
@@ -470,37 +461,7 @@ typedef struct ResultRelInfo
 
 	/* true if ready for tuple routing */
 	bool		ri_PartitionReadyForRouting;
-
-	int			ri_PartitionLeafIndex;
-	/* for running MERGE on this result relation */
-	MergeState *ri_mergeState;
-
-	/*
-	 * While executing MERGE, the target relation is processed twice; once
-	 * as a target relation and once to run a join between the target and the
-	 * source. We generate two different RTEs for these two purposes, one with
-	 * rte->inh set to false and other with rte->inh set to true.
-	 *
-	 * Since the plan re-evaluated by EvalPlanQual uses the join RTE, we must
-	 * install the updated tuple in the scan corresponding to that RTE. The
-	 * following member tracks the index of the second RTE for EvalPlanQual
-	 * purposes. ri_mergeTargetRTI is non-zero only when MERGE is in-progress.
-	 * We use ri_mergeTargetRTI to run EvalPlanQual for MERGE and
-	 * ri_RangeTableIndex elsewhere.
-	 */
-	Index		ri_mergeTargetRTI;
 } ResultRelInfo;
-
-/*
- * Get the Range table index for EvalPlanQual.
- *
- * We use the ri_mergeTargetRTI if set, otherwise use ri_RangeTableIndex.
- * ri_mergeTargetRTI should really be ever set iff we're running MERGE.
- */
-#define GetEPQRangeTableIndex(r) \
-	(((r)->ri_mergeTargetRTI > 0)  \
-	 ? (r)->ri_mergeTargetRTI \
-	 : (r)->ri_RangeTableIndex)
 
 /* ----------------
  *	  EState information
@@ -541,8 +502,8 @@ typedef struct EState
 	int			es_num_root_result_relations;	/* length of the array */
 
 	/*
-	 * The following list contains ResultRelInfos created by the tuple
-	 * routing code for partitions that don't already have one.
+	 * The following list contains ResultRelInfos created by the tuple routing
+	 * code for partitions that don't already have one.
 	 */
 	List	   *es_tuple_routing_result_relations;
 
@@ -875,7 +836,8 @@ typedef struct SubPlanState
 	MemoryContext hashtempcxt;	/* temp memory context for hash tables */
 	ExprContext *innerecontext; /* econtext for computing inner tuples */
 	AttrNumber *keyColIdx;		/* control data for hash tables */
-	Oid		   *tab_eq_funcoids;/* equality func oids for table datatype(s) */
+	Oid		   *tab_eq_funcoids;	/* equality func oids for table
+									 * datatype(s) */
 	FmgrInfo   *tab_hash_funcs; /* hash functions for table datatype(s) */
 	FmgrInfo   *tab_eq_funcs;	/* equality functions for table datatype(s) */
 	FmgrInfo   *lhs_hash_funcs; /* hash functions for lefthand datatype(s) */
@@ -1004,6 +966,11 @@ typedef struct PlanState
 #define outerPlanState(node)		(((PlanState *)(node))->lefttree)
 
 /* Macros for inline access to certain instrumentation counters */
+#define InstrCountTuples2(node, delta) \
+	do { \
+		if (((PlanState *)(node))->instrument) \
+			((PlanState *)(node))->instrument->ntuples2 += (delta); \
+	} while (0)
 #define InstrCountFiltered1(node, delta) \
 	do { \
 		if (((PlanState *)(node))->instrument) \
@@ -1013,11 +980,6 @@ typedef struct PlanState
 	do { \
 		if (((PlanState *)(node))->instrument) \
 			((PlanState *)(node))->instrument->nfiltered2 += (delta); \
-	} while(0)
-#define InstrCountFiltered3(node, delta) \
-	do { \
-		if (((PlanState *)(node))->instrument) \
-			((PlanState *)(node))->instrument->nfiltered3 += (delta); \
 	} while(0)
 
 /*
@@ -1066,27 +1028,13 @@ typedef struct ProjectSetState
 } ProjectSetState;
 
 /* ----------------
- *	 MergeActionState information
- * ----------------
- */
-typedef struct MergeActionState
-{
-	NodeTag		type;
-	bool		matched;		/* true=MATCHED, false=NOT MATCHED */
-	ExprState  *whenqual;		/* WHEN AND conditions */
-	CmdType		commandType;	/* INSERT/UPDATE/DELETE/DO NOTHING */
-	ProjectionInfo *proj;		/* tuple projection info */
-	TupleDesc	tupDesc;		/* tuple descriptor for projection */
-} MergeActionState;
-
-/* ----------------
  *	 ModifyTableState information
  * ----------------
  */
 typedef struct ModifyTableState
 {
 	PlanState	ps;				/* its first field is NodeTag */
-	CmdType		operation;		/* INSERT, UPDATE, DELETE or MERGE */
+	CmdType		operation;		/* INSERT, UPDATE, or DELETE */
 	bool		canSetTag;		/* do we set the command tag/es_processed? */
 	bool		mt_done;		/* are we done? */
 	PlanState **mt_plans;		/* subplans (one per target rel) */
@@ -1102,8 +1050,6 @@ typedef struct ModifyTableState
 	List	   *mt_excludedtlist;	/* the excluded pseudo relation's tlist  */
 	TupleTableSlot *mt_conflproj;	/* CONFLICT ... SET ... projection target */
 
-	TupleTableSlot *mt_mergeproj;	/* MERGE action projection target */
-
 	/* Tuple-routing support info */
 	struct PartitionTupleRouting *mt_partition_tuple_routing;
 
@@ -1115,9 +1061,6 @@ typedef struct ModifyTableState
 
 	/* Per plan map for tuple conversion from child to root */
 	TupleConversionMap **mt_per_subplan_tupconv_maps;
-
-	/* Flags showing which subcommands are present INS/UPD/DEL/DO NOTHING */
-	int			mt_merge_subcommands;
 } ModifyTableState;
 
 /* ----------------
@@ -1145,6 +1088,8 @@ struct AppendState
 	PlanState **appendplans;	/* array of PlanStates for my inputs */
 	int			as_nplans;
 	int			as_whichplan;
+	int			as_first_partial_plan;	/* Index of 'appendplans' containing
+										 * the first partial plan */
 	ParallelAppendState *as_pstate; /* parallel coordination info */
 	Size		pstate_len;		/* size of parallel coordination info */
 	struct PartitionPruneState *as_prune_state;
@@ -1368,7 +1313,6 @@ typedef struct IndexScanState
  *		RelationDesc	   index relation descriptor
  *		ScanDesc		   index scan descriptor
  *		VMBuffer		   buffer in use for visibility map testing, if any
- *		HeapFetches		   number of tuples we were forced to fetch from heap
  *		ioss_PscanLen	   Size of parallel index-only scan descriptor
  * ----------------
  */
@@ -1387,7 +1331,6 @@ typedef struct IndexOnlyScanState
 	Relation	ioss_RelationDesc;
 	IndexScanDesc ioss_ScanDesc;
 	Buffer		ioss_VMBuffer;
-	long		ioss_HeapFetches;
 	Size		ioss_PscanLen;
 } IndexOnlyScanState;
 
@@ -2016,8 +1959,8 @@ typedef struct WindowAggState
 
 	WindowStatePerFunc perfunc; /* per-window-function information */
 	WindowStatePerAgg peragg;	/* per-plain-aggregate information */
-	ExprState  *partEqfunction;	/* equality funcs for partition columns */
-	ExprState  *ordEqfunction; /* equality funcs for ordering columns */
+	ExprState  *partEqfunction; /* equality funcs for partition columns */
+	ExprState  *ordEqfunction;	/* equality funcs for ordering columns */
 	Tuplestorestate *buffer;	/* stores rows of current partition */
 	int			current_ptr;	/* read pointer # for current row */
 	int			framehead_ptr;	/* read pointer # for frame head, if used */
@@ -2095,7 +2038,7 @@ typedef struct WindowAggState
 typedef struct UniqueState
 {
 	PlanState	ps;				/* its first field is NodeTag */
-	ExprState   *eqfunction;		/* tuple equality qual */
+	ExprState  *eqfunction;		/* tuple equality qual */
 } UniqueState;
 
 /* ----------------

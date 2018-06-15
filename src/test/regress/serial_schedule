@@ -124,7 +124,6 @@ test: tablesample
 test: groupingsets
 test: drop_operator
 test: password
-test: merge
 test: alter_generic
 test: alter_operator
 test: misc
@@ -185,11 +184,10 @@ test: xml
 test: identity
 test: partition_join
 test: partition_prune
-test: partition_prune_hash
 test: reloptions
 test: hash_part
 test: indexing
 test: partition_aggregate
-test: fast_default
 test: event_trigger
+test: fast_default
 test: stats

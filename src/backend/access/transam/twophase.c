@@ -913,7 +913,7 @@ typedef struct TwoPhaseFileHeader
 	bool		initfileinval;	/* does relcache init file need invalidation? */
 	uint16		gidlen;			/* length of the GID - GID follows the header */
 	XLogRecPtr	origin_lsn;		/* lsn of this record at origin node */
-	TimestampTz origin_timestamp; /* time of prepare at origin node */
+	TimestampTz origin_timestamp;	/* time of prepare at origin node */
 } TwoPhaseFileHeader;
 
 /*
@@ -1065,7 +1065,7 @@ EndPrepare(GlobalTransaction gxact)
 {
 	TwoPhaseFileHeader *hdr;
 	StateFileChunk *record;
-	bool			replorigin;
+	bool		replorigin;
 
 	/* Add the end sentinel to the list of 2PC records */
 	RegisterTwoPhaseRecord(TWOPHASE_RM_END_ID, 0,
@@ -1129,9 +1129,11 @@ EndPrepare(GlobalTransaction gxact)
 	gxact->prepare_end_lsn = XLogInsert(RM_XACT_ID, XLOG_XACT_PREPARE);
 
 	if (replorigin)
+	{
 		/* Move LSNs forward for this replication origin */
 		replorigin_session_advance(replorigin_session_origin_lsn,
 								   gxact->prepare_end_lsn);
+	}
 
 	XLogFlush(gxact->prepare_end_lsn);
 
@@ -1315,7 +1317,7 @@ void
 ParsePrepareRecord(uint8 info, char *xlrec, xl_xact_parsed_prepare *parsed)
 {
 	TwoPhaseFileHeader *hdr;
-	char *bufptr;
+	char	   *bufptr;
 
 	hdr = (TwoPhaseFileHeader *) xlrec;
 	bufptr = xlrec + MAXALIGN(sizeof(TwoPhaseFileHeader));
@@ -1485,6 +1487,9 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	/* compute latestXid among all children */
 	latestXid = TransactionIdLatest(xid, hdr->nsubxacts, children);
 
+	/* Prevent cancel/die interrupt while cleaning up */
+	HOLD_INTERRUPTS();
+
 	/*
 	 * The order of operations here is critical: make the XLOG entry for
 	 * commit or abort, then mark the transaction committed or aborted in
@@ -1575,6 +1580,8 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 	RemoveGXact(gxact);
 	LWLockRelease(TwoPhaseStateLock);
 	MyLockedGxact = NULL;
+
+	RESUME_INTERRUPTS();
 
 	pfree(buf);
 }

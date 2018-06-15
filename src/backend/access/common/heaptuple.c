@@ -981,7 +981,7 @@ expand_tuple(HeapTuple *targetHeapTuple,
 
 		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attnum);
 
-		if (attrmiss[attnum].ammissingPresent)
+		if (attrmiss && attrmiss[attnum].ammissingPresent)
 		{
 			fill_val(attr,
 					 nullBits ? &nullBits : NULL,
@@ -1685,8 +1685,8 @@ slot_getsomeattrs(TupleTableSlot *slot, int attnum)
 	attno = slot->tts_nvalid;
 
 	/*
-	 * If tuple doesn't have all the atts indicated by attnum, read the
-	 * rest as NULLs or missing values
+	 * If tuple doesn't have all the atts indicated by attnum, read the rest
+	 * as NULLs or missing values
 	 */
 	if (attno < attnum)
 		slot_getmissingattrs(slot, attno, attnum);

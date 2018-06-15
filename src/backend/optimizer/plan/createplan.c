@@ -289,13 +289,9 @@ static ModifyTable *make_modifytable(PlannerInfo *root,
 				 CmdType operation, bool canSetTag,
 				 Index nominalRelation, List *partitioned_rels,
 				 bool partColsUpdated,
-				 List *resultRelations,
-				 Index mergeTargetRelation,
-				 List *subplans,
+				 List *resultRelations, List *subplans, List *subroots,
 				 List *withCheckOptionLists, List *returningLists,
-				 List *rowMarks, OnConflictExpr *onconflict,
-				 List *mergeSourceTargetList,
-				 List *mergeActionList, int epqParam);
+				 List *rowMarks, OnConflictExpr *onconflict, int epqParam);
 static GatherMerge *create_gather_merge_plan(PlannerInfo *root,
 						 GatherMergePath *best_path);
 
@@ -1081,7 +1077,8 @@ create_append_plan(PlannerInfo *root, AppendPath *best_path)
 		subplans = lappend(subplans, subplan);
 	}
 
-	if (rel->reloptkind == RELOPT_BASEREL &&
+	if (enable_partition_pruning &&
+		rel->reloptkind == RELOPT_BASEREL &&
 		best_path->partitioned_rels != NIL)
 	{
 		List	   *prunequal;
@@ -1983,7 +1980,7 @@ create_groupingsets_plan(PlannerInfo *root, GroupingSetsPath *best_path)
 	 * create_modifytable_plan).  Fortunately we can't be because there would
 	 * never be grouping in an UPDATE/DELETE; but let's Assert that.
 	 */
-	Assert(!root->hasInheritedTarget);
+	Assert(root->inhTargetKind == INHKIND_NONE);
 	Assert(root->grouping_map == NULL);
 	root->grouping_map = grouping_map;
 
@@ -2145,7 +2142,7 @@ create_minmaxagg_plan(PlannerInfo *root, MinMaxAggPath *best_path)
 	 * create_modifytable_plan).  Fortunately we can't be because there would
 	 * never be aggregates in an UPDATE/DELETE; but let's Assert that.
 	 */
-	Assert(!root->hasInheritedTarget);
+	Assert(root->inhTargetKind == INHKIND_NONE);
 	Assert(root->minmax_aggs == NIL);
 	root->minmax_aggs = best_path->mmaggregates;
 
@@ -2486,14 +2483,12 @@ create_modifytable_plan(PlannerInfo *root, ModifyTablePath *best_path)
 							best_path->partitioned_rels,
 							best_path->partColsUpdated,
 							best_path->resultRelations,
-							best_path->mergeTargetRelation,
 							subplans,
+							best_path->subroots,
 							best_path->withCheckOptionLists,
 							best_path->returningLists,
 							best_path->rowMarks,
 							best_path->onconflict,
-							best_path->mergeSourceTargetList,
-							best_path->mergeActionList,
 							best_path->epqParam);
 
 	copy_generic_path_info(&plan->plan, &best_path->path);
@@ -3809,6 +3804,7 @@ create_nestloop_plan(PlannerInfo *root,
 	if (IS_OUTER_JOIN(best_path->jointype))
 	{
 		extract_actual_join_clauses(joinrestrictclauses,
+									best_path->path.parent->relids,
 									&joinclauses, &otherclauses);
 	}
 	else
@@ -3924,6 +3920,7 @@ create_mergejoin_plan(PlannerInfo *root,
 	if (IS_OUTER_JOIN(best_path->jpath.jointype))
 	{
 		extract_actual_join_clauses(joinclauses,
+									best_path->jpath.path.parent->relids,
 									&joinclauses, &otherclauses);
 	}
 	else
@@ -4220,6 +4217,7 @@ create_hashjoin_plan(PlannerInfo *root,
 	if (IS_OUTER_JOIN(best_path->jpath.jointype))
 	{
 		extract_actual_join_clauses(joinclauses,
+									best_path->jpath.path.parent->relids,
 									&joinclauses, &otherclauses);
 	}
 	else
@@ -5428,9 +5426,9 @@ make_append(List *appendplans, int first_partial_plan,
 	plan->qual = NIL;
 	plan->lefttree = NULL;
 	plan->righttree = NULL;
-	node->partitioned_rels = partitioned_rels;
 	node->appendplans = appendplans;
 	node->first_partial_plan = first_partial_plan;
+	node->partitioned_rels = partitioned_rels;
 	node->part_prune_infos = partpruneinfos;
 	return node;
 }
@@ -6561,21 +6559,19 @@ make_modifytable(PlannerInfo *root,
 				 CmdType operation, bool canSetTag,
 				 Index nominalRelation, List *partitioned_rels,
 				 bool partColsUpdated,
-				 List *resultRelations,
-				 Index mergeTargetRelation,
-				 List *subplans,
+				 List *resultRelations, List *subplans, List *subroots,
 				 List *withCheckOptionLists, List *returningLists,
-				 List *rowMarks, OnConflictExpr *onconflict,
-				 List *mergeSourceTargetList,
-				 List *mergeActionList, int epqParam)
+				 List *rowMarks, OnConflictExpr *onconflict, int epqParam)
 {
 	ModifyTable *node = makeNode(ModifyTable);
 	List	   *fdw_private_list;
 	Bitmapset  *direct_modify_plans;
 	ListCell   *lc;
+	ListCell   *lc2;
 	int			i;
 
 	Assert(list_length(resultRelations) == list_length(subplans));
+	Assert(list_length(resultRelations) == list_length(subroots));
 	Assert(withCheckOptionLists == NIL ||
 		   list_length(resultRelations) == list_length(withCheckOptionLists));
 	Assert(returningLists == NIL ||
@@ -6593,7 +6589,6 @@ make_modifytable(PlannerInfo *root,
 	node->partitioned_rels = partitioned_rels;
 	node->partColsUpdated = partColsUpdated;
 	node->resultRelations = resultRelations;
-	node->mergeTargetRelation = mergeTargetRelation;
 	node->resultRelIndex = -1;	/* will be set correctly in setrefs.c */
 	node->rootResultRelIndex = -1;	/* will be set correctly in setrefs.c */
 	node->plans = subplans;
@@ -6626,8 +6621,6 @@ make_modifytable(PlannerInfo *root,
 	node->withCheckOptionLists = withCheckOptionLists;
 	node->returningLists = returningLists;
 	node->rowMarks = rowMarks;
-	node->mergeSourceTargetList = mergeSourceTargetList;
-	node->mergeActionList = mergeActionList;
 	node->epqParam = epqParam;
 
 	/*
@@ -6637,9 +6630,10 @@ make_modifytable(PlannerInfo *root,
 	fdw_private_list = NIL;
 	direct_modify_plans = NULL;
 	i = 0;
-	foreach(lc, resultRelations)
+	forboth(lc, resultRelations, lc2, subroots)
 	{
 		Index		rti = lfirst_int(lc);
+		PlannerInfo *subroot = lfirst_node(PlannerInfo, lc2);
 		FdwRoutine *fdwroutine;
 		List	   *fdw_private;
 		bool		direct_modify;
@@ -6651,16 +6645,16 @@ make_modifytable(PlannerInfo *root,
 		 * so it's not a baserel; and there are also corner cases for
 		 * updatable views where the target rel isn't a baserel.)
 		 */
-		if (rti < root->simple_rel_array_size &&
-			root->simple_rel_array[rti] != NULL)
+		if (rti < subroot->simple_rel_array_size &&
+			subroot->simple_rel_array[rti] != NULL)
 		{
-			RelOptInfo *resultRel = root->simple_rel_array[rti];
+			RelOptInfo *resultRel = subroot->simple_rel_array[rti];
 
 			fdwroutine = resultRel->fdwroutine;
 		}
 		else
 		{
-			RangeTblEntry *rte = planner_rt_fetch(rti, root);
+			RangeTblEntry *rte = planner_rt_fetch(rti, subroot);
 
 			Assert(rte->rtekind == RTE_RELATION);
 			if (rte->relkind == RELKIND_FOREIGN_TABLE)
@@ -6682,15 +6676,15 @@ make_modifytable(PlannerInfo *root,
 			fdwroutine->IterateDirectModify != NULL &&
 			fdwroutine->EndDirectModify != NULL &&
 			withCheckOptionLists == NIL &&
-			!has_row_triggers(root, rti, operation))
-			direct_modify = fdwroutine->PlanDirectModify(root, node, rti, i);
+			!has_row_triggers(subroot, rti, operation))
+			direct_modify = fdwroutine->PlanDirectModify(subroot, node, rti, i);
 		if (direct_modify)
 			direct_modify_plans = bms_add_member(direct_modify_plans, i);
 
 		if (!direct_modify &&
 			fdwroutine != NULL &&
 			fdwroutine->PlanForeignModify != NULL)
-			fdw_private = fdwroutine->PlanForeignModify(root, node, rti, i);
+			fdw_private = fdwroutine->PlanForeignModify(subroot, node, rti, i);
 		else
 			fdw_private = NIL;
 		fdw_private_list = lappend(fdw_private_list, fdw_private);

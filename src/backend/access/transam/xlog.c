@@ -4486,6 +4486,7 @@ ReadControlFile(void)
 	pg_crc32c	crc;
 	int			fd;
 	static char wal_segsz_str[20];
+	int			r;
 
 	/*
 	 * Read data...
@@ -4499,10 +4500,17 @@ ReadControlFile(void)
 						XLOG_CONTROL_FILE)));
 
 	pgstat_report_wait_start(WAIT_EVENT_CONTROL_FILE_READ);
-	if (read(fd, ControlFile, sizeof(ControlFileData)) != sizeof(ControlFileData))
-		ereport(PANIC,
-				(errcode_for_file_access(),
-				 errmsg("could not read from control file: %m")));
+	r = read(fd, ControlFile, sizeof(ControlFileData));
+	if (r != sizeof(ControlFileData))
+	{
+		if (r < 0)
+			ereport(PANIC,
+					(errcode_for_file_access(),
+					 errmsg("could not read from control file: %m")));
+		else
+			ereport(PANIC,
+					 (errmsg("could not read from control file: read %d bytes, expected %d", r, (int) sizeof(ControlFileData))));
+	}
 	pgstat_report_wait_end();
 
 	close(fd);
@@ -4652,8 +4660,10 @@ ReadControlFile(void)
 
 	if (!IsValidWalSegSize(wal_segment_size))
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						errmsg("WAL segment size must be a power of two between 1MB and 1GB, but the control file specifies %d bytes",
-							   wal_segment_size)));
+						errmsg_plural("WAL segment size must be a power of two between 1 MB and 1 GB, but the control file specifies %d byte",
+									  "WAL segment size must be a power of two between 1 MB and 1 GB, but the control file specifies %d bytes",
+									  wal_segment_size,
+									  wal_segment_size)));
 
 	snprintf(wal_segsz_str, sizeof(wal_segsz_str), "%d", wal_segment_size);
 	SetConfigOption("wal_segment_size", wal_segsz_str, PGC_INTERNAL,
@@ -9785,11 +9795,20 @@ xlog_redo(XLogReaderState *record)
 								  checkPoint.nextXid))
 			ShmemVariableCache->nextXid = checkPoint.nextXid;
 		LWLockRelease(XidGenLock);
-		/* ... but still treat OID counter as exact */
-		LWLockAcquire(OidGenLock, LW_EXCLUSIVE);
-		ShmemVariableCache->nextOid = checkPoint.nextOid;
-		ShmemVariableCache->oidCount = 0;
-		LWLockRelease(OidGenLock);
+
+		/*
+		 * We ignore the nextOid counter in an ONLINE checkpoint, preferring
+		 * to track OID assignment through XLOG_NEXTOID records.  The nextOid
+		 * counter is from the start of the checkpoint and might well be stale
+		 * compared to later XLOG_NEXTOID records.  We could try to take the
+		 * maximum of the nextOid counter and our latest value, but since
+		 * there's no particular guarantee about the speed with which the OID
+		 * counter wraps around, that's a risky thing to do.  In any case,
+		 * users of the nextOid counter are required to avoid assignment of
+		 * duplicates, so that a somewhat out-of-date value should be safe.
+		 */
+
+		/* Handle multixact */
 		MultiXactAdvanceNextMXact(checkPoint.nextMulti,
 								  checkPoint.nextMultiOffset);
 
@@ -10647,10 +10666,9 @@ do_pg_start_backup(const char *backupidstr, bool fast, TimeLineID *starttli_p,
 	 * Mark that start phase has correctly finished for an exclusive backup.
 	 * Session-level locks are updated as well to reflect that state.
 	 *
-	 * Note that CHECK_FOR_INTERRUPTS() must not occur while updating
-	 * backup counters and session-level lock. Otherwise they can be
-	 * updated inconsistently, and which might cause do_pg_abort_backup()
-	 * to fail.
+	 * Note that CHECK_FOR_INTERRUPTS() must not occur while updating backup
+	 * counters and session-level lock. Otherwise they can be updated
+	 * inconsistently, and which might cause do_pg_abort_backup() to fail.
 	 */
 	if (exclusive)
 	{
@@ -10895,11 +10913,11 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive, TimeLineID *stoptli_p)
 	/*
 	 * Clean up session-level lock.
 	 *
-	 * You might think that WALInsertLockRelease() can be called
-	 * before cleaning up session-level lock because session-level
-	 * lock doesn't need to be protected with WAL insertion lock.
-	 * But since CHECK_FOR_INTERRUPTS() can occur in it,
-	 * session-level lock must be cleaned up before it.
+	 * You might think that WALInsertLockRelease() can be called before
+	 * cleaning up session-level lock because session-level lock doesn't need
+	 * to be protected with WAL insertion lock. But since
+	 * CHECK_FOR_INTERRUPTS() can occur in it, session-level lock must be
+	 * cleaned up before it.
 	 */
 	sessionBackupState = SESSION_BACKUP_NONE;
 
@@ -11033,6 +11051,7 @@ do_pg_stop_backup(char *labelfile, bool waitforarchive, TimeLineID *stoptli_p)
 				(uint32) (startpoint >> 32), (uint32) startpoint, startxlogfilename);
 		fprintf(fp, "STOP WAL LOCATION: %X/%X (file %s)\n",
 				(uint32) (stoppoint >> 32), (uint32) stoppoint, stopxlogfilename);
+
 		/*
 		 * Transfer remaining lines including label and start timeline to
 		 * history file.
@@ -11250,7 +11269,8 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
 				  bool *backupFromStandby)
 {
 	char		startxlogfilename[MAXFNAMELEN];
-	TimeLineID	tli_from_walseg, tli_from_file;
+	TimeLineID	tli_from_walseg,
+				tli_from_file;
 	FILE	   *lfp;
 	char		ch;
 	char		backuptype[20];
@@ -11313,13 +11333,13 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
 	}
 
 	/*
-	 * Parse START TIME and LABEL. Those are not mandatory fields for
-	 * recovery but checking for their presence is useful for debugging
-	 * and the next sanity checks. Cope also with the fact that the
-	 * result buffers have a pre-allocated size, hence if the backup_label
-	 * file has been generated with strings longer than the maximum assumed
-	 * here an incorrect parsing happens. That's fine as only minor
-	 * consistency checks are done afterwards.
+	 * Parse START TIME and LABEL. Those are not mandatory fields for recovery
+	 * but checking for their presence is useful for debugging and the next
+	 * sanity checks. Cope also with the fact that the result buffers have a
+	 * pre-allocated size, hence if the backup_label file has been generated
+	 * with strings longer than the maximum assumed here an incorrect parsing
+	 * happens. That's fine as only minor consistency checks are done
+	 * afterwards.
 	 */
 	if (fscanf(lfp, "START TIME: %127[^\n]\n", backuptime) == 1)
 		ereport(DEBUG1,
@@ -11332,8 +11352,8 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
 						backuplabel, BACKUP_LABEL_FILE)));
 
 	/*
-	 * START TIMELINE is new as of 11. Its parsing is not mandatory, still
-	 * use it as a sanity check if present.
+	 * START TIMELINE is new as of 11. Its parsing is not mandatory, still use
+	 * it as a sanity check if present.
 	 */
 	if (fscanf(lfp, "START TIMELINE: %u\n", &tli_from_file) == 1)
 	{
@@ -11684,6 +11704,40 @@ retry:
 	Assert(reqLen <= readLen);
 
 	*readTLI = curFileTLI;
+
+	/*
+	 * Check the page header immediately, so that we can retry immediately if
+	 * it's not valid. This may seem unnecessary, because XLogReadRecord()
+	 * validates the page header anyway, and would propagate the failure up to
+	 * ReadRecord(), which would retry. However, there's a corner case with
+	 * continuation records, if a record is split across two pages such that
+	 * we would need to read the two pages from different sources. For
+	 * example, imagine a scenario where a streaming replica is started up,
+	 * and replay reaches a record that's split across two WAL segments. The
+	 * first page is only available locally, in pg_wal, because it's already
+	 * been recycled in the master. The second page, however, is not present
+	 * in pg_wal, and we should stream it from the master. There is a recycled
+	 * WAL segment present in pg_wal, with garbage contents, however. We would
+	 * read the first page from the local WAL segment, but when reading the
+	 * second page, we would read the bogus, recycled, WAL segment. If we
+	 * didn't catch that case here, we would never recover, because
+	 * ReadRecord() would retry reading the whole record from the beginning.
+	 *
+	 * Of course, this only catches errors in the page header, which is what
+	 * happens in the case of a recycled WAL segment. Other kinds of errors or
+	 * corruption still has the same problem. But this at least fixes the
+	 * common case, which can happen as part of normal operation.
+	 *
+	 * Validating the page header is cheap enough that doing it twice
+	 * shouldn't be a big deal from a performance point of view.
+	 */
+	if (!XLogReaderValidatePageHeader(xlogreader, targetPagePtr, readBuf))
+	{
+		/* reset any error XLogReaderValidatePageHeader() might have set */
+		xlogreader->errormsg_buf[0] = '\0';
+		goto next_record_is_invalid;
+	}
+
 	return readLen;
 
 next_record_is_invalid:
@@ -11818,12 +11872,18 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 						}
 						else
 						{
-							ptr = tliRecPtr;
+							ptr = RecPtr;
+
+							/*
+							 * Use the record begin position to determine the
+							 * TLI, rather than the position we're reading.
+							 */
 							tli = tliOfPointInHistory(tliRecPtr, expectedTLEs);
 
 							if (curFileTLI > 0 && tli < curFileTLI)
 								elog(ERROR, "according to history file, WAL location %X/%X belongs to timeline %u, but previous recovered WAL file came from timeline %u",
-									 (uint32) (ptr >> 32), (uint32) ptr,
+									 (uint32) (tliRecPtr >> 32),
+									 (uint32) tliRecPtr,
 									 tli, curFileTLI);
 						}
 						curFileTLI = tli;

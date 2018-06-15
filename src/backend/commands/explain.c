@@ -946,9 +946,6 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				case CMD_DELETE:
 					pname = operation = "Delete";
 					break;
-				case CMD_MERGE:
-					pname = operation = "Merge";
-					break;
 				default:
 					pname = "???";
 					break;
@@ -1459,12 +1456,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 				show_instrumentation_count("Rows Removed by Filter", 1,
 										   planstate, es);
 			if (es->analyze)
-			{
-				long		heapFetches =
-					((IndexOnlyScanState *) planstate)->ioss_HeapFetches;
-
-				ExplainPropertyInteger("Heap Fetches", NULL, heapFetches, es);
-			}
+				ExplainPropertyFloat("Heap Fetches", NULL,
+									 planstate->instrument->ntuples2, 0, es);
 			break;
 		case T_BitmapIndexScan:
 			show_scan_qual(((BitmapIndexScan *) plan)->indexqualorig,
@@ -1486,7 +1479,8 @@ ExplainNode(PlanState *planstate, List *ancestors,
 		case T_SampleScan:
 			show_tablesample(((SampleScan *) plan)->tablesample,
 							 planstate, ancestors, es);
-			/* FALL THRU to print additional fields the same as SeqScan */
+			/* fall through to print additional fields the same as SeqScan */
+			/* FALLTHROUGH */
 		case T_SeqScan:
 		case T_ValuesScan:
 		case T_CteScan:
@@ -3015,10 +3009,6 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 			operation = "Delete";
 			foperation = "Foreign Delete";
 			break;
-		case CMD_MERGE:
-			operation = "Merge";
-			foperation = "Foreign Merge";
-			break;
 		default:
 			operation = "???";
 			foperation = "Foreign ???";
@@ -3132,39 +3122,13 @@ show_modifytable_info(ModifyTableState *mtstate, List *ancestors,
 
 			/* count the number of source rows */
 			total = mtstate->mt_plans[0]->instrument->ntuples;
-			other_path = mtstate->ps.instrument->nfiltered2;
+			other_path = mtstate->ps.instrument->ntuples2;
 			insert_path = total - other_path;
 
 			ExplainPropertyFloat("Tuples Inserted", NULL,
 								 insert_path, 0, es);
 			ExplainPropertyFloat("Conflicting Tuples", NULL,
 								 other_path, 0, es);
-		}
-	}
-	else if (node->operation == CMD_MERGE)
-	{
-		/* EXPLAIN ANALYZE display of actual outcome for each tuple proposed */
-		if (es->analyze && mtstate->ps.instrument)
-		{
-			double		total;
-			double		insert_path;
-			double		update_path;
-			double		delete_path;
-			double		skipped_path;
-
-			InstrEndLoop(mtstate->mt_plans[0]->instrument);
-
-			/* count the number of source rows */
-			total = mtstate->mt_plans[0]->instrument->ntuples;
-			insert_path = mtstate->ps.instrument->nfiltered1;
-			update_path = mtstate->ps.instrument->nfiltered2;
-			delete_path = mtstate->ps.instrument->nfiltered3;
-			skipped_path = total - insert_path - update_path - delete_path;
-
-			ExplainPropertyFloat("Tuples Inserted", NULL, insert_path, 0, es);
-			ExplainPropertyFloat("Tuples Updated", NULL, update_path, 0, es);
-			ExplainPropertyFloat("Tuples Deleted", NULL, delete_path, 0, es);
-			ExplainPropertyFloat("Tuples Skipped", NULL, skipped_path, 0, es);
 		}
 	}
 

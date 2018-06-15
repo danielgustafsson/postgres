@@ -36,7 +36,8 @@ else
 close $conf;
 my $ctlcmd = [
 	'pg_ctl', 'start', '-D', "$tempdir/data", '-l',
-	"$TestLib::log_path/001_start_stop_server.log" ];
+	"$TestLib::log_path/001_start_stop_server.log"
+];
 if ($Config{osname} ne 'msys')
 {
 	command_like($ctlcmd, qr/done.*server started/s, 'pg_ctl start');
@@ -63,14 +64,14 @@ command_fails([ 'pg_ctl', 'stop', '-D', "$tempdir/data" ],
 # Windows but we still want to do the restart test.
 my $logFileName = "$tempdir/data/perm-test-600.log";
 
-command_ok(
-	[ 'pg_ctl', 'restart', '-D', "$tempdir/data", '-l', $logFileName ],
+command_ok([ 'pg_ctl', 'restart', '-D', "$tempdir/data", '-l', $logFileName ],
 	'pg_ctl restart with server not running');
 
 # Permissions on log file should be default
 SKIP:
 {
-	skip "unix-style permissions not supported on Windows", 2 if ($windows_os);
+	skip "unix-style permissions not supported on Windows", 2
+	  if ($windows_os);
 
 	ok(-f $logFileName);
 	ok(check_mode_recursive("$tempdir/data", 0700, 0600));

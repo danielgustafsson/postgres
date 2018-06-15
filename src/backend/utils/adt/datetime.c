@@ -1575,7 +1575,10 @@ DetermineTimeZoneOffsetInternal(struct pg_tm *tm, pg_tz *tzp, pg_time_t *tp)
 	 * fall-back transition, prefer "after".  (We used to define and implement
 	 * this test as "prefer the standard-time interpretation", but that rule
 	 * does not help to resolve the behavior when both times are reported as
-	 * standard time; which does happen, eg Europe/Moscow in Oct 2014.)
+	 * standard time; which does happen, eg Europe/Moscow in Oct 2014.  Also,
+	 * in some zones such as Europe/Dublin, there is widespread confusion
+	 * about which time offset is "standard" time, so it's fortunate that our
+	 * behavior doesn't depend on that.)
 	 */
 	if (beforetime > aftertime)
 	{
@@ -3146,7 +3149,7 @@ DecodeInterval(char **field, int *ftype, int nf, int range,
 				 * handle signed float numbers and signed year-month values.
 				 */
 
-				/* FALL THROUGH */
+				/* FALLTHROUGH */
 
 			case DTK_DATE:
 			case DTK_NUMBER:
@@ -3577,6 +3580,7 @@ DecodeISO8601Interval(char *str,
 						continue;
 					}
 					/* Else fall through to extended alternative format */
+					/* FALLTHROUGH */
 				case '-':		/* ISO 8601 4.4.3.3 Alternative Format,
 								 * Extended */
 					if (havefield)
@@ -3655,6 +3659,7 @@ DecodeISO8601Interval(char *str,
 						return 0;
 					}
 					/* Else fall through to extended alternative format */
+					/* FALLTHROUGH */
 				case ':':		/* ISO 8601 4.4.3.3 Alternative Format,
 								 * Extended */
 					if (havefield)

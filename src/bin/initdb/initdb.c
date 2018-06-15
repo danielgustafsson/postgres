@@ -60,8 +60,8 @@
 #endif
 
 #include "access/xlog_internal.h"
-#include "catalog/catalog.h"
 #include "catalog/pg_authid_d.h"
+#include "catalog/pg_class_d.h" /* pgrminclude ignore */
 #include "catalog/pg_collation_d.h"
 #include "common/file_perm.h"
 #include "common/file_utils.h"
@@ -265,6 +265,7 @@ static void make_postgres(FILE *cmdfd);
 static void trapsig(int signum);
 static void check_ok(void);
 static char *escape_quotes(const char *src);
+static char *escape_quotes_bki(const char *src);
 static int	locale_date_order(const char *locale);
 static void check_locale_name(int category, const char *locale,
 				  char **canonname);
@@ -324,6 +325,10 @@ do { \
 		output_failed = true, output_errno = errno; \
 } while (0)
 
+/*
+ * Escape single quotes and backslashes, suitably for insertions into
+ * configuration files or SQL E'' strings.
+ */
 static char *
 escape_quotes(const char *src)
 {
@@ -334,6 +339,52 @@ escape_quotes(const char *src)
 		fprintf(stderr, _("%s: out of memory\n"), progname);
 		exit(1);
 	}
+	return result;
+}
+
+/*
+ * Escape a field value to be inserted into the BKI data.
+ * Here, we first run the value through escape_quotes (which
+ * will be inverted by the backend's scanstr() function) and
+ * then overlay special processing of double quotes, which
+ * bootscanner.l will only accept as data if converted to octal
+ * representation ("\042").  We always wrap the value in double
+ * quotes, even if that isn't strictly necessary.
+ */
+static char *
+escape_quotes_bki(const char *src)
+{
+	char	   *result;
+	char	   *data = escape_quotes(src);
+	char	   *resultp;
+	char	   *datap;
+	int			nquotes = 0;
+
+	/* count double quotes in data */
+	datap = data;
+	while ((datap = strchr(datap, '"')) != NULL)
+	{
+		nquotes++;
+		datap++;
+	}
+
+	result = (char *) pg_malloc(strlen(data) + 3 + nquotes * 3);
+	resultp = result;
+	*resultp++ = '"';
+	for (datap = data; *datap; datap++)
+	{
+		if (*datap == '"')
+		{
+			strcpy(resultp, "\\042");
+			resultp += 4;
+		}
+		else
+			*resultp++ = *datap;
+	}
+	*resultp++ = '"';
+	*resultp = '\0';
+
+	free(data);
 	return result;
 }
 
@@ -1368,13 +1419,17 @@ bootstrap_template1(void)
 	bki_lines = replace_token(bki_lines, "FLOAT8PASSBYVAL",
 							  FLOAT8PASSBYVAL ? "true" : "false");
 
-	bki_lines = replace_token(bki_lines, "POSTGRES", escape_quotes(username));
+	bki_lines = replace_token(bki_lines, "POSTGRES",
+							  escape_quotes_bki(username));
 
-	bki_lines = replace_token(bki_lines, "ENCODING", encodingid_to_string(encodingid));
+	bki_lines = replace_token(bki_lines, "ENCODING",
+							  encodingid_to_string(encodingid));
 
-	bki_lines = replace_token(bki_lines, "LC_COLLATE", escape_quotes(lc_collate));
+	bki_lines = replace_token(bki_lines, "LC_COLLATE",
+							  escape_quotes_bki(lc_collate));
 
-	bki_lines = replace_token(bki_lines, "LC_CTYPE", escape_quotes(lc_ctype));
+	bki_lines = replace_token(bki_lines, "LC_CTYPE",
+							  escape_quotes_bki(lc_ctype));
 
 	/*
 	 * Pass correct LC_xxx environment to bootstrap.
@@ -1614,6 +1669,8 @@ setup_sysviews(FILE *cmdfd)
 		free(*line);
 	}
 
+	PG_CMD_PUTS("\n\n");
+
 	free(sysviews_setup);
 }
 
@@ -1652,16 +1709,17 @@ setup_description(FILE *cmdfd)
 
 	/* Create default descriptions for operator implementation functions */
 	PG_CMD_PUTS("WITH funcdescs AS ( "
-				"SELECT p.oid as p_oid, oprname, "
-				"coalesce(obj_description(o.oid, 'pg_operator'),'') as opdesc "
+				"SELECT p.oid as p_oid, o.oid as o_oid, oprname "
 				"FROM pg_proc p JOIN pg_operator o ON oprcode = p.oid ) "
 				"INSERT INTO pg_description "
 				"  SELECT p_oid, 'pg_proc'::regclass, 0, "
 				"    'implementation of ' || oprname || ' operator' "
 				"  FROM funcdescs "
-				"  WHERE opdesc NOT LIKE 'deprecated%' AND "
-				"  NOT EXISTS (SELECT 1 FROM pg_description "
-				"    WHERE objoid = p_oid AND classoid = 'pg_proc'::regclass);\n\n");
+				"  WHERE NOT EXISTS (SELECT 1 FROM pg_description "
+				"   WHERE objoid = p_oid AND classoid = 'pg_proc'::regclass) "
+				"  AND NOT EXISTS (SELECT 1 FROM pg_description "
+				"   WHERE objoid = o_oid AND classoid = 'pg_operator'::regclass"
+				"         AND description LIKE 'deprecated%');\n\n");
 
 	/*
 	 * Even though the tables are temp, drop them explicitly so they don't get
@@ -1725,6 +1783,8 @@ setup_dictionary(FILE *cmdfd)
 		free(*line);
 	}
 
+	PG_CMD_PUTS("\n\n");
+
 	free(conv_lines);
 }
 
@@ -1781,7 +1841,7 @@ setup_privileges(FILE *cmdfd)
 		"        relacl IS NOT NULL"
 		"        AND relkind IN (" CppAsString2(RELKIND_RELATION) ", "
 		CppAsString2(RELKIND_VIEW) ", " CppAsString2(RELKIND_MATVIEW) ", "
-		CppAsString2(RELKIND_SEQUENCE) ");",
+		CppAsString2(RELKIND_SEQUENCE) ");\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1797,7 +1857,7 @@ setup_privileges(FILE *cmdfd)
 		"        pg_attribute.attacl IS NOT NULL"
 		"        AND pg_class.relkind IN (" CppAsString2(RELKIND_RELATION) ", "
 		CppAsString2(RELKIND_VIEW) ", " CppAsString2(RELKIND_MATVIEW) ", "
-		CppAsString2(RELKIND_SEQUENCE) ");",
+		CppAsString2(RELKIND_SEQUENCE) ");\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1809,7 +1869,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_proc"
 		"    WHERE"
-		"        proacl IS NOT NULL;",
+		"        proacl IS NOT NULL;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1821,7 +1881,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_type"
 		"    WHERE"
-		"        typacl IS NOT NULL;",
+		"        typacl IS NOT NULL;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1833,7 +1893,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_language"
 		"    WHERE"
-		"        lanacl IS NOT NULL;",
+		"        lanacl IS NOT NULL;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1846,7 +1906,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_largeobject_metadata"
 		"    WHERE"
-		"        lomacl IS NOT NULL;",
+		"        lomacl IS NOT NULL;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1858,7 +1918,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_namespace"
 		"    WHERE"
-		"        nspacl IS NOT NULL;",
+		"        nspacl IS NOT NULL;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1871,7 +1931,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_foreign_data_wrapper"
 		"    WHERE"
-		"        fdwacl IS NOT NULL;",
+		"        fdwacl IS NOT NULL;\n\n",
 		"INSERT INTO pg_init_privs "
 		"  (objoid, classoid, objsubid, initprivs, privtype)"
 		"    SELECT"
@@ -1884,7 +1944,7 @@ setup_privileges(FILE *cmdfd)
 		"    FROM"
 		"        pg_foreign_server"
 		"    WHERE"
-		"        srvacl IS NOT NULL;",
+		"        srvacl IS NOT NULL;\n\n",
 		NULL
 	};
 
@@ -1938,6 +1998,8 @@ setup_schema(FILE *cmdfd)
 		PG_CMD_PUTS(*line);
 		free(*line);
 	}
+
+	PG_CMD_PUTS("\n\n");
 
 	free(lines);
 

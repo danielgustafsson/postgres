@@ -26,6 +26,8 @@
 #include "nodes/lockoptions.h"
 #include "nodes/primnodes.h"
 #include "nodes/value.h"
+#include "partitioning/partdefs.h"
+
 
 typedef enum OverridingKind
 {
@@ -38,7 +40,7 @@ typedef enum OverridingKind
 typedef enum QuerySource
 {
 	QSRC_ORIGINAL,				/* original parsetree (explicit query) */
-	QSRC_PARSER,				/* added by parse analysis in MERGE */
+	QSRC_PARSER,				/* added by parse analysis (now unused) */
 	QSRC_INSTEAD_RULE,			/* added by unconditional INSTEAD rule */
 	QSRC_QUAL_INSTEAD_RULE,		/* added by conditional INSTEAD rule */
 	QSRC_NON_INSTEAD_RULE		/* added by non-INSTEAD rule */
@@ -107,7 +109,7 @@ typedef struct Query
 {
 	NodeTag		type;
 
-	CmdType		commandType;	/* select|insert|update|delete|merge|utility */
+	CmdType		commandType;	/* select|insert|update|delete|utility */
 
 	QuerySource querySource;	/* where did I come from? */
 
@@ -118,7 +120,7 @@ typedef struct Query
 	Node	   *utilityStmt;	/* non-null if commandType == CMD_UTILITY */
 
 	int			resultRelation; /* rtable index of target relation for
-								 * INSERT/UPDATE/DELETE/MERGE; 0 for SELECT */
+								 * INSERT/UPDATE/DELETE; 0 for SELECT */
 
 	bool		hasAggs;		/* has aggregates in tlist or havingQual */
 	bool		hasWindowFuncs; /* has window functions in tlist */
@@ -169,9 +171,6 @@ typedef struct Query
 	List	   *withCheckOptions;	/* a list of WithCheckOption's, which are
 									 * only added during rewrite and therefore
 									 * are not written out as part of Query. */
-	int			mergeTarget_relation;
-	List	   *mergeSourceTargetList;
-	List	   *mergeActionList;	/* list of actions for MERGE (only) */
 
 	/*
 	 * The following two fields identify the portion of the source text string
@@ -656,8 +655,8 @@ typedef struct ColumnDef
 	Node	   *raw_default;	/* default value (untransformed parse tree) */
 	Node	   *cooked_default; /* default value (transformed expr tree) */
 	char		identity;		/* attidentity setting */
-	RangeVar   *identitySequence; /* to store identity sequence name for ALTER
-								   * TABLE ... ADD COLUMN */
+	RangeVar   *identitySequence;	/* to store identity sequence name for
+									 * ALTER TABLE ... ADD COLUMN */
 	CollateClause *collClause;	/* untransformed COLLATE spec, if any */
 	Oid			collOid;		/* collation OID (InvalidOid if not set) */
 	List	   *constraints;	/* other constraints on column */
@@ -806,7 +805,7 @@ typedef struct PartitionSpec
  * This represents the portion of the partition key space assigned to a
  * particular partition.  These are stored on disk in pg_class.relpartbound.
  */
-typedef struct PartitionBoundSpec
+struct PartitionBoundSpec
 {
 	NodeTag		type;
 
@@ -825,7 +824,7 @@ typedef struct PartitionBoundSpec
 	List	   *upperdatums;	/* List of PartitionRangeDatums */
 
 	int			location;		/* token location, or -1 if unknown */
-} PartitionBoundSpec;
+};
 
 /*
  * PartitionRangeDatum - one of the values in a range partition bound
@@ -1131,9 +1130,7 @@ typedef enum WCOKind
 	WCO_VIEW_CHECK,				/* WCO on an auto-updatable view */
 	WCO_RLS_INSERT_CHECK,		/* RLS INSERT WITH CHECK policy */
 	WCO_RLS_UPDATE_CHECK,		/* RLS UPDATE WITH CHECK policy */
-	WCO_RLS_CONFLICT_CHECK,		/* RLS ON CONFLICT DO UPDATE USING policy */
-	WCO_RLS_MERGE_UPDATE_CHECK, /* RLS MERGE UPDATE USING policy */
-	WCO_RLS_MERGE_DELETE_CHECK	/* RLS MERGE DELETE USING policy */
+	WCO_RLS_CONFLICT_CHECK		/* RLS ON CONFLICT DO UPDATE USING policy */
 } WCOKind;
 
 typedef struct WithCheckOption
@@ -1507,46 +1504,6 @@ typedef struct UpdateStmt
 	List	   *returningList;	/* list of expressions to return */
 	WithClause *withClause;		/* WITH clause */
 } UpdateStmt;
-
-/* ----------------------
- *		Merge Statement
- * ----------------------
- */
-typedef struct MergeStmt
-{
-	NodeTag		type;
-	RangeVar   *relation;			/* target relation to merge into */
-	Node	   *source_relation;	/* source relation */
-	Node	   *join_condition; /* join condition between source and target */
-	List	   *mergeWhenClauses;	/* list of MergeWhenClause(es) */
-	WithClause *withClause;		/* WITH clause */
-} MergeStmt;
-
-typedef struct MergeWhenClause
-{
-	NodeTag		type;
-	bool		matched;		/* true=MATCHED, false=NOT MATCHED */
-	CmdType		commandType;	/* INSERT/UPDATE/DELETE/DO NOTHING */
-	Node	   *condition;		/* WHEN AND conditions (raw parser) */
-	List	   *targetList;		/* INSERT/UPDATE targetlist */
-	/* the following members are only useful for INSERT action */
-	List	   *cols;			/* optional: names of the target columns */
-	List	   *values;			/* VALUES to INSERT, or NULL */
-	OverridingKind override;	/* OVERRIDING clause */
-} MergeWhenClause;
-
-/*
- * WHEN [NOT] MATCHED THEN action info
- */
-typedef struct MergeAction
-{
-	NodeTag     type;
-	bool        matched;        /* true=MATCHED, false=NOT MATCHED */
-	OverridingKind	override;	/* OVERRIDING clause */
-	Node       *qual;           /* transformed WHEN AND conditions */
-	CmdType     commandType;    /* INSERT/UPDATE/DELETE/DO NOTHING */
-	List       *targetList;     /* the target list (of ResTarget) */
-} MergeAction;
 
 /* ----------------------
  *		Select Statement
@@ -3017,7 +2974,7 @@ typedef struct TransactionStmt
 	NodeTag		type;
 	TransactionStmtKind kind;	/* see above */
 	List	   *options;		/* for BEGIN/START commands */
-	char	   *savepoint_name;	/* for savepoint commands */
+	char	   *savepoint_name; /* for savepoint commands */
 	char	   *gid;			/* for two-phase-commit related commands */
 } TransactionStmt;
 

@@ -122,6 +122,14 @@
    don't. */
 #define HAVE_DECL_STRNLEN 1
 
+/* Define to 1 if you have the declaration of `strtoll', and to 0 if you
+   don't. */
+#define HAVE_DECL_STRTOLL 1
+
+/* Define to 1 if you have the declaration of `strtoull', and to 0 if you
+   don't. */
+#define HAVE_DECL_STRTOULL 1
+
 /* Define to 1 if you have the declaration of `vsnprintf', and to 0 if you
    don't. */
 #define HAVE_DECL_VSNPRINTF 1
@@ -357,7 +365,9 @@
 #define HAVE_SSL_GET_CURRENT_COMPRESSION 1
 
 /* Define to 1 if stdbool.h conforms to C99. */
-/* #undef HAVE_STDBOOL_H */
+#if (_MSC_VER >= 1800)
+#define HAVE_STDBOOL_H 1
+#endif
 
 /* Define to 1 if you have the <stdint.h> header file. */
 /* #undef HAVE_STDINT_H */
@@ -383,16 +393,22 @@
 #define HAVE_STRONG_RANDOM 1
 
 /* Define to 1 if you have the `strtoll' function. */
-//#define HAVE_STRTOLL 1
-
-/* Define to 1 if you have the `strtoq' function. */
-/* #undef HAVE_STRTOQ */
+#ifdef HAVE_LONG_LONG_INT_64
+#define HAVE_STRTOLL 1
+/* Before VS2013, use Microsoft's nonstandard equivalent function */
+#if (_MSC_VER < 1800)
+#define strtoll _strtoi64
+#endif
+#endif
 
 /* Define to 1 if you have the `strtoull' function. */
-//#define HAVE_STRTOULL 1
-
-/* Define to 1 if you have the `strtouq' function. */
-/* #undef HAVE_STRTOUQ */
+#ifdef HAVE_LONG_LONG_INT_64
+#define HAVE_STRTOULL 1
+/* Before VS2013, use Microsoft's nonstandard equivalent function */
+#if (_MSC_VER < 1800)
+#define strtoull _strtoui64
+#endif
+#endif
 
 /* Define to 1 if the system has the type `struct addrinfo'. */
 #if (_MSC_VER > 1200)
@@ -563,7 +579,7 @@
 /* Define to 1 if your compiler understands __VA_ARGS__ in macros. */
 #define HAVE__VA_ARGS 1
 
-/* Define to the appropriate snprintf length modifier for 64-bit ints. */
+/* Define to the appropriate printf length modifier for 64-bit ints. */
 #define INT64_MODIFIER "ll"
 
 /* Define to 1 if `locale_t' requires <xlocale.h>. */
@@ -585,10 +601,10 @@
 #define PACKAGE_NAME "PostgreSQL"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "PostgreSQL 11devel"
+#define PACKAGE_STRING "PostgreSQL 11beta1"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "11devel"
+#define PACKAGE_VERSION "11beta1"
 
 /* Define to the name of a signed 128-bit integer type. */
 #undef PG_INT128_TYPE
@@ -597,7 +613,7 @@
 #define PG_INT64_TYPE long long int
 
 /* PostgreSQL version as a string */
-#define PG_VERSION "11devel"
+#define PG_VERSION "11beta1"
 
 /* PostgreSQL version as a number */
 #define PG_VERSION_NUM 110000
@@ -613,7 +629,7 @@
 #define PG_VERSION_STR "Uninitialized version string (win32)"
 
 /* The size of `bool', as computed by sizeof. */
-#define SIZEOF_BOOL 0
+#define SIZEOF_BOOL 1
 
 /* The size of `long', as computed by sizeof. */
 #define SIZEOF_LONG 4

@@ -272,7 +272,7 @@ _outPlannedStmt(StringInfo str, const PlannedStmt *node)
 	WRITE_BOOL_FIELD(transientPlan);
 	WRITE_BOOL_FIELD(dependsOnRole);
 	WRITE_BOOL_FIELD(parallelModeNeeded);
-	WRITE_BOOL_FIELD(jitFlags);
+	WRITE_INT_FIELD(jitFlags);
 	WRITE_NODE_FIELD(planTree);
 	WRITE_NODE_FIELD(rtable);
 	WRITE_NODE_FIELD(resultRelations);
@@ -375,7 +375,6 @@ _outModifyTable(StringInfo str, const ModifyTable *node)
 	WRITE_NODE_FIELD(partitioned_rels);
 	WRITE_BOOL_FIELD(partColsUpdated);
 	WRITE_NODE_FIELD(resultRelations);
-	WRITE_INT_FIELD(mergeTargetRelation);
 	WRITE_INT_FIELD(resultRelIndex);
 	WRITE_INT_FIELD(rootResultRelIndex);
 	WRITE_NODE_FIELD(plans);
@@ -391,22 +390,6 @@ _outModifyTable(StringInfo str, const ModifyTable *node)
 	WRITE_NODE_FIELD(onConflictWhere);
 	WRITE_UINT_FIELD(exclRelRTI);
 	WRITE_NODE_FIELD(exclRelTlist);
-	WRITE_NODE_FIELD(mergeSourceTargetList);
-	WRITE_NODE_FIELD(mergeActionList);
-}
-
-static void
-_outMergeWhenClause(StringInfo str, const MergeWhenClause *node)
-{
-	WRITE_NODE_TYPE("MERGEWHENCLAUSE");
-
-	WRITE_BOOL_FIELD(matched);
-	WRITE_ENUM_FIELD(commandType, CmdType);
-	WRITE_NODE_FIELD(condition);
-	WRITE_NODE_FIELD(targetList);
-	WRITE_NODE_FIELD(cols);
-	WRITE_NODE_FIELD(values);
-	WRITE_ENUM_FIELD(override, OverridingKind);
 }
 
 static void
@@ -416,9 +399,9 @@ _outAppend(StringInfo str, const Append *node)
 
 	_outPlanInfo(str, (const Plan *) node);
 
-	WRITE_NODE_FIELD(partitioned_rels);
 	WRITE_NODE_FIELD(appendplans);
 	WRITE_INT_FIELD(first_partial_plan);
+	WRITE_NODE_FIELD(partitioned_rels);
 	WRITE_NODE_FIELD(part_prune_infos);
 }
 
@@ -1025,6 +1008,58 @@ _outPlanRowMark(StringInfo str, const PlanRowMark *node)
 	WRITE_ENUM_FIELD(strength, LockClauseStrength);
 	WRITE_ENUM_FIELD(waitPolicy, LockWaitPolicy);
 	WRITE_BOOL_FIELD(isParent);
+}
+
+static void
+_outPartitionPruneInfo(StringInfo str, const PartitionPruneInfo *node)
+{
+	int			i;
+
+	WRITE_NODE_TYPE("PARTITIONPRUNEINFO");
+
+	WRITE_OID_FIELD(reloid);
+	WRITE_NODE_FIELD(pruning_steps);
+	WRITE_BITMAPSET_FIELD(present_parts);
+	WRITE_INT_FIELD(nparts);
+	WRITE_INT_FIELD(nexprs);
+
+	appendStringInfoString(str, " :subplan_map");
+	for (i = 0; i < node->nparts; i++)
+		appendStringInfo(str, " %d", node->subplan_map[i]);
+
+	appendStringInfoString(str, " :subpart_map");
+	for (i = 0; i < node->nparts; i++)
+		appendStringInfo(str, " %d", node->subpart_map[i]);
+
+	appendStringInfoString(str, " :hasexecparam");
+	for (i = 0; i < node->nexprs; i++)
+		appendStringInfo(str, " %s", booltostr(node->hasexecparam[i]));
+
+	WRITE_BOOL_FIELD(do_initial_prune);
+	WRITE_BOOL_FIELD(do_exec_prune);
+	WRITE_BITMAPSET_FIELD(execparamids);
+}
+
+static void
+_outPartitionPruneStepOp(StringInfo str, const PartitionPruneStepOp *node)
+{
+	WRITE_NODE_TYPE("PARTITIONPRUNESTEPOP");
+
+	WRITE_INT_FIELD(step.step_id);
+	WRITE_INT_FIELD(opstrategy);
+	WRITE_NODE_FIELD(exprs);
+	WRITE_NODE_FIELD(cmpfns);
+	WRITE_BITMAPSET_FIELD(nullkeys);
+}
+
+static void
+_outPartitionPruneStepCombine(StringInfo str, const PartitionPruneStepCombine *node)
+{
+	WRITE_NODE_TYPE("PARTITIONPRUNESTEPCOMBINE");
+
+	WRITE_INT_FIELD(step.step_id);
+	WRITE_ENUM_FIELD(combineOp, PartitionPruneCombineOp);
+	WRITE_NODE_FIELD(source_stepids);
 }
 
 static void
@@ -1712,28 +1747,6 @@ _outFromExpr(StringInfo str, const FromExpr *node)
 }
 
 static void
-_outPartitionPruneStepOp(StringInfo str, const PartitionPruneStepOp *node)
-{
-	WRITE_NODE_TYPE("PARTITIONPRUNESTEPOP");
-
-	WRITE_INT_FIELD(step.step_id);
-	WRITE_INT_FIELD(opstrategy);
-	WRITE_NODE_FIELD(exprs);
-	WRITE_NODE_FIELD(cmpfns);
-	WRITE_BITMAPSET_FIELD(nullkeys);
-}
-
-static void
-_outPartitionPruneStepCombine(StringInfo str, const PartitionPruneStepCombine *node)
-{
-	WRITE_NODE_TYPE("PARTITIONPRUNESTEPCOMBINE");
-
-	WRITE_INT_FIELD(step.step_id);
-	WRITE_ENUM_FIELD(combineOp, PartitionPruneCombineOp);
-	WRITE_NODE_FIELD(source_stepids);
-}
-
-static void
 _outOnConflictExpr(StringInfo str, const OnConflictExpr *node)
 {
 	WRITE_NODE_TYPE("ONCONFLICTEXPR");
@@ -1746,41 +1759,6 @@ _outOnConflictExpr(StringInfo str, const OnConflictExpr *node)
 	WRITE_NODE_FIELD(onConflictWhere);
 	WRITE_INT_FIELD(exclRelIndex);
 	WRITE_NODE_FIELD(exclRelTlist);
-}
-
-static void
-_outMergeAction(StringInfo str, const MergeAction *node)
-{
-	WRITE_NODE_TYPE("MERGEACTION");
-
-	WRITE_BOOL_FIELD(matched);
-	WRITE_ENUM_FIELD(commandType, CmdType);
-	WRITE_NODE_FIELD(qual);
-	WRITE_NODE_FIELD(targetList);
-}
-
-static void
-_outPartitionPruneInfo(StringInfo str, const PartitionPruneInfo *node)
-{
-	int			i;
-
-	WRITE_NODE_TYPE("PARTITIONPRUNEINFO");
-
-	WRITE_OID_FIELD(reloid);
-	WRITE_NODE_FIELD(pruning_steps);
-	WRITE_BITMAPSET_FIELD(present_parts);
-	WRITE_INT_FIELD(nparts);
-
-	appendStringInfoString(str, " :subnode_map");
-	for (i = 0; i < node->nparts; i++)
-		appendStringInfo(str, " %d", node->subnode_map[i]);
-
-	appendStringInfoString(str, " :subpart_map");
-	for (i = 0; i < node->nparts; i++)
-		appendStringInfo(str, " %d", node->subpart_map[i]);
-
-	WRITE_BITMAPSET_FIELD(extparams);
-	WRITE_BITMAPSET_FIELD(execparams);
 }
 
 /*****************************************************************************
@@ -1948,6 +1926,7 @@ _outAppendPath(StringInfo str, const AppendPath *node)
 
 	WRITE_NODE_FIELD(partitioned_rels);
 	WRITE_NODE_FIELD(subpaths);
+	WRITE_INT_FIELD(first_partial_path);
 }
 
 static void
@@ -2189,7 +2168,6 @@ _outModifyTablePath(StringInfo str, const ModifyTablePath *node)
 	WRITE_NODE_FIELD(partitioned_rels);
 	WRITE_BOOL_FIELD(partColsUpdated);
 	WRITE_NODE_FIELD(resultRelations);
-	WRITE_INT_FIELD(mergeTargetRelation);
 	WRITE_NODE_FIELD(subpaths);
 	WRITE_NODE_FIELD(subroots);
 	WRITE_NODE_FIELD(withCheckOptionLists);
@@ -2197,8 +2175,6 @@ _outModifyTablePath(StringInfo str, const ModifyTablePath *node)
 	WRITE_NODE_FIELD(rowMarks);
 	WRITE_NODE_FIELD(onconflict);
 	WRITE_INT_FIELD(epqParam);
-	WRITE_NODE_FIELD(mergeSourceTargetList);
-	WRITE_NODE_FIELD(mergeActionList);
 }
 
 static void
@@ -2255,6 +2231,7 @@ _outHashPath(StringInfo str, const HashPath *node)
 
 	WRITE_NODE_FIELD(path_hashclauses);
 	WRITE_INT_FIELD(num_batches);
+	WRITE_FLOAT_FIELD(inner_rows_total, "%.0f");
 }
 
 static void
@@ -2322,7 +2299,7 @@ _outPlannerInfo(StringInfo str, const PlannerInfo *node)
 	WRITE_FLOAT_FIELD(tuple_fraction, "%.4f");
 	WRITE_FLOAT_FIELD(limit_tuples, "%.0f");
 	WRITE_UINT_FIELD(qual_security_level);
-	WRITE_BOOL_FIELD(hasInheritedTarget);
+	WRITE_ENUM_FIELD(inhTargetKind, InheritanceKind);
 	WRITE_BOOL_FIELD(hasJoinRTEs);
 	WRITE_BOOL_FIELD(hasLateralRTEs);
 	WRITE_BOOL_FIELD(hasDeletedRTEs);
@@ -3012,9 +2989,6 @@ _outQuery(StringInfo str, const Query *node)
 	WRITE_NODE_FIELD(setOperations);
 	WRITE_NODE_FIELD(constraintDeps);
 	/* withCheckOptions intentionally omitted, see comment in parsenodes.h */
-	WRITE_INT_FIELD(mergeTarget_relation);
-	WRITE_NODE_FIELD(mergeSourceTargetList);
-	WRITE_NODE_FIELD(mergeActionList);
 	WRITE_LOCATION_FIELD(stmt_location);
 	WRITE_LOCATION_FIELD(stmt_len);
 }
@@ -3733,9 +3707,6 @@ outNode(StringInfo str, const void *obj)
 			case T_ModifyTable:
 				_outModifyTable(str, obj);
 				break;
-			case T_MergeWhenClause:
-				_outMergeWhenClause(str, obj);
-				break;
 			case T_Append:
 				_outAppend(str, obj);
 				break;
@@ -3855,6 +3826,15 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_PlanRowMark:
 				_outPlanRowMark(str, obj);
+				break;
+			case T_PartitionPruneInfo:
+				_outPartitionPruneInfo(str, obj);
+				break;
+			case T_PartitionPruneStepOp:
+				_outPartitionPruneStepOp(str, obj);
+				break;
+			case T_PartitionPruneStepCombine:
+				_outPartitionPruneStepCombine(str, obj);
 				break;
 			case T_PlanInvalItem:
 				_outPlanInvalItem(str, obj);
@@ -4011,18 +3991,6 @@ outNode(StringInfo str, const void *obj)
 				break;
 			case T_OnConflictExpr:
 				_outOnConflictExpr(str, obj);
-				break;
-			case T_MergeAction:
-				_outMergeAction(str, obj);
-				break;
-			case T_PartitionPruneStepOp:
-				_outPartitionPruneStepOp(str, obj);
-				break;
-			case T_PartitionPruneStepCombine:
-				_outPartitionPruneStepCombine(str, obj);
-				break;
-			case T_PartitionPruneInfo:
-				_outPartitionPruneInfo(str, obj);
 				break;
 			case T_Path:
 				_outPath(str, obj);

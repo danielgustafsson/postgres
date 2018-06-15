@@ -60,7 +60,8 @@ typedef struct IterateJsonStringValuesState
 	JsonIterateStringValuesAction action;	/* an action that will be applied
 											 * to each json value */
 	void	   *action_state;	/* any necessary context for iteration */
-	uint32      flags;			/* what kind of elements from a json we want to iterate */
+	uint32		flags;			/* what kind of elements from a json we want
+								 * to iterate */
 } IterateJsonStringValuesState;
 
 /* state for transform_json_string_values function */
@@ -1745,6 +1746,7 @@ each_worker_jsonb(FunctionCallInfo fcinfo, const char *funcname, bool as_text)
 			 * matter what shape it is.
 			 */
 			r = JsonbIteratorNext(&it, &v, skipNested);
+			Assert(r != WJB_DONE);
 
 			values[0] = PointerGetDatum(key);
 
@@ -2324,12 +2326,12 @@ populate_array_report_expected_array(PopulateArrayContext *ctx, int ndim)
 		if (ctx->colname)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("expected json array"),
+					 errmsg("expected JSON array"),
 					 errhint("See the value of key \"%s\".", ctx->colname)));
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("expected json array")));
+					 errmsg("expected JSON array")));
 	}
 	else
 	{
@@ -2346,13 +2348,13 @@ populate_array_report_expected_array(PopulateArrayContext *ctx, int ndim)
 		if (ctx->colname)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("expected json array"),
+					 errmsg("expected JSON array"),
 					 errhint("See the array element %s of key \"%s\".",
 							 indices.data, ctx->colname)));
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-					 errmsg("expected json array"),
+					 errmsg("expected JSON array"),
 					 errhint("See the array element %s.",
 							 indices.data)));
 	}
@@ -2388,7 +2390,7 @@ populate_array_check_dimension(PopulateArrayContext *ctx, int ndim)
 	else if (ctx->dims[ndim] != dim)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
-				 errmsg("malformed json array"),
+				 errmsg("malformed JSON array"),
 				 errdetail("Multidimensional arrays must have "
 						   "sub-arrays with matching dimensions.")));
 
@@ -4111,6 +4113,7 @@ addJsonbToParseState(JsonbParseState **jbps, Jsonb *jb)
 	if (JB_ROOT_IS_SCALAR(jb))
 	{
 		(void) JsonbIteratorNext(&it, &v, false);	/* skip array header */
+		Assert(v.type == jbvArray);
 		(void) JsonbIteratorNext(&it, &v, false);	/* fetch scalar value */
 
 		switch (o->type)
@@ -4224,7 +4227,7 @@ jsonb_delete(PG_FUNCTION_ARGS)
 
 	it = JsonbIteratorInit(&in->root);
 
-	while ((r = JsonbIteratorNext(&it, &v, skipNested)) != 0)
+	while ((r = JsonbIteratorNext(&it, &v, skipNested)) != WJB_DONE)
 	{
 		skipNested = true;
 
@@ -4234,7 +4237,7 @@ jsonb_delete(PG_FUNCTION_ARGS)
 		{
 			/* skip corresponding value as well */
 			if (r == WJB_KEY)
-				JsonbIteratorNext(&it, &v, true);
+				(void) JsonbIteratorNext(&it, &v, true);
 
 			continue;
 		}
@@ -4289,7 +4292,7 @@ jsonb_delete_array(PG_FUNCTION_ARGS)
 
 	it = JsonbIteratorInit(&in->root);
 
-	while ((r = JsonbIteratorNext(&it, &v, skipNested)) != 0)
+	while ((r = JsonbIteratorNext(&it, &v, skipNested)) != WJB_DONE)
 	{
 		skipNested = true;
 
@@ -4319,7 +4322,7 @@ jsonb_delete_array(PG_FUNCTION_ARGS)
 			{
 				/* skip corresponding value as well */
 				if (r == WJB_KEY)
-					JsonbIteratorNext(&it, &v, true);
+					(void) JsonbIteratorNext(&it, &v, true);
 
 				continue;
 			}
@@ -4385,7 +4388,7 @@ jsonb_delete_idx(PG_FUNCTION_ARGS)
 
 	pushJsonbValue(&state, r, NULL);
 
-	while ((r = JsonbIteratorNext(&it, &v, true)) != 0)
+	while ((r = JsonbIteratorNext(&it, &v, true)) != WJB_DONE)
 	{
 		if (r == WJB_ELEM)
 		{
@@ -4576,7 +4579,7 @@ IteratorConcat(JsonbIterator **it1, JsonbIterator **it2,
 		 * Append the all tokens from v2 to res, include last WJB_END_OBJECT
 		 * (the concatenation will be completed).
 		 */
-		while ((r2 = JsonbIteratorNext(it2, &v2, true)) != 0)
+		while ((r2 = JsonbIteratorNext(it2, &v2, true)) != WJB_DONE)
 			res = pushJsonbValue(state, r2, r2 != WJB_END_OBJECT ? &v2 : NULL);
 	}
 
@@ -4616,10 +4619,10 @@ IteratorConcat(JsonbIterator **it1, JsonbIterator **it2,
 		if (prepend)
 		{
 			pushJsonbValue(state, WJB_BEGIN_OBJECT, NULL);
-			while ((r1 = JsonbIteratorNext(it_object, &v1, true)) != 0)
+			while ((r1 = JsonbIteratorNext(it_object, &v1, true)) != WJB_DONE)
 				pushJsonbValue(state, r1, r1 != WJB_END_OBJECT ? &v1 : NULL);
 
-			while ((r2 = JsonbIteratorNext(it_array, &v2, true)) != 0)
+			while ((r2 = JsonbIteratorNext(it_array, &v2, true)) != WJB_DONE)
 				res = pushJsonbValue(state, r2, r2 != WJB_END_ARRAY ? &v2 : NULL);
 		}
 		else
@@ -4628,7 +4631,7 @@ IteratorConcat(JsonbIterator **it1, JsonbIterator **it2,
 				pushJsonbValue(state, r1, &v1);
 
 			pushJsonbValue(state, WJB_BEGIN_OBJECT, NULL);
-			while ((r2 = JsonbIteratorNext(it_object, &v2, true)) != 0)
+			while ((r2 = JsonbIteratorNext(it_object, &v2, true)) != WJB_DONE)
 				pushJsonbValue(state, r2, r2 != WJB_END_OBJECT ? &v2 : NULL);
 
 			res = pushJsonbValue(state, WJB_END_ARRAY, NULL);
@@ -4948,19 +4951,19 @@ setPathArray(JsonbIterator **it, Datum *path_elems, bool *path_nulls,
 uint32
 parse_jsonb_index_flags(Jsonb *jb)
 {
-	JsonbIterator	   *it;
-	JsonbValue			v;
-	JsonbIteratorToken	type;
-	uint32				flags = 0;
+	JsonbIterator *it;
+	JsonbValue	v;
+	JsonbIteratorToken type;
+	uint32		flags = 0;
 
 	it = JsonbIteratorInit(&jb->root);
 
 	type = JsonbIteratorNext(&it, &v, false);
 
 	/*
-	 * We iterate over array (scalar internally is represented as array, so, we
-	 * will accept it too) to check all its elements. Flag's names are choosen
-	 * the same as jsonb_typeof uses.
+	 * We iterate over array (scalar internally is represented as array, so,
+	 * we will accept it too) to check all its elements.  Flag names are
+	 * chosen the same as jsonb_typeof uses.
 	 */
 	if (type != WJB_BEGIN_ARRAY)
 		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -4972,10 +4975,10 @@ parse_jsonb_index_flags(Jsonb *jb)
 			ereport(ERROR,
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("flag array element is not a string"),
-					 errhint("Possible values are: \"string\", \"numeric\", \"boolean\", \"key\" and \"all\"")));
+					 errhint("Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\"")));
 
 		if (v.val.string.len == 3 &&
-				 pg_strncasecmp(v.val.string.val, "all", 3) == 0)
+			pg_strncasecmp(v.val.string.val, "all", 3) == 0)
 			flags |= jtiAll;
 		else if (v.val.string.len == 3 &&
 				 pg_strncasecmp(v.val.string.val, "key", 3) == 0)
@@ -4994,15 +4997,17 @@ parse_jsonb_index_flags(Jsonb *jb)
 					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 					 errmsg("wrong flag in flag array: \"%s\"",
 							pnstrdup(v.val.string.val, v.val.string.len)),
-					 errhint("Possible values are: \"string\", \"numeric\", \"boolean\", \"key\" and \"all\"")));
+					 errhint("Possible values are: \"string\", \"numeric\", \"boolean\", \"key\", and \"all\"")));
 	}
 
-	/* user should not get it */
+	/* expect end of array now */
 	if (type != WJB_END_ARRAY)
 		elog(ERROR, "unexpected end of flag array");
 
 	/* get final WJB_DONE and free iterator */
-	JsonbIteratorNext(&it, &v, false);
+	type = JsonbIteratorNext(&it, &v, false);
+	if (type != WJB_DONE)
+		elog(ERROR, "unexpected end of flag array");
 
 	return flags;
 }
@@ -5041,7 +5046,7 @@ iterate_jsonb_values(Jsonb *jb, uint32 flags, void *state,
 		}
 
 		/* JsonbValue is a value of object or element of array */
-		switch(v.type)
+		switch (v.type)
 		{
 			case jbvString:
 				if (flags & jtiString)
@@ -5050,10 +5055,10 @@ iterate_jsonb_values(Jsonb *jb, uint32 flags, void *state,
 			case jbvNumeric:
 				if (flags & jtiNumeric)
 				{
-					char *val;
+					char	   *val;
 
 					val = DatumGetCString(DirectFunctionCall1(numeric_out,
-								NumericGetDatum(v.val.numeric)));
+															  NumericGetDatum(v.val.numeric)));
 
 					action(state, val, strlen(val));
 					pfree(val);
@@ -5108,7 +5113,7 @@ iterate_values_scalar(void *state, char *token, JsonTokenType tokentype)
 {
 	IterateJsonStringValuesState *_state = (IterateJsonStringValuesState *) state;
 
-	switch(tokentype)
+	switch (tokentype)
 	{
 		case JSON_TOKEN_STRING:
 			if (_state->flags & jtiString)
@@ -5136,7 +5141,8 @@ iterate_values_object_field_start(void *state, char *fname, bool isnull)
 
 	if (_state->flags & jtiKey)
 	{
-		char *val = pstrdup(fname);
+		char	   *val = pstrdup(fname);
+
 		_state->action(_state->action_state, val, strlen(val));
 	}
 }

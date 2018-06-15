@@ -5367,49 +5367,49 @@ SELECT c1,c2,c3,c4 FROM ft2 ORDER BY c1;
 (819 rows)
 
 EXPLAIN (verbose, costs off)
-INSERT INTO ft2 (c1,c2,c3) VALUES (9999,999,'foo') RETURNING tableoid::regclass;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1200,999,'foo') RETURNING tableoid::regclass;
                                                                                            QUERY PLAN                                                                                            
 -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
  Insert on public.ft2
    Output: (tableoid)::regclass
    Remote SQL: INSERT INTO "S 1"."T 1"("C 1", c2, c3, c4, c5, c6, c7, c8) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
    ->  Result
-         Output: 9999, 999, NULL::integer, 'foo'::text, NULL::timestamp with time zone, NULL::timestamp without time zone, NULL::character varying, 'ft2       '::character(10), NULL::user_enum
+         Output: 1200, 999, NULL::integer, 'foo'::text, NULL::timestamp with time zone, NULL::timestamp without time zone, NULL::character varying, 'ft2       '::character(10), NULL::user_enum
 (5 rows)
 
-INSERT INTO ft2 (c1,c2,c3) VALUES (9999,999,'foo') RETURNING tableoid::regclass;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1200,999,'foo') RETURNING tableoid::regclass;
  tableoid 
 ----------
  ft2
 (1 row)
 
 EXPLAIN (verbose, costs off)
-UPDATE ft2 SET c3 = 'bar' WHERE c1 = 9999 RETURNING tableoid::regclass;             -- can be pushed down
+UPDATE ft2 SET c3 = 'bar' WHERE c1 = 1200 RETURNING tableoid::regclass;             -- can be pushed down
                                      QUERY PLAN                                     
 ------------------------------------------------------------------------------------
  Update on public.ft2
    Output: (tableoid)::regclass
    ->  Foreign Update on public.ft2
-         Remote SQL: UPDATE "S 1"."T 1" SET c3 = 'bar'::text WHERE (("C 1" = 9999))
+         Remote SQL: UPDATE "S 1"."T 1" SET c3 = 'bar'::text WHERE (("C 1" = 1200))
 (4 rows)
 
-UPDATE ft2 SET c3 = 'bar' WHERE c1 = 9999 RETURNING tableoid::regclass;
+UPDATE ft2 SET c3 = 'bar' WHERE c1 = 1200 RETURNING tableoid::regclass;
  tableoid 
 ----------
  ft2
 (1 row)
 
 EXPLAIN (verbose, costs off)
-DELETE FROM ft2 WHERE c1 = 9999 RETURNING tableoid::regclass;                       -- can be pushed down
+DELETE FROM ft2 WHERE c1 = 1200 RETURNING tableoid::regclass;                       -- can be pushed down
                              QUERY PLAN                             
 --------------------------------------------------------------------
  Delete on public.ft2
    Output: (tableoid)::regclass
    ->  Foreign Delete on public.ft2
-         Remote SQL: DELETE FROM "S 1"."T 1" WHERE (("C 1" = 9999))
+         Remote SQL: DELETE FROM "S 1"."T 1" WHERE (("C 1" = 1200))
 (4 rows)
 
-DELETE FROM ft2 WHERE c1 = 9999 RETURNING tableoid::regclass;
+DELETE FROM ft2 WHERE c1 = 1200 RETURNING tableoid::regclass;
  tableoid 
 ----------
  ft2
@@ -7370,6 +7370,81 @@ drop table bar cascade;
 NOTICE:  drop cascades to foreign table bar2
 drop table loct1;
 drop table loct2;
+-- Test pushing down UPDATE/DELETE joins to the remote server
+create table parent (a int, b text);
+create table loct1 (a int, b text);
+create table loct2 (a int, b text);
+create foreign table remt1 (a int, b text)
+  server loopback options (table_name 'loct1');
+create foreign table remt2 (a int, b text)
+  server loopback options (table_name 'loct2');
+alter foreign table remt1 inherit parent;
+insert into remt1 values (1, 'foo');
+insert into remt1 values (2, 'bar');
+insert into remt2 values (1, 'foo');
+insert into remt2 values (2, 'bar');
+analyze remt1;
+analyze remt2;
+explain (verbose, costs off)
+update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a returning *;
+                                                                  QUERY PLAN                                                                   
+-----------------------------------------------------------------------------------------------------------------------------------------------
+ Update on public.parent
+   Output: parent.a, parent.b, remt2.a, remt2.b
+   Update on public.parent
+   Foreign Update on public.remt1
+   ->  Nested Loop
+         Output: parent.a, (parent.b || remt2.b), parent.ctid, remt2.*, remt2.a, remt2.b
+         Join Filter: (parent.a = remt2.a)
+         ->  Seq Scan on public.parent
+               Output: parent.a, parent.b, parent.ctid
+         ->  Foreign Scan on public.remt2
+               Output: remt2.b, remt2.*, remt2.a
+               Remote SQL: SELECT a, b FROM public.loct2
+   ->  Foreign Update
+         Remote SQL: UPDATE public.loct1 r4 SET b = (r4.b || r2.b) FROM public.loct2 r2 WHERE ((r4.a = r2.a)) RETURNING r4.a, r4.b, r2.a, r2.b
+(14 rows)
+
+update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a returning *;
+ a |   b    | a |  b  
+---+--------+---+-----
+ 1 | foofoo | 1 | foo
+ 2 | barbar | 2 | bar
+(2 rows)
+
+explain (verbose, costs off)
+delete from parent using remt2 where parent.a = remt2.a returning parent;
+                                                    QUERY PLAN                                                    
+------------------------------------------------------------------------------------------------------------------
+ Delete on public.parent
+   Output: parent.*
+   Delete on public.parent
+   Foreign Delete on public.remt1
+   ->  Nested Loop
+         Output: parent.ctid, remt2.*
+         Join Filter: (parent.a = remt2.a)
+         ->  Seq Scan on public.parent
+               Output: parent.ctid, parent.a
+         ->  Foreign Scan on public.remt2
+               Output: remt2.*, remt2.a
+               Remote SQL: SELECT a, b FROM public.loct2
+   ->  Foreign Delete
+         Remote SQL: DELETE FROM public.loct1 r4 USING public.loct2 r2 WHERE ((r4.a = r2.a)) RETURNING r4.a, r4.b
+(14 rows)
+
+delete from parent using remt2 where parent.a = remt2.a returning parent;
+   parent   
+------------
+ (1,foofoo)
+ (2,barbar)
+(2 rows)
+
+-- cleanup
+drop foreign table remt1;
+drop foreign table remt2;
+drop table loct1;
+drop table loct2;
+drop table parent;
 -- ===================================================================
 -- test tuple routing for foreign-table partitions
 -- ===================================================================
@@ -7454,6 +7529,48 @@ select tableoid::regclass, * FROM itrtest;
  remp1    | 1 | foo
 (1 row)
 
+delete from itrtest;
+drop index loct1_idx;
+-- Test that remote triggers work with insert tuple routing
+create function br_insert_trigfunc() returns trigger as $$
+begin
+	new.b := new.b || ' triggered !';
+	return new;
+end
+$$ language plpgsql;
+create trigger loct1_br_insert_trigger before insert on loct1
+	for each row execute procedure br_insert_trigfunc();
+create trigger loct2_br_insert_trigger before insert on loct2
+	for each row execute procedure br_insert_trigfunc();
+-- The new values are concatenated with ' triggered !'
+insert into itrtest values (1, 'foo') returning *;
+ a |        b        
+---+-----------------
+ 1 | foo triggered !
+(1 row)
+
+insert into itrtest values (2, 'qux') returning *;
+ a |        b        
+---+-----------------
+ 2 | qux triggered !
+(1 row)
+
+insert into itrtest values (1, 'test1'), (2, 'test2') returning *;
+ a |         b         
+---+-------------------
+ 1 | test1 triggered !
+ 2 | test2 triggered !
+(2 rows)
+
+with result as (insert into itrtest values (1, 'test1'), (2, 'test2') returning *) select * from result;
+ a |         b         
+---+-------------------
+ 1 | test1 triggered !
+ 2 | test2 triggered !
+(2 rows)
+
+drop trigger loct1_br_insert_trigger on loct1;
+drop trigger loct2_br_insert_trigger on loct2;
 drop table itrtest;
 drop table loct1;
 drop table loct2;
@@ -7518,6 +7635,57 @@ select tableoid::regclass, * FROM locp;
 
 -- The executor should not let unexercised FDWs shut down
 update utrtest set a = 1 where b = 'foo';
+-- Test that remote triggers work with update tuple routing
+create trigger loct_br_insert_trigger before insert on loct
+	for each row execute procedure br_insert_trigfunc();
+delete from utrtest;
+insert into utrtest values (2, 'qux');
+-- Check case where the foreign partition is a subplan target rel
+explain (verbose, costs off)
+update utrtest set a = 1 where a = 1 or a = 2 returning *;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Update on public.utrtest
+   Output: remp.a, remp.b
+   Foreign Update on public.remp
+   Update on public.locp
+   ->  Foreign Update on public.remp
+         Remote SQL: UPDATE public.loct SET a = 1 WHERE (((a = 1) OR (a = 2))) RETURNING a, b
+   ->  Seq Scan on public.locp
+         Output: 1, locp.b, locp.ctid
+         Filter: ((locp.a = 1) OR (locp.a = 2))
+(9 rows)
+
+-- The new values are concatenated with ' triggered !'
+update utrtest set a = 1 where a = 1 or a = 2 returning *;
+ a |        b        
+---+-----------------
+ 1 | qux triggered !
+(1 row)
+
+delete from utrtest;
+insert into utrtest values (2, 'qux');
+-- Check case where the foreign partition isn't a subplan target rel
+explain (verbose, costs off)
+update utrtest set a = 1 where a = 2 returning *;
+              QUERY PLAN              
+--------------------------------------
+ Update on public.utrtest
+   Output: locp.a, locp.b
+   Update on public.locp
+   ->  Seq Scan on public.locp
+         Output: 1, locp.b, locp.ctid
+         Filter: (locp.a = 2)
+(6 rows)
+
+-- The new values are concatenated with ' triggered !'
+update utrtest set a = 1 where a = 2 returning *;
+ a |        b        
+---+-----------------
+ 1 | qux triggered !
+(1 row)
+
+drop trigger loct_br_insert_trigger on loct;
 drop table utrtest;
 drop table loct;
 -- Test copy tuple routing
@@ -7948,7 +8116,7 @@ CREATE TABLE import_source.t5 (c1 int, c2 text collate "C", "Col" "Colors");
 CREATE SCHEMA import_dest5;
 BEGIN;
 DROP TYPE "Colors" CASCADE;
-NOTICE:  drop cascades to table import_source.t5 column Col
+NOTICE:  drop cascades to column Col of table import_source.t5
 IMPORT FOREIGN SCHEMA import_source LIMIT TO (t5)
   FROM SERVER loopback INTO import_dest5;  -- ERROR
 ERROR:  type "public.Colors" does not exist

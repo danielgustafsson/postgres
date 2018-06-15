@@ -869,10 +869,10 @@ apply_handle_delete(StringInfo s)
 	else
 	{
 		/* The tuple to be deleted could not be found. */
-		ereport(DEBUG1,
-				(errmsg("logical replication could not find row for delete "
-						"in replication target relation \"%s\"",
-						RelationGetRelationName(rel->localrel))));
+		elog(DEBUG1,
+			 "logical replication could not find row for delete "
+			 "in replication target relation \"%s\"",
+			 RelationGetRelationName(rel->localrel));
 	}
 
 	/* Cleanup. */
@@ -899,14 +899,14 @@ apply_handle_delete(StringInfo s)
 static void
 apply_handle_truncate(StringInfo s)
 {
-	bool	 cascade = false;
-	bool	 restart_seqs = false;
-	List	*remote_relids = NIL;
-	List    *remote_rels = NIL;
-	List    *rels = NIL;
-	List    *relids = NIL;
-	List	*relids_logged = NIL;
-	ListCell *lc;
+	bool		cascade = false;
+	bool		restart_seqs = false;
+	List	   *remote_relids = NIL;
+	List	   *remote_rels = NIL;
+	List	   *rels = NIL;
+	List	   *relids = NIL;
+	List	   *relids_logged = NIL;
+	ListCell   *lc;
 
 	ensure_transaction();
 
@@ -932,13 +932,13 @@ apply_handle_truncate(StringInfo s)
 		rels = lappend(rels, rel->localrel);
 		relids = lappend_oid(relids, rel->localreloid);
 		if (RelationIsLogicallyLogged(rel->localrel))
-			relids_logged = lappend_oid(relids, rel->localreloid);
+			relids_logged = lappend_oid(relids_logged, rel->localreloid);
 	}
 
 	/*
-	 * Even if we used CASCADE on the upstream master we explicitly
-	 * default to replaying changes without further cascading.
-	 * This might be later changeable with a user specified option.
+	 * Even if we used CASCADE on the upstream master we explicitly default to
+	 * replaying changes without further cascading. This might be later
+	 * changeable with a user specified option.
 	 */
 	ExecuteTruncateGuts(rels, relids, relids_logged, DROP_RESTRICT, restart_seqs);
 

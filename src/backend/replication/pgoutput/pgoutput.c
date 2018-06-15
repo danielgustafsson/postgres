@@ -40,8 +40,8 @@ static void pgoutput_change(LogicalDecodingContext *ctx,
 				ReorderBufferTXN *txn, Relation rel,
 				ReorderBufferChange *change);
 static void pgoutput_truncate(LogicalDecodingContext *ctx,
-							  ReorderBufferTXN *txn, int nrelations, Relation relations[],
-							  ReorderBufferChange *change);
+				  ReorderBufferTXN *txn, int nrelations, Relation relations[],
+				  ReorderBufferChange *change);
 static bool pgoutput_origin_filter(LogicalDecodingContext *ctx,
 					   RepOriginId origin_id);
 
@@ -407,13 +407,16 @@ pgoutput_truncate(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 		maybe_send_schema(ctx, relation, relentry);
 	}
 
-	OutputPluginPrepareWrite(ctx, true);
-	logicalrep_write_truncate(ctx->out,
-							  nrelids,
-							  relids,
-							  change->data.truncate.cascade,
-							  change->data.truncate.restart_seqs);
-	OutputPluginWrite(ctx, true);
+	if (nrelids > 0)
+	{
+		OutputPluginPrepareWrite(ctx, true);
+		logicalrep_write_truncate(ctx->out,
+								  nrelids,
+								  relids,
+								  change->data.truncate.cascade,
+								  change->data.truncate.restart_seqs);
+		OutputPluginWrite(ctx, true);
+	}
 
 	MemoryContextSwitchTo(old);
 	MemoryContextReset(data->context);

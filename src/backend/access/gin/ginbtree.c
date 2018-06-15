@@ -84,6 +84,9 @@ ginFindLeafPage(GinBtree btree, bool searchMode, Snapshot snapshot)
 	stack->parent = NULL;
 	stack->predictNumber = 1;
 
+	if (!searchMode)
+		CheckForSerializableConflictIn(btree->index, NULL, stack->buffer);
+
 	for (;;)
 	{
 		Page		page;
@@ -521,12 +524,12 @@ ginPlaceToPage(GinBtree btree, GinBtreeStack *stack,
 			{
 
 				PredicateLockPageSplit(btree->index,
-						BufferGetBlockNumber(stack->buffer),
-						BufferGetBlockNumber(lbuffer));
+									   BufferGetBlockNumber(stack->buffer),
+									   BufferGetBlockNumber(lbuffer));
 
 				PredicateLockPageSplit(btree->index,
-						BufferGetBlockNumber(stack->buffer),
-						BufferGetBlockNumber(rbuffer));
+									   BufferGetBlockNumber(stack->buffer),
+									   BufferGetBlockNumber(rbuffer));
 			}
 
 		}
@@ -543,8 +546,8 @@ ginPlaceToPage(GinBtree btree, GinBtreeStack *stack,
 			{
 
 				PredicateLockPageSplit(btree->index,
-						BufferGetBlockNumber(stack->buffer),
-						BufferGetBlockNumber(rbuffer));
+									   BufferGetBlockNumber(stack->buffer),
+									   BufferGetBlockNumber(rbuffer));
 			}
 		}
 

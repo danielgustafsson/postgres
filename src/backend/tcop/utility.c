@@ -67,7 +67,9 @@
 #include "tcop/utility.h"
 #include "utils/acl.h"
 #include "utils/guc.h"
+#include "utils/lsyscache.h"
 #include "utils/syscache.h"
+#include "utils/rel.h"
 
 
 /* Hook for plugins to get control in ProcessUtility() */
@@ -110,7 +112,6 @@ CommandIsReadOnly(PlannedStmt *pstmt)
 		case CMD_UPDATE:
 		case CMD_INSERT:
 		case CMD_DELETE:
-		case CMD_MERGE:
 			return false;
 		case CMD_UTILITY:
 			/* For now, treat all utility commands as read/write */
@@ -792,9 +793,9 @@ standard_ProcessUtility(PlannedStmt *pstmt,
 						 * intended effect!
 						 */
 						PreventInTransactionBlock(isTopLevel,
-												(stmt->kind == REINDEX_OBJECT_SCHEMA) ? "REINDEX SCHEMA" :
-												(stmt->kind == REINDEX_OBJECT_SYSTEM) ? "REINDEX SYSTEM" :
-												"REINDEX DATABASE");
+												  (stmt->kind == REINDEX_OBJECT_SCHEMA) ? "REINDEX SCHEMA" :
+												  (stmt->kind == REINDEX_OBJECT_SYSTEM) ? "REINDEX SYSTEM" :
+												  "REINDEX DATABASE");
 						ReindexMultipleTables(stmt->name, stmt->kind, stmt->options);
 						break;
 					default:
@@ -1287,11 +1288,10 @@ ProcessUtilitySlow(ParseState *pstate,
 					IndexStmt  *stmt = (IndexStmt *) parsetree;
 					Oid			relid;
 					LOCKMODE	lockmode;
-					List	   *inheritors = NIL;
 
 					if (stmt->concurrent)
 						PreventInTransactionBlock(isTopLevel,
-												"CREATE INDEX CONCURRENTLY");
+												  "CREATE INDEX CONCURRENTLY");
 
 					/*
 					 * Look up the relation OID just once, right here at the
@@ -1314,17 +1314,33 @@ ProcessUtilitySlow(ParseState *pstate,
 					 * CREATE INDEX on partitioned tables (but not regular
 					 * inherited tables) recurses to partitions, so we must
 					 * acquire locks early to avoid deadlocks.
+					 *
+					 * We also take the opportunity to verify that all
+					 * partitions are something we can put an index on,
+					 * to avoid building some indexes only to fail later.
 					 */
-					if (stmt->relation->inh)
+					if (stmt->relation->inh &&
+						get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE)
 					{
-						Relation	rel;
+						ListCell   *lc;
+						List	   *inheritors = NIL;
 
-						/* already locked by RangeVarGetRelidExtended */
-						rel = heap_open(relid, NoLock);
-						if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-							inheritors = find_all_inheritors(relid, lockmode,
-															 NULL);
-						heap_close(rel, NoLock);
+						inheritors = find_all_inheritors(relid, lockmode, NULL);
+						foreach(lc, inheritors)
+						{
+							char	relkind = get_rel_relkind(lfirst_oid(lc));
+
+							if (relkind != RELKIND_RELATION &&
+								relkind != RELKIND_MATVIEW &&
+								relkind != RELKIND_PARTITIONED_TABLE)
+								ereport(ERROR,
+										(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+										 errmsg("cannot create index on partitioned table \"%s\"",
+												stmt->relation->relname),
+										 errdetail("Table \"%s\" contains partitions that are foreign tables.",
+												   stmt->relation->relname)));
+						}
+						list_free(inheritors);
 					}
 
 					/* Run parse analysis ... */
@@ -1353,8 +1369,6 @@ ProcessUtilitySlow(ParseState *pstate,
 													 parsetree);
 					commandCollected = true;
 					EventTriggerAlterTableEnd();
-
-					list_free(inheritors);
 				}
 				break;
 
@@ -1700,7 +1714,7 @@ ExecDropStmt(DropStmt *stmt, bool isTopLevel)
 		case OBJECT_INDEX:
 			if (stmt->concurrent)
 				PreventInTransactionBlock(isTopLevel,
-										"DROP INDEX CONCURRENTLY");
+										  "DROP INDEX CONCURRENTLY");
 			/* fall through */
 
 		case OBJECT_TABLE:
@@ -1833,8 +1847,6 @@ QueryReturnsTuples(Query *parsetree)
 		case CMD_SELECT:
 			/* returns tuples */
 			return true;
-		case CMD_MERGE:
-			return false;
 		case CMD_INSERT:
 		case CMD_UPDATE:
 		case CMD_DELETE:
@@ -2077,10 +2089,6 @@ CreateCommandTag(Node *parsetree)
 
 		case T_UpdateStmt:
 			tag = "UPDATE";
-			break;
-
-		case T_MergeStmt:
-			tag = "MERGE";
 			break;
 
 		case T_SelectStmt:
@@ -2826,9 +2834,6 @@ CreateCommandTag(Node *parsetree)
 					case CMD_DELETE:
 						tag = "DELETE";
 						break;
-					case CMD_MERGE:
-						tag = "MERGE";
-						break;
 					case CMD_UTILITY:
 						tag = CreateCommandTag(stmt->utilityStmt);
 						break;
@@ -2889,9 +2894,6 @@ CreateCommandTag(Node *parsetree)
 					case CMD_DELETE:
 						tag = "DELETE";
 						break;
-					case CMD_MERGE:
-						tag = "MERGE";
-						break;
 					case CMD_UTILITY:
 						tag = CreateCommandTag(stmt->utilityStmt);
 						break;
@@ -2940,7 +2942,6 @@ GetCommandLogLevel(Node *parsetree)
 		case T_InsertStmt:
 		case T_DeleteStmt:
 		case T_UpdateStmt:
-		case T_MergeStmt:
 			lev = LOGSTMT_MOD;
 			break;
 
@@ -3380,7 +3381,6 @@ GetCommandLogLevel(Node *parsetree)
 					case CMD_UPDATE:
 					case CMD_INSERT:
 					case CMD_DELETE:
-					case CMD_MERGE:
 						lev = LOGSTMT_MOD;
 						break;
 
@@ -3411,7 +3411,6 @@ GetCommandLogLevel(Node *parsetree)
 					case CMD_UPDATE:
 					case CMD_INSERT:
 					case CMD_DELETE:
-					case CMD_MERGE:
 						lev = LOGSTMT_MOD;
 						break;
 

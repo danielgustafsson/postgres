@@ -42,7 +42,6 @@ usage()
 	printf(_("  %s [OPTION] [DATADIR]\n"), progname);
 	printf(_("\nOptions:\n"));
 	printf(_(" [-D] DATADIR    data directory\n"));
-	printf(_("  -f,            force check even if checksums are disabled\n"));
 	printf(_("  -r relfilenode check only relation with specified relfilenode\n"));
 	printf(_("  -d             debug output, listing all checked blocks\n"));
 	printf(_("  -V, --version  output version information, then exit\n"));
@@ -86,7 +85,8 @@ scan_file(char *fn, int segmentno)
 	f = open(fn, 0);
 	if (f < 0)
 	{
-		fprintf(stderr, _("%s: could not open file \"%s\": %m\n"), progname, fn);
+		fprintf(stderr, _("%s: could not open file \"%s\": %s\n"),
+				progname, fn, strerror(errno));
 		exit(1);
 	}
 
@@ -106,6 +106,10 @@ scan_file(char *fn, int segmentno)
 			exit(1);
 		}
 		blocks++;
+
+		/* New pages have no checksum yet */
+		if (PageIsNew(buf))
+			continue;
 
 		csum = pg_checksum_page(buf, blockno + segmentno * RELSEG_SIZE);
 		if (csum != header->pd_checksum)
@@ -134,8 +138,8 @@ scan_directory(char *basedir, char *subdir)
 	dir = opendir(path);
 	if (!dir)
 	{
-		fprintf(stderr, _("%s: could not open directory \"%s\": %m\n"),
-				progname, path);
+		fprintf(stderr, _("%s: could not open directory \"%s\": %s\n"),
+				progname, path, strerror(errno));
 		exit(1);
 	}
 	while ((de = readdir(dir)) != NULL)
@@ -149,8 +153,8 @@ scan_directory(char *basedir, char *subdir)
 		snprintf(fn, sizeof(fn), "%s/%s", path, de->d_name);
 		if (lstat(fn, &st) < 0)
 		{
-			fprintf(stderr, _("%s: could not stat file \"%s\": %m\n"),
-					progname, fn);
+			fprintf(stderr, _("%s: could not stat file \"%s\": %s\n"),
+					progname, fn, strerror(errno));
 			exit(1);
 		}
 		if (S_ISREG(st.st_mode))
@@ -202,7 +206,6 @@ int
 main(int argc, char *argv[])
 {
 	char	   *DataDir = NULL;
-	bool		force = false;
 	int			c;
 	bool		crc_ok;
 
@@ -224,7 +227,7 @@ main(int argc, char *argv[])
 		}
 	}
 
-	while ((c = getopt(argc, argv, "D:fr:d")) != -1)
+	while ((c = getopt(argc, argv, "D:r:d")) != -1)
 	{
 		switch (c)
 		{
@@ -233,9 +236,6 @@ main(int argc, char *argv[])
 				break;
 			case 'D':
 				DataDir = optarg;
-				break;
-			case 'f':
-				force = true;
 				break;
 			case 'r':
 				if (atoi(optarg) <= 0)
@@ -292,7 +292,7 @@ main(int argc, char *argv[])
 		exit(1);
 	}
 
-	if (ControlFile->data_checksum_version == 0 && !force)
+	if (ControlFile->data_checksum_version == 0)
 	{
 		fprintf(stderr, _("%s: data checksums are not enabled in cluster.\n"), progname);
 		exit(1);

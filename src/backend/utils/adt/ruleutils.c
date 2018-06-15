@@ -24,7 +24,6 @@
 #include "access/sysattr.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
-#include "catalog/partition.h"
 #include "catalog/pg_aggregate.h"
 #include "catalog/pg_am.h"
 #include "catalog/pg_authid.h"
@@ -64,6 +63,7 @@
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/partcache.h"
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
@@ -1356,14 +1356,14 @@ pg_get_indexdef_worker(Oid indexrelid, int colno,
 		{
 			Oid			indcoll;
 
+			if (keyno >= idxrec->indnkeyatts)
+				continue;
+
 			/* Add collation, if not default for column */
 			indcoll = indcollation->values[keyno];
 			if (OidIsValid(indcoll) && indcoll != keycolcollation)
 				appendStringInfo(&buf, " COLLATE %s",
 								 generate_collation_name((indcoll)));
-
-			if (keyno >= idxrec->indnkeyatts)
-				continue;
 
 			/* Add the operator class name, if not default */
 			get_opclass_name(indclass->values[keyno], keycoltype, &buf);
@@ -7481,8 +7481,8 @@ isSimpleNode(Node *node, Node *parentNode, int prettyFlags)
 					return false;
 				}
 				/* else do the same stuff as for T_SubLink et al. */
-				/* FALL THROUGH */
 			}
+			/* FALLTHROUGH */
 
 		case T_SubLink:
 		case T_NullTest:

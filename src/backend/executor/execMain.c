@@ -42,7 +42,6 @@
 #include "access/transam.h"
 #include "access/xact.h"
 #include "catalog/namespace.h"
-#include "catalog/partition.h"
 #include "catalog/pg_publication.h"
 #include "commands/matview.h"
 #include "commands/trigger.h"
@@ -60,6 +59,7 @@
 #include "utils/acl.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/partcache.h"
 #include "utils/rls.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
@@ -233,7 +233,6 @@ standard_ExecutorStart(QueryDesc *queryDesc, int eflags)
 		case CMD_INSERT:
 		case CMD_DELETE:
 		case CMD_UPDATE:
-		case CMD_MERGE:
 			estate->es_output_cid = GetCurrentCommandId(true);
 			break;
 
@@ -870,7 +869,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		/*
 		 * In the partitioned result relation case, lock the non-leaf result
 		 * relations too.  A subset of these are the roots of respective
-		 * partitioned tables, for which we also allocate ResulRelInfos.
+		 * partitioned tables, for which we also allocate ResultRelInfos.
 		 */
 		estate->es_root_result_relations = NULL;
 		estate->es_num_root_result_relations = 0;
@@ -1351,9 +1350,6 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
 	resultRelInfo->ri_onConflictArbiterIndexes = NIL;
 	resultRelInfo->ri_onConflict = NULL;
 
-	resultRelInfo->ri_mergeTargetRTI = 0;
-	resultRelInfo->ri_mergeState = (MergeState *) palloc0(sizeof (MergeState));
-
 	/*
 	 * Partition constraint, which also includes the partition constraint of
 	 * all the ancestors that are partitions.  Note that it will be checked
@@ -1421,6 +1417,7 @@ ExecGetTriggerResultRel(EState *estate, Oid relid)
 		rInfo++;
 		nr--;
 	}
+
 	/*
 	 * Third, search through the result relations that were created during
 	 * tuple routing, if any.
@@ -1859,14 +1856,16 @@ ExecRelCheck(ResultRelInfo *resultRelInfo,
 /*
  * ExecPartitionCheck --- check that tuple meets the partition constraint.
  *
- * Exported in executor.h for outside use.
- * Returns true if it meets the partition constraint, else returns false.
+ * Returns true if it meets the partition constraint.  If the constraint
+ * fails and we're asked to emit to error, do so and don't return; otherwise
+ * return false.
  */
 bool
 ExecPartitionCheck(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
-				   EState *estate)
+				   EState *estate, bool emitError)
 {
 	ExprContext *econtext;
+	bool	success;
 
 	/*
 	 * If first time through, build expression state tree for the partition
@@ -1893,7 +1892,13 @@ ExecPartitionCheck(ResultRelInfo *resultRelInfo, TupleTableSlot *slot,
 	 * As in case of the catalogued constraints, we treat a NULL result as
 	 * success here, not a failure.
 	 */
-	return ExecCheck(resultRelInfo->ri_PartitionCheckExpr, econtext);
+	success = ExecCheck(resultRelInfo->ri_PartitionCheckExpr, econtext);
+
+	/* if asked to emit error, don't actually return on failure */
+	if (!success && emitError)
+		ExecPartitionCheckEmitError(resultRelInfo, slot, estate);
+
+	return success;
 }
 
 /*
@@ -1954,17 +1959,17 @@ ExecPartitionCheckEmitError(ResultRelInfo *resultRelInfo,
 /*
  * ExecConstraints - check constraints of the tuple in 'slot'
  *
- * This checks the traditional NOT NULL and check constraints, and if
- * requested, checks the partition constraint.
+ * This checks the traditional NOT NULL and check constraints.
+ *
+ * The partition constraint is *NOT* checked.
  *
  * Note: 'slot' contains the tuple to check the constraints of, which may
  * have been converted from the original input tuple after tuple routing.
- * 'resultRelInfo' is the original result relation, before tuple routing.
+ * 'resultRelInfo' is the final result relation, after tuple routing.
  */
 void
 ExecConstraints(ResultRelInfo *resultRelInfo,
-				TupleTableSlot *slot, EState *estate,
-				bool check_partition_constraint)
+				TupleTableSlot *slot, EState *estate)
 {
 	Relation	rel = resultRelInfo->ri_RelationDesc;
 	TupleDesc	tupdesc = RelationGetDescr(rel);
@@ -2079,12 +2084,7 @@ ExecConstraints(ResultRelInfo *resultRelInfo,
 					 errtableconstraint(orig_rel, failed)));
 		}
 	}
-
-	if (check_partition_constraint && resultRelInfo->ri_PartitionCheck &&
-		!ExecPartitionCheck(resultRelInfo, slot, estate))
-		ExecPartitionCheckEmitError(resultRelInfo, slot, estate);
 }
-
 
 /*
  * ExecWithCheckOptions -- check that tuple satisfies any WITH CHECK OPTIONs
@@ -2201,19 +2201,6 @@ ExecWithCheckOptions(WCOKind kind, ResultRelInfo *resultRelInfo,
 						ereport(ERROR,
 								(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 								 errmsg("new row violates row-level security policy for table \"%s\"",
-										wco->relname)));
-					break;
-				case WCO_RLS_MERGE_UPDATE_CHECK:
-				case WCO_RLS_MERGE_DELETE_CHECK:
-					if (wco->polname != NULL)
-						ereport(ERROR,
-								(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-								 errmsg("target row violates row-level security policy \"%s\" (USING expression) for table \"%s\"",
-										wco->polname, wco->relname)));
-					else
-						ereport(ERROR,
-								(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-								 errmsg("target row violates row-level security policy (USING expression) for table \"%s\"",
 										wco->relname)));
 					break;
 				case WCO_RLS_CONFLICT_CHECK:
@@ -2757,6 +2744,7 @@ EvalPlanQualFetch(EState *estate, Relation relation, int lockmode,
 
 				case HeapTupleInvisible:
 					elog(ERROR, "attempted to lock invisible tuple");
+					break;
 
 				default:
 					ReleaseBuffer(buffer);

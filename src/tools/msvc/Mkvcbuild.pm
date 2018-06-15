@@ -39,7 +39,8 @@ my $contrib_extralibs      = undef;
 my $contrib_extraincludes = { 'dblink' => ['src/backend'] };
 my $contrib_extrasource = {
 	'cube' => [ 'contrib/cube/cubescan.l', 'contrib/cube/cubeparse.y' ],
-	'seg'  => [ 'contrib/seg/segscan.l',   'contrib/seg/segparse.y' ], };
+	'seg'  => [ 'contrib/seg/segscan.l',   'contrib/seg/segparse.y' ],
+};
 my @contrib_excludes = (
 	'commit_ts',       'hstore_plperl',
 	'hstore_plpython', 'intagg',
@@ -64,14 +65,17 @@ my $frontend_extralibs = {
 	'initdb'     => ['ws2_32.lib'],
 	'pg_restore' => ['ws2_32.lib'],
 	'pgbench'    => ['ws2_32.lib'],
-	'psql'       => ['ws2_32.lib'] };
+	'psql'       => ['ws2_32.lib']
+};
 my $frontend_extraincludes = {
 	'initdb' => ['src/timezone'],
-	'psql'   => ['src/backend'] };
+	'psql'   => ['src/backend']
+};
 my $frontend_extrasource = {
 	'psql' => ['src/bin/psql/psqlscanslash.l'],
 	'pgbench' =>
-	  [ 'src/bin/pgbench/exprscan.l', 'src/bin/pgbench/exprparse.y' ] };
+	  [ 'src/bin/pgbench/exprscan.l', 'src/bin/pgbench/exprparse.y' ]
+};
 my @frontend_excludes = (
 	'pgevent',    'pg_basebackup', 'pg_rewind', 'pg_dump',
 	'pg_waldump', 'scripts');
@@ -179,8 +183,8 @@ sub mkvcbuild
 	$postgres->AddLibrary('wldap32.lib') if ($solution->{options}->{ldap});
 	$postgres->FullExportDLL('postgres.lib');
 
-   # The OBJS scraper doesn't know about ifdefs, so remove be-secure-openssl.c
-   # if building without OpenSSL
+	# The OBJS scraper doesn't know about ifdefs, so remove be-secure-openssl.c
+	# if building without OpenSSL
 	if (!$solution->{options}->{openssl})
 	{
 		$postgres->RemoveFile('src/backend/libpq/be-secure-common.c');
@@ -239,9 +243,9 @@ sub mkvcbuild
 		'src/interfaces/libpq/libpq.rc');
 	$libpq->AddReference($libpgport);
 
-   # The OBJS scraper doesn't know about ifdefs, so remove fe-secure-openssl.c
-   # and sha2_openssl.c if building without OpenSSL, and remove sha2.c if
-   # building with OpenSSL.
+	# The OBJS scraper doesn't know about ifdefs, so remove fe-secure-openssl.c
+	# and sha2_openssl.c if building without OpenSSL, and remove sha2.c if
+	# building with OpenSSL.
 	if (!$solution->{options}->{openssl})
 	{
 		$libpq->RemoveFile('src/interfaces/libpq/fe-secure-common.c');
@@ -534,7 +538,8 @@ sub mkvcbuild
 		# Starting with ActivePerl 5.24, both  perlnn.lib and libperlnn.a are provided.
 		# In this case, prefer .lib.
 		my @perl_libs =
-		  reverse sort grep { /perl\d+\.lib$|libperl\d+\.a$/ } glob($perl_path);
+		  reverse sort grep { /perl\d+\.lib$|libperl\d+\.a$/ }
+		  glob($perl_path);
 		if (@perl_libs > 0)
 		{
 			$plperl->AddLibrary($perl_libs[0]);
@@ -542,7 +547,7 @@ sub mkvcbuild
 		else
 		{
 			die
-"could not identify perl library version matching pattern $perl_path\n";
+			  "could not identify perl library version matching pattern $perl_path\n";
 		}
 
 		# Add defines from Perl's ccflags; see PGAC_CHECK_PERL_EMBED_CCFLAGS
@@ -686,7 +691,7 @@ sub mkvcbuild
 			(my $xsc = $xs) =~ s/\.xs/.c/;
 			if (Solution::IsNewer("$plperlsrc$xsc", "$plperlsrc$xs"))
 			{
-				my $xsubppdir = first { -e "$_/ExtUtils/xsubpp" } @INC;
+				my $xsubppdir = first { -e "$_/ExtUtils/xsubpp" } (@INC);
 				print "Building $plperlsrc$xsc...\n";
 				system( $solution->{options}->{perl}
 					  . '/bin/perl '
@@ -753,7 +758,7 @@ sub mkvcbuild
 			'hstore',        'contrib/hstore');
 		my $jsonb_plperl = AddTransformModule(
 			'jsonb_plperl', 'contrib/jsonb_plperl',
-			'plperl',        'src/pl/plperl');
+			'plperl',       'src/pl/plperl');
 
 		foreach my $f (@perl_embed_ccflags)
 		{
@@ -856,12 +861,12 @@ sub AddSimpleFrontend
 # Add a simple transform module
 sub AddTransformModule
 {
-	my $n              = shift;
-	my $n_src          = shift;
-	my $pl_proj_name   = shift;
-	my $pl_src         = shift;
-	my $type_name      = shift;
-	my $type_src       = shift;
+	my $n            = shift;
+	my $n_src        = shift;
+	my $pl_proj_name = shift;
+	my $pl_src       = shift;
+	my $type_name    = shift;
+	my $type_src     = shift;
 
 	my $type_proj = undef;
 	if ($type_name)
@@ -959,6 +964,7 @@ sub AddContrib
 
 	# Are there any output data files to build?
 	GenerateContribSqlFiles($n, $mf);
+	return;
 }
 
 sub GenerateContribSqlFiles
@@ -995,7 +1001,7 @@ sub GenerateContribSqlFiles
 				print "Building $out from $in (contrib/$n)...\n";
 				my $cont = Project::read_file("contrib/$n/$in");
 				my $dn   = $out;
-				$dn   =~ s/\.sql$//;
+				$dn =~ s/\.sql$//;
 				$cont =~ s/MODULE_PATHNAME/\$libdir\/$dn/g;
 				my $o;
 				open($o, '>', "contrib/$n/$out")
@@ -1005,6 +1011,7 @@ sub GenerateContribSqlFiles
 			}
 		}
 	}
+	return;
 }
 
 sub AdjustContribProj
@@ -1015,6 +1022,7 @@ sub AdjustContribProj
 		\@contrib_uselibpq,       \@contrib_uselibpgport,
 		\@contrib_uselibpgcommon, $contrib_extralibs,
 		$contrib_extrasource,     $contrib_extraincludes);
+	return;
 }
 
 sub AdjustFrontendProj
@@ -1025,6 +1033,7 @@ sub AdjustFrontendProj
 		\@frontend_uselibpq,       \@frontend_uselibpgport,
 		\@frontend_uselibpgcommon, $frontend_extralibs,
 		$frontend_extrasource,     $frontend_extraincludes);
+	return;
 }
 
 sub AdjustModule
@@ -1081,6 +1090,7 @@ sub AdjustModule
 			$proj->AddFile($i);
 		}
 	}
+	return;
 }
 
 END

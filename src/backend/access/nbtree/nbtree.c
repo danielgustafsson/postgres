@@ -785,10 +785,10 @@ _bt_parallel_advance_array_keys(IndexScanDesc scan)
 static bool
 _bt_vacuum_needs_cleanup(IndexVacuumInfo *info)
 {
-	Buffer			metabuf;
-	Page			metapg;
+	Buffer		metabuf;
+	Page		metapg;
 	BTMetaPageData *metad;
-	bool			result = false;
+	bool		result = false;
 
 	metabuf = _bt_getbuf(info->index, BTREE_METAPAGE, BT_READ);
 	metapg = BufferGetPage(metabuf);
@@ -814,25 +814,26 @@ _bt_vacuum_needs_cleanup(IndexVacuumInfo *info)
 	}
 	else
 	{
-		StdRdOptions   *relopts;
-		float8			cleanup_scale_factor;
+		StdRdOptions *relopts;
+		float8		cleanup_scale_factor;
 
 		/*
-		 * If table receives large enough amount of insertions and no cleanup
-		 * was performed, then index might appear to have stalled statistics.
-		 * In order to evade that, we perform cleanup when table receives
-		 * vacuum_cleanup_index_scale_factor fractions of insertions.
+		 * If table receives enough insertions and no cleanup was performed,
+		 * then index would appear have stale statistics.  If scale factor
+		 * is set, we avoid that by performing cleanup if the number of
+		 * inserted tuples exceeds vacuum_cleanup_index_scale_factor fraction
+		 * of original tuples count.
 		 */
 		relopts = (StdRdOptions *) info->index->rd_options;
 		cleanup_scale_factor = (relopts &&
-			relopts->vacuum_cleanup_index_scale_factor >= 0)
-				? relopts->vacuum_cleanup_index_scale_factor
-				: vacuum_cleanup_index_scale_factor;
+								relopts->vacuum_cleanup_index_scale_factor >= 0)
+			? relopts->vacuum_cleanup_index_scale_factor
+			: vacuum_cleanup_index_scale_factor;
 
-		if (cleanup_scale_factor < 0 ||
+		if (cleanup_scale_factor <= 0 ||
 			metad->btm_last_cleanup_num_heap_tuples < 0 ||
 			info->num_heap_tuples > (1.0 + cleanup_scale_factor) *
-									metad->btm_last_cleanup_num_heap_tuples)
+			metad->btm_last_cleanup_num_heap_tuples)
 			result = true;
 	}
 
@@ -862,7 +863,7 @@ btbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 	/* The ENSURE stuff ensures we clean up shared memory on failure */
 	PG_ENSURE_ERROR_CLEANUP(_bt_end_vacuum_callback, PointerGetDatum(rel));
 	{
-		TransactionId	oldestBtpoXact;
+		TransactionId oldestBtpoXact;
 
 		cycleid = _bt_start_vacuum(rel);
 
@@ -870,8 +871,8 @@ btbulkdelete(IndexVacuumInfo *info, IndexBulkDeleteResult *stats,
 					 &oldestBtpoXact);
 
 		/*
-		 * Update cleanup-related information in metapage. These information
-		 * is used only for cleanup but keeping up them to date can avoid
+		 * Update cleanup-related information in metapage. This information
+		 * is used only for cleanup but keeping them up to date can avoid
 		 * unnecessary cleanup even after bulkdelete.
 		 */
 		_bt_update_meta_cleanup_info(info->index, oldestBtpoXact,
@@ -899,15 +900,15 @@ btvacuumcleanup(IndexVacuumInfo *info, IndexBulkDeleteResult *stats)
 	 * If btbulkdelete was called, we need not do anything, just return the
 	 * stats from the latest btbulkdelete call.  If it wasn't called, we might
 	 * still need to do a pass over the index, to recycle any newly-recyclable
-	 * pages and to obtain index statistics.  _bt_vacuum_needs_cleanup checks
-	 * is there are newly-recyclable or stalled index statistics.
+	 * pages or to obtain index statistics.  _bt_vacuum_needs_cleanup
+	 * determines if either are needed.
 	 *
 	 * Since we aren't going to actually delete any leaf items, there's no
 	 * need to go through all the vacuum-cycle-ID pushups.
 	 */
 	if (stats == NULL)
 	{
-		TransactionId	oldestBtpoXact;
+		TransactionId oldestBtpoXact;
 
 		/* Check if we need a cleanup */
 		if (!_bt_vacuum_needs_cleanup(info))

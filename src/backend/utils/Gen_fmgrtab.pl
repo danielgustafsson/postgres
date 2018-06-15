@@ -22,7 +22,7 @@ use warnings;
 # Collect arguments
 my @input_files;
 my $output_path = '';
-my @include_path;
+my $include_path;
 
 while (@ARGV)
 {
@@ -37,7 +37,7 @@ while (@ARGV)
 	}
 	elsif ($arg =~ /^-I/)
 	{
-		push @include_path, length($arg) > 2 ? substr($arg, 2) : shift @ARGV;
+		$include_path = length($arg) > 2 ? substr($arg, 2) : shift @ARGV;
 	}
 	else
 	{
@@ -52,8 +52,8 @@ if ($output_path ne '' && substr($output_path, -1) ne '/')
 }
 
 # Sanity check arguments.
-die "No input files.\n"                                     if !@input_files;
-die "No include path; you must specify -I at least once.\n" if !@include_path;
+die "No input files.\n"                       if !@input_files;
+die "No include path; you must specify -I.\n" if !$include_path;
 
 # Read all the input files into internal data structures.
 # Note: We pass data file names as arguments and then look for matching
@@ -68,7 +68,7 @@ foreach my $datfile (@input_files)
 
 	my $header = "$1.h";
 	die "There in no header file corresponding to $datfile"
-	  if ! -e $header;
+	  if !-e $header;
 
 	my $catalog = Catalog::ParseHeader($header);
 	my $catname = $catalog->{catname};
@@ -79,10 +79,12 @@ foreach my $datfile (@input_files)
 }
 
 # Fetch some values for later.
-my $FirstBootstrapObjectId = Catalog::FindDefinedSymbol(
-	'access/transam.h', \@include_path, 'FirstBootstrapObjectId');
-my $INTERNALlanguageId = Catalog::FindDefinedSymbolFromData(
-	$catalog_data{pg_language}, 'INTERNALlanguageId');
+my $FirstBootstrapObjectId =
+  Catalog::FindDefinedSymbol('access/transam.h', $include_path,
+	'FirstBootstrapObjectId');
+my $INTERNALlanguageId =
+  Catalog::FindDefinedSymbolFromData($catalog_data{pg_language},
+	'INTERNALlanguageId');
 
 # Collect certain fields from pg_proc.dat.
 my @fmgr = ();
@@ -95,11 +97,13 @@ foreach my $row (@{ $catalog_data{pg_proc} })
 	next if $bki_values{prolang} ne $INTERNALlanguageId;
 
 	push @fmgr,
-	  { oid    => $bki_values{oid},
+	  {
+		oid    => $bki_values{oid},
 		strict => $bki_values{proisstrict},
 		retset => $bki_values{proretset},
 		nargs  => $bki_values{pronargs},
-		prosrc => $bki_values{prosrc}, };
+		prosrc => $bki_values{prosrc},
+	  };
 }
 
 # Emit headers for both files
@@ -115,8 +119,8 @@ open my $pfh, '>', $protosfile . $tmpext
 open my $tfh, '>', $tabfile . $tmpext
   or die "Could not open $tabfile$tmpext: $!";
 
-print $ofh
-qq|/*-------------------------------------------------------------------------
+print $ofh <<OFH;
+/*-------------------------------------------------------------------------
  *
  * fmgroids.h
  *    Macros that define the OIDs of built-in functions.
@@ -150,10 +154,10 @@ qq|/*-------------------------------------------------------------------------
  *	its equivalent macro will be defined with the lowest OID among those
  *	entries.
  */
-|;
+OFH
 
-print $pfh
-qq|/*-------------------------------------------------------------------------
+print $pfh <<PFH;
+/*-------------------------------------------------------------------------
  *
  * fmgrprotos.h
  *    Prototypes for built-in functions.
@@ -176,10 +180,10 @@ qq|/*-------------------------------------------------------------------------
 
 #include "fmgr.h"
 
-|;
+PFH
 
-print $tfh
-qq|/*-------------------------------------------------------------------------
+print $tfh <<TFH;
+/*-------------------------------------------------------------------------
  *
  * fmgrtab.c
  *    The function manager's table of internal functions.
@@ -204,7 +208,7 @@ qq|/*-------------------------------------------------------------------------
 #include "utils/fmgrtab.h"
 #include "utils/fmgrprotos.h"
 
-|;
+TFH
 
 # Emit #define's and extern's -- only one per prosrc value
 my %seenit;
@@ -226,9 +230,9 @@ my $fmgr_count = 0;
 foreach my $s (sort { $a->{oid} <=> $b->{oid} } @fmgr)
 {
 	print $tfh
-"  { $s->{oid}, \"$s->{prosrc}\", $s->{nargs}, $bmap{$s->{strict}}, $bmap{$s->{retset}}, $s->{prosrc} }";
+	  "  { $s->{oid}, \"$s->{prosrc}\", $s->{nargs}, $bmap{$s->{strict}}, $bmap{$s->{retset}}, $s->{prosrc} }";
 
-	$fmgr_builtin_oid_index[$s->{oid}] = $fmgr_count++;
+	$fmgr_builtin_oid_index[ $s->{oid} ] = $fmgr_count++;
 
 	if ($fmgr_count <= $#fmgr)
 	{
@@ -278,8 +282,8 @@ print $tfh "};\n";
 
 
 # And add the file footers.
-print $ofh "\n#endif /* FMGROIDS_H */\n";
-print $pfh "\n#endif /* FMGRPROTOS_H */\n";
+print $ofh "\n#endif\t\t\t\t\t\t\t/* FMGROIDS_H */\n";
+print $pfh "\n#endif\t\t\t\t\t\t\t/* FMGRPROTOS_H */\n";
 
 close($ofh);
 close($pfh);

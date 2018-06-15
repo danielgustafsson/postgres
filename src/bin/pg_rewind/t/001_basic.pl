@@ -35,7 +35,7 @@ sub run_test
 	master_psql(
 		"INSERT INTO trunc_tbl values ('in master, before promotion')");
 	master_psql(
-"INSERT INTO tail_tbl SELECT g, 'in master, before promotion: ' || g FROM generate_series(1, 10000) g"
+		"INSERT INTO tail_tbl SELECT g, 'in master, before promotion: ' || g FROM generate_series(1, 10000) g"
 	);
 
 	master_psql('CHECKPOINT');
@@ -54,7 +54,7 @@ sub run_test
 	# Insert enough rows to trunc_tbl to extend the file. pg_rewind should
 	# truncate it back to the old size.
 	master_psql(
-"INSERT INTO trunc_tbl SELECT 'in master, after promotion: ' || g FROM generate_series(1, 10000) g"
+		"INSERT INTO trunc_tbl SELECT 'in master, after promotion: ' || g FROM generate_series(1, 10000) g"
 	);
 
 	# Truncate tail_tbl. pg_rewind should copy back the truncated part
@@ -87,15 +87,17 @@ in master, before promotion
 		'tail-copy');
 
 	# Permissions on PGDATA should be default
-	SKIP:
+  SKIP:
 	{
-		skip "unix-style permissions not supported on Windows", 1 if ($windows_os);
+		skip "unix-style permissions not supported on Windows", 1
+		  if ($windows_os);
 
 		ok(check_mode_recursive($node_master->data_dir(), 0700, 0600),
 			'check PGDATA permissions');
 	}
 
 	RewindTest::clean_rewind_test();
+	return;
 }
 
 # Run the test in both modes

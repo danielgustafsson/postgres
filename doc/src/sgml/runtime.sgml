@@ -959,16 +959,9 @@ option        SYSVSEM
 option        SEMMNI=256
 option        SEMMNS=512
 option        SEMMNU=256
-option        SEMMAP=256
 </programlisting>
        </para>
 
-       <para>
-        You might also want to configure your kernel to lock shared
-        memory into RAM and prevent it from being paged out to swap.
-        This can be accomplished using the <command>sysctl</command>
-        setting <literal>kern.ipc.shm_use_phys</literal>.
-       </para>
       </listitem>
      </varlistentry>
 
@@ -1953,9 +1946,9 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
    <title>Upgrading Data via Replication</title>
 
    <para>
-    It is also possible to use certain replication methods, such as
-    <productname>Slony</productname>, to create a standby server with the updated version of
-    <productname>PostgreSQL</productname>.  This is possible because Slony supports
+    It is also possible to use logical replication methods to create a standby
+    server with the updated version of <productname>PostgreSQL</productname>.
+    This is possible because logical replication supports
     replication between different major versions of
     <productname>PostgreSQL</productname>.  The standby can be on the same computer or
     a different computer.  Once it has synced up with the master server
@@ -1965,6 +1958,13 @@ pg_dumpall -p 5432 | psql -d postgres -p 5433
     of downtime for an upgrade.
    </para>
 
+   <para>
+    This method of upgrading can be performed using the built-in logical
+    replication facilities as well as using external logical replication
+    systems such as <productname>pglogical</productname>,
+    <productname>Slony</productname>, <productname>Londiste</productname>, and
+    <productname>Bucardo</productname>.
+   </para>
   </sect2>
  </sect1>
 
@@ -2457,7 +2457,7 @@ openssl x509 -req -in server.csr -text -days 365 \
     <filename>server.crt</filename> and <filename>server.key</filename>
     should be stored on the server, and <filename>root.crt</filename> should
     be stored on the client so the client can verify that the server's leaf
-    certificate was signed by its trusted root certificate. 
+    certificate was signed by its trusted root certificate.
     <filename>root.key</filename> should be stored offline for use in
     creating future certificates.
    </para>

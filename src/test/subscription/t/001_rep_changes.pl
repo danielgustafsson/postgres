@@ -32,7 +32,8 @@ $node_publisher->safe_psql('postgres',
 $node_publisher->safe_psql('postgres',
 	"INSERT INTO tab_mixed (a, b) VALUES (1, 'foo')");
 $node_publisher->safe_psql('postgres',
-	"CREATE TABLE tab_include (a int, b text, CONSTRAINT covering PRIMARY KEY(a) INCLUDE(b))");
+	"CREATE TABLE tab_include (a int, b text, CONSTRAINT covering PRIMARY KEY(a) INCLUDE(b))"
+);
 
 # Setup structure on subscriber
 $node_subscriber->safe_psql('postgres', "CREATE TABLE tab_notrep (a int)");
@@ -48,7 +49,8 @@ $node_subscriber->safe_psql('postgres',
 
 # replication of the table with included index
 $node_subscriber->safe_psql('postgres',
-	"CREATE TABLE tab_include (a int, b text, CONSTRAINT covering PRIMARY KEY(a) INCLUDE(b))");
+	"CREATE TABLE tab_include (a int, b text, CONSTRAINT covering PRIMARY KEY(a) INCLUDE(b))"
+);
 
 # Setup logical replication
 my $publisher_connstr = $node_publisher->connstr . ' dbname=postgres';
@@ -56,21 +58,21 @@ $node_publisher->safe_psql('postgres', "CREATE PUBLICATION tap_pub");
 $node_publisher->safe_psql('postgres',
 	"CREATE PUBLICATION tap_pub_ins_only WITH (publish = insert)");
 $node_publisher->safe_psql('postgres',
-"ALTER PUBLICATION tap_pub ADD TABLE tab_rep, tab_full, tab_full2, tab_mixed, tab_include"
+	"ALTER PUBLICATION tap_pub ADD TABLE tab_rep, tab_full, tab_full2, tab_mixed, tab_include"
 );
 $node_publisher->safe_psql('postgres',
 	"ALTER PUBLICATION tap_pub_ins_only ADD TABLE tab_ins");
 
 my $appname = 'tap_sub';
 $node_subscriber->safe_psql('postgres',
-"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub, tap_pub_ins_only"
+	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr application_name=$appname' PUBLICATION tap_pub, tap_pub_ins_only"
 );
 
 $node_publisher->wait_for_catchup($appname);
 
 # Also wait for initial table sync to finish
 my $synced_query =
-"SELECT count(1) = 0 FROM pg_subscription_rel WHERE srsubstate NOT IN ('r', 's');";
+  "SELECT count(1) = 0 FROM pg_subscription_rel WHERE srsubstate NOT IN ('r', 's');";
 $node_subscriber->poll_query_until('postgres', $synced_query)
   or die "Timed out while waiting for subscriber to synchronize data";
 
@@ -97,7 +99,8 @@ $node_publisher->safe_psql('postgres',
 
 $node_publisher->safe_psql('postgres',
 	"INSERT INTO tab_include SELECT generate_series(1,50)");
-$node_publisher->safe_psql('postgres', "DELETE FROM tab_include WHERE a > 20");
+$node_publisher->safe_psql('postgres',
+	"DELETE FROM tab_include WHERE a > 20");
 $node_publisher->safe_psql('postgres', "UPDATE tab_include SET a = -a");
 
 $node_publisher->wait_for_catchup($appname);
@@ -117,7 +120,8 @@ is( $result, qq(|foo|1
 
 $result = $node_subscriber->safe_psql('postgres',
 	"SELECT count(*), min(a), max(a) FROM tab_include");
-is($result, qq(20|-20|-1), 'check replicated changes with primary key index with included columns');
+is($result, qq(20|-20|-1),
+	'check replicated changes with primary key index with included columns');
 
 # insert some duplicate rows
 $node_publisher->safe_psql('postgres',
@@ -164,20 +168,20 @@ my $oldpid = $node_publisher->safe_psql('postgres',
 	"SELECT pid FROM pg_stat_replication WHERE application_name = '$appname';"
 );
 $node_subscriber->safe_psql('postgres',
-"ALTER SUBSCRIPTION tap_sub CONNECTION 'application_name=$appname $publisher_connstr'"
+	"ALTER SUBSCRIPTION tap_sub CONNECTION 'application_name=$appname $publisher_connstr'"
 );
 $node_publisher->poll_query_until('postgres',
-"SELECT pid != $oldpid FROM pg_stat_replication WHERE application_name = '$appname';"
+	"SELECT pid != $oldpid FROM pg_stat_replication WHERE application_name = '$appname';"
 ) or die "Timed out while waiting for apply to restart";
 
 $oldpid = $node_publisher->safe_psql('postgres',
 	"SELECT pid FROM pg_stat_replication WHERE application_name = '$appname';"
 );
 $node_subscriber->safe_psql('postgres',
-"ALTER SUBSCRIPTION tap_sub SET PUBLICATION tap_pub_ins_only WITH (copy_data = false)"
+	"ALTER SUBSCRIPTION tap_sub SET PUBLICATION tap_pub_ins_only WITH (copy_data = false)"
 );
 $node_publisher->poll_query_until('postgres',
-"SELECT pid != $oldpid FROM pg_stat_replication WHERE application_name = '$appname';"
+	"SELECT pid != $oldpid FROM pg_stat_replication WHERE application_name = '$appname';"
 ) or die "Timed out while waiting for apply to restart";
 
 $node_publisher->safe_psql('postgres',
@@ -226,7 +230,7 @@ $oldpid = $node_publisher->safe_psql('postgres',
 $node_subscriber->safe_psql('postgres',
 	"ALTER SUBSCRIPTION tap_sub RENAME TO tap_sub_renamed");
 $node_publisher->poll_query_until('postgres',
-"SELECT pid != $oldpid FROM pg_stat_replication WHERE application_name = '$appname';"
+	"SELECT pid != $oldpid FROM pg_stat_replication WHERE application_name = '$appname';"
 ) or die "Timed out while waiting for apply to restart";
 
 # check all the cleanup

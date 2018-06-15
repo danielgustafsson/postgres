@@ -623,7 +623,7 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 	root->grouping_map = NULL;
 	root->minmax_aggs = NIL;
 	root->qual_security_level = 0;
-	root->hasInheritedTarget = false;
+	root->inhTargetKind = INHKIND_NONE;
 	root->hasRecursion = hasRecursion;
 	if (hasRecursion)
 		root->wt_param_id = SS_assign_special_param(root);
@@ -793,24 +793,6 @@ subquery_planner(PlannerGlobal *glob, Query *parse,
 								  EXPRKIND_QUAL);
 		/* exclRelTlist contains only Vars, so no preprocessing needed */
 	}
-
-	foreach(l, parse->mergeActionList)
-	{
-		MergeAction *action = (MergeAction *) lfirst(l);
-
-		action->targetList = (List *)
-			preprocess_expression(root,
-								  (Node *) action->targetList,
-								  EXPRKIND_TARGET);
-		action->qual =
-			preprocess_expression(root,
-								  (Node *) action->qual,
-								  EXPRKIND_QUAL);
-	}
-
-	parse->mergeSourceTargetList = (List *)
-		preprocess_expression(root, (Node *) parse->mergeSourceTargetList,
-							  EXPRKIND_TARGET);
 
 	root->append_rel_list = (List *)
 		preprocess_expression(root, (Node *) root->append_rel_list,
@@ -1442,8 +1424,13 @@ inheritance_planner(PlannerInfo *root)
 		Assert(subroot->join_info_list == NIL);
 		/* and we haven't created PlaceHolderInfos, either */
 		Assert(subroot->placeholder_list == NIL);
-		/* hack to mark target relation as an inheritance partition */
-		subroot->hasInheritedTarget = true;
+
+		/*
+		 * Mark if we're planning a query to a partitioned table or an
+		 * inheritance parent.
+		 */
+		subroot->inhTargetKind =
+			partitioned_relids ? INHKIND_PARTITIONED : INHKIND_INHERITED;
 
 		/*
 		 * If the child is further partitioned, remember it as a parent. Since
@@ -1564,7 +1551,6 @@ inheritance_planner(PlannerInfo *root)
 									 subroot->parse->returningList);
 
 		Assert(!parse->onConflict);
-		Assert(parse->mergeActionList == NIL);
 	}
 
 	/* Result path must go into outer query's FINAL upperrel */
@@ -1638,14 +1624,11 @@ inheritance_planner(PlannerInfo *root)
 									 partitioned_rels,
 									 root->partColsUpdated,
 									 resultRelations,
-									 0,
 									 subpaths,
 									 subroots,
 									 withCheckOptionLists,
 									 returningLists,
 									 rowMarks,
-									 NULL,
-									 NULL,
 									 NULL,
 									 SS_assign_special_param(root)));
 }
@@ -2177,8 +2160,8 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 		}
 
 		/*
-		 * If this is an INSERT/UPDATE/DELETE/MERGE, and we're not being
-		 * called from inheritance_planner, add the ModifyTable node.
+		 * If this is an INSERT/UPDATE/DELETE, and we're not being called from
+		 * inheritance_planner, add the ModifyTable node.
 		 */
 		if (parse->commandType != CMD_SELECT && !inheritance_update)
 		{
@@ -2218,15 +2201,12 @@ grouping_planner(PlannerInfo *root, bool inheritance_update,
 										NIL,
 										false,
 										list_make1_int(parse->resultRelation),
-										parse->mergeTarget_relation,
 										list_make1(path),
 										list_make1(root),
 										withCheckOptionLists,
 										returningLists,
 										rowMarks,
 										parse->onConflict,
-										parse->mergeSourceTargetList,
-										parse->mergeActionList,
 										SS_assign_special_param(root));
 		}
 
@@ -6817,10 +6797,10 @@ apply_scanjoin_target_to_paths(PlannerInfo *root,
 	{
 		/*
 		 * Since we can't generate the final scan/join target, this is our
-		 * last opportunity to use any partial paths that exist.  We don't
-		 * do this if the case where the target is parallel-safe, since we
-		 * will be able to generate superior paths by doing it after the
-		 * final scan/join target has been applied.
+		 * last opportunity to use any partial paths that exist.  We don't do
+		 * this if the case where the target is parallel-safe, since we will
+		 * be able to generate superior paths by doing it after the final
+		 * scan/join target has been applied.
 		 *
 		 * Note that this may invalidate rel->cheapest_total_path, so we must
 		 * not rely on it after this point without first calling set_cheapest.

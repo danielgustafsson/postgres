@@ -189,8 +189,8 @@ main(int argc, char *const argv[])
 				break;
 			case 'h':
 				header_mode = true;
-				/* this must include "-c" to make sense */
-				/* so do not place a "break;" here */
+				/* this must include "-c" to make sense, so fall through */
+				/* FALLTHROUGH */
 			case 'c':
 				auto_create_c = true;
 				break;
@@ -479,7 +479,8 @@ main(int argc, char *const argv[])
 				}
 			}
 
-			if (output_filename && out_option == 0) {
+			if (output_filename && out_option == 0)
+			{
 				free(output_filename);
 				output_filename = NULL;
 			}

@@ -71,7 +71,7 @@ SELECT roundtrip('1');
 (1 row)
 
 SELECT roundtrip('1E+131071');
-ERROR:  cannot convert infinite value to jsonb
+ERROR:  cannot convert infinity to jsonb
 CONTEXT:  PL/Perl function "roundtrip"
 SELECT roundtrip('-1');
  roundtrip 

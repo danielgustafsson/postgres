@@ -202,6 +202,7 @@ retry:
 				goto retry;
 			case HeapTupleInvisible:
 				elog(ERROR, "attempted to lock invisible tuple");
+				break;
 			default:
 				elog(ERROR, "unexpected heap_lock_tuple status: %u", res);
 				break;
@@ -365,6 +366,7 @@ retry:
 				goto retry;
 			case HeapTupleInvisible:
 				elog(ERROR, "attempted to lock invisible tuple");
+				break;
 			default:
 				elog(ERROR, "unexpected heap_lock_tuple status: %u", res);
 				break;
@@ -411,7 +413,9 @@ ExecSimpleRelationInsert(EState *estate, TupleTableSlot *slot)
 
 		/* Check the constraints of the tuple */
 		if (rel->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate, true);
+			ExecConstraints(resultRelInfo, slot, estate);
+		if (resultRelInfo->ri_PartitionCheck)
+			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
 		/* Store the slot into tuple that we can inspect. */
 		tuple = ExecMaterializeSlot(slot);
@@ -464,7 +468,7 @@ ExecSimpleRelationUpdate(EState *estate, EPQState *epqstate,
 	{
 		slot = ExecBRUpdateTriggers(estate, epqstate, resultRelInfo,
 									&searchslot->tts_tuple->t_self,
-									NULL, slot, NULL);
+									NULL, slot);
 
 		if (slot == NULL)		/* "do nothing" */
 			skip_tuple = true;
@@ -476,7 +480,9 @@ ExecSimpleRelationUpdate(EState *estate, EPQState *epqstate,
 
 		/* Check the constraints of the tuple */
 		if (rel->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate, true);
+			ExecConstraints(resultRelInfo, slot, estate);
+		if (resultRelInfo->ri_PartitionCheck)
+			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
 		/* Store the slot into tuple that we can write. */
 		tuple = ExecMaterializeSlot(slot);
@@ -525,7 +531,7 @@ ExecSimpleRelationDelete(EState *estate, EPQState *epqstate,
 	{
 		skip_tuple = !ExecBRDeleteTriggers(estate, epqstate, resultRelInfo,
 										   &searchslot->tts_tuple->t_self,
-										   NULL, NULL);
+										   NULL);
 	}
 
 	if (!skip_tuple)

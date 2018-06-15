@@ -138,6 +138,7 @@ bool		enable_partitionwise_join = false;
 bool		enable_partitionwise_aggregate = false;
 bool		enable_parallel_append = true;
 bool		enable_parallel_hash = true;
+bool		enable_partition_pruning = true;
 
 typedef struct
 {
@@ -159,6 +160,7 @@ static bool has_indexed_join_quals(NestPath *joinpath);
 static double approx_tuple_count(PlannerInfo *root, JoinPath *path,
 				   List *quals);
 static double calc_joinrel_size_estimate(PlannerInfo *root,
+						   RelOptInfo *joinrel,
 						   RelOptInfo *outer_rel,
 						   RelOptInfo *inner_rel,
 						   double outer_rows,
@@ -4022,6 +4024,7 @@ get_restriction_qual_cost(PlannerInfo *root, RelOptInfo *baserel,
  * them to all the join cost estimation functions.
  *
  * Input parameters:
+ *	joinrel: join relation under consideration
  *	outerrel: outer relation under consideration
  *	innerrel: inner relation under consideration
  *	jointype: if not JOIN_SEMI or JOIN_ANTI, we assume it's inner_unique
@@ -4032,6 +4035,7 @@ get_restriction_qual_cost(PlannerInfo *root, RelOptInfo *baserel,
  */
 void
 compute_semi_anti_join_factors(PlannerInfo *root,
+							   RelOptInfo *joinrel,
 							   RelOptInfo *outerrel,
 							   RelOptInfo *innerrel,
 							   JoinType jointype,
@@ -4060,7 +4064,7 @@ compute_semi_anti_join_factors(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = lfirst_node(RestrictInfo, l);
 
-			if (!rinfo->is_pushed_down)
+			if (!RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
 				joinquals = lappend(joinquals, rinfo);
 		}
 	}
@@ -4375,6 +4379,7 @@ set_joinrel_size_estimates(PlannerInfo *root, RelOptInfo *rel,
 						   List *restrictlist)
 {
 	rel->rows = calc_joinrel_size_estimate(root,
+										   rel,
 										   outer_rel,
 										   inner_rel,
 										   outer_rel->rows,
@@ -4417,6 +4422,7 @@ get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo *rel,
 	 * estimate for any pair with the same parameterization.
 	 */
 	nrows = calc_joinrel_size_estimate(root,
+									   rel,
 									   outer_path->parent,
 									   inner_path->parent,
 									   outer_path->rows,
@@ -4440,6 +4446,7 @@ get_parameterized_joinrel_size(PlannerInfo *root, RelOptInfo *rel,
  */
 static double
 calc_joinrel_size_estimate(PlannerInfo *root,
+						   RelOptInfo *joinrel,
 						   RelOptInfo *outer_rel,
 						   RelOptInfo *inner_rel,
 						   double outer_rows,
@@ -4492,7 +4499,7 @@ calc_joinrel_size_estimate(PlannerInfo *root,
 		{
 			RestrictInfo *rinfo = lfirst_node(RestrictInfo, l);
 
-			if (rinfo->is_pushed_down)
+			if (RINFO_IS_PUSHED_DOWN(rinfo, joinrel->relids))
 				pushedquals = lappend(pushedquals, rinfo);
 			else
 				joinquals = lappend(joinquals, rinfo);

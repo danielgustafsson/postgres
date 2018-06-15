@@ -42,7 +42,6 @@
 #include "commands/trigger.h"
 #include "executor/execPartition.h"
 #include "executor/executor.h"
-#include "executor/execMerge.h"
 #include "executor/nodeModifyTable.h"
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
@@ -63,6 +62,11 @@ static bool ExecOnConflictUpdate(ModifyTableState *mtstate,
 					 EState *estate,
 					 bool canSetTag,
 					 TupleTableSlot **returning);
+static TupleTableSlot *ExecPrepareTupleRouting(ModifyTableState *mtstate,
+						EState *estate,
+						PartitionTupleRouting *proute,
+						ResultRelInfo *targetRelInfo,
+						TupleTableSlot *slot);
 static ResultRelInfo *getTargetResultRelInfo(ModifyTableState *node);
 static void ExecSetupChildParentMapForTcs(ModifyTableState *mtstate);
 static void ExecSetupChildParentMapForSubplan(ModifyTableState *mtstate);
@@ -81,7 +85,7 @@ static TupleConversionMap *tupconv_map_for_subplan(ModifyTableState *node,
  * The plan output is represented by its targetlist, because that makes
  * handling the dropped-column case easier.
  */
-void
+static void
 ExecCheckPlanOutput(Relation resultRel, List *targetList)
 {
 	TupleDesc	resultDesc = RelationGetDescr(resultRel);
@@ -255,12 +259,11 @@ ExecCheckTIDVisible(EState *estate,
  *		Returns RETURNING result if any, otherwise NULL.
  * ----------------------------------------------------------------
  */
-extern TupleTableSlot *
+static TupleTableSlot *
 ExecInsert(ModifyTableState *mtstate,
 		   TupleTableSlot *slot,
 		   TupleTableSlot *planSlot,
 		   EState *estate,
-		   MergeActionState *actionState,
 		   bool canSetTag)
 {
 	HeapTuple	tuple;
@@ -362,16 +365,6 @@ ExecInsert(ModifyTableState *mtstate,
 	else
 	{
 		WCOKind		wco_kind;
-		bool		check_partition_constr;
-
-		/*
-		 * We always check the partition constraint, including when the tuple
-		 * got here via tuple-routing.  However we don't need to in the latter
-		 * case if no BR trigger is defined on the partition.  Note that a BR
-		 * trigger might modify the tuple such that the partition constraint
-		 * is no longer satisfied, so we need to check in that case.
-		 */
-		check_partition_constr = (resultRelInfo->ri_PartitionCheck != NIL);
 
 		/*
 		 * Constraints might reference the tableoid column, so initialize
@@ -387,17 +380,9 @@ ExecInsert(ModifyTableState *mtstate,
 		 * partition, we should instead check UPDATE policies, because we are
 		 * executing policies defined on the target table, and not those
 		 * defined on the child partitions.
-		 *
-		 * If we're running MERGE, we refer to the action that we're executing
-		 * to know if we're doing an INSERT or UPDATE to a partition table.
 		 */
-		if (mtstate->operation == CMD_UPDATE)
-			wco_kind = WCO_RLS_UPDATE_CHECK;
-		else if (mtstate->operation == CMD_MERGE)
-			wco_kind = (actionState->commandType == CMD_UPDATE) ?
-				WCO_RLS_UPDATE_CHECK : WCO_RLS_INSERT_CHECK;
-		else
-			wco_kind = WCO_RLS_INSERT_CHECK;
+		wco_kind = (mtstate->operation == CMD_UPDATE) ?
+			WCO_RLS_UPDATE_CHECK : WCO_RLS_INSERT_CHECK;
 
 		/*
 		 * ExecWithCheckOptions() will skip any WCOs which are not of the kind
@@ -407,17 +392,21 @@ ExecInsert(ModifyTableState *mtstate,
 			ExecWithCheckOptions(wco_kind, resultRelInfo, slot, estate);
 
 		/*
-		 * No need though if the tuple has been routed, and a BR trigger
-		 * doesn't exist.
+		 * Check the constraints of the tuple.
 		 */
-		if (resultRelInfo->ri_PartitionRoot != NULL &&
-			!(resultRelInfo->ri_TrigDesc &&
-			  resultRelInfo->ri_TrigDesc->trig_insert_before_row))
-			check_partition_constr = false;
+		if (resultRelationDesc->rd_att->constr)
+			ExecConstraints(resultRelInfo, slot, estate);
 
-		/* Check the constraints of the tuple */
-		if (resultRelationDesc->rd_att->constr || check_partition_constr)
-			ExecConstraints(resultRelInfo, slot, estate, true);
+		/*
+		 * Also check the tuple against the partition constraint, if there is
+		 * one; except that if we got here via tuple-routing, we don't need to
+		 * if there's no BR trigger defined on the partition.
+		 */
+		if (resultRelInfo->ri_PartitionCheck &&
+			(resultRelInfo->ri_PartitionRoot == NULL ||
+			 (resultRelInfo->ri_TrigDesc &&
+			  resultRelInfo->ri_TrigDesc->trig_insert_before_row)))
+			ExecPartitionCheck(resultRelInfo, slot, estate, true);
 
 		if (onconflict != ONCONFLICT_NONE && resultRelInfo->ri_NumIndices > 0)
 		{
@@ -461,7 +450,7 @@ ExecInsert(ModifyTableState *mtstate,
 											 &conflictTid, planSlot, slot,
 											 estate, canSetTag, &returning))
 					{
-						InstrCountFiltered2(&mtstate->ps, 1);
+						InstrCountTuples2(&mtstate->ps, 1);
 						return returning;
 					}
 					else
@@ -476,7 +465,7 @@ ExecInsert(ModifyTableState *mtstate,
 					 */
 					Assert(onconflict == ONCONFLICT_NOTHING);
 					ExecCheckTIDVisible(estate, resultRelInfo, &conflictTid);
-					InstrCountFiltered2(&mtstate->ps, 1);
+					InstrCountTuples2(&mtstate->ps, 1);
 					return NULL;
 				}
 			}
@@ -622,19 +611,10 @@ ExecInsert(ModifyTableState *mtstate,
  *		passed to foreign table triggers; it is NULL when the foreign
  *		table has no relevant triggers.
  *
- *		MERGE passes actionState of the action it's currently executing;
- *		regular DELETE passes NULL. This is used by ExecDelete to know if it's
- *		being called from MERGE or regular DELETE operation.
- *
- *		If the DELETE fails because the tuple is concurrently updated/deleted
- *		by this or some other transaction, hufdp is filled with the reason as
- *		well as other important information. Currently only MERGE needs this
- *		information.
- *
  *		Returns RETURNING result if any, otherwise NULL.
  * ----------------------------------------------------------------
  */
-TupleTableSlot *
+static TupleTableSlot *
 ExecDelete(ModifyTableState *mtstate,
 		   ItemPointer tupleid,
 		   HeapTuple oldtuple,
@@ -643,8 +623,6 @@ ExecDelete(ModifyTableState *mtstate,
 		   EState *estate,
 		   bool *tupleDeleted,
 		   bool processReturning,
-		   HeapUpdateFailureData *hufdp,
-		   MergeActionState *actionState,
 		   bool canSetTag,
 		   bool changingPart)
 {
@@ -659,14 +637,6 @@ ExecDelete(ModifyTableState *mtstate,
 		*tupleDeleted = false;
 
 	/*
-	 * Initialize hufdp. Since the caller is only interested in the failure
-	 * status, initialize with the state that is used to indicate successful
-	 * operation.
-	 */
-	if (hufdp)
-		hufdp->result = HeapTupleMayBeUpdated;
-
-	/*
 	 * get information on the (current) result relation
 	 */
 	resultRelInfo = estate->es_result_relation_info;
@@ -679,7 +649,7 @@ ExecDelete(ModifyTableState *mtstate,
 		bool		dodelete;
 
 		dodelete = ExecBRDeleteTriggers(estate, epqstate, resultRelInfo,
-										tupleid, oldtuple, hufdp);
+										tupleid, oldtuple);
 
 		if (!dodelete)			/* "do nothing" */
 			return NULL;
@@ -747,15 +717,6 @@ ldelete:;
 							 true /* wait for commit */ ,
 							 &hufd,
 							 changingPart);
-
-		/*
-		 * Copy the necessary information, if the caller has asked for it. We
-		 * must do this irrespective of whether the tuple was updated or
-		 * deleted.
-		 */
-		if (hufdp)
-			*hufdp = hufd;
-
 		switch (result)
 		{
 			case HeapTupleSelfUpdated:
@@ -790,11 +751,7 @@ ldelete:;
 							 errmsg("tuple to be updated was already modified by an operation triggered by the current command"),
 							 errhint("Consider using an AFTER trigger instead of a BEFORE trigger to propagate changes to other rows.")));
 
-				/*
-				 * Else, already deleted by self; nothing to do but inform
-				 * MERGE about it anyways so that it can take necessary
-				 * action.
-				 */
+				/* Else, already deleted by self; nothing to do */
 				return NULL;
 
 			case HeapTupleMayBeUpdated:
@@ -814,19 +771,10 @@ ldelete:;
 				{
 					TupleTableSlot *epqslot;
 
-					/*
-					 * If we're executing MERGE, then the onus of running
-					 * EvalPlanQual() and handling its outcome lies with the
-					 * caller.
-					 */
-					if (actionState != NULL)
-						return NULL;
-
-					/* Normal DELETE path.  */
 					epqslot = EvalPlanQual(estate,
 										   epqstate,
 										   resultRelationDesc,
-										   GetEPQRangeTableIndex(resultRelInfo),
+										   resultRelInfo->ri_RangeTableIndex,
 										   LockTupleExclusive,
 										   &hufd.ctid,
 										   hufd.xmax);
@@ -836,12 +784,7 @@ ldelete:;
 						goto ldelete;
 					}
 				}
-
-				/*
-				 * tuple already deleted; nothing to do. But MERGE might want
-				 * to handle it differently. We've already filled-in hufdp
-				 * with sufficient information for MERGE to look at.
-				 */
+				/* tuple already deleted; nothing to do */
 				return NULL;
 
 			default:
@@ -969,21 +912,10 @@ ldelete:;
  *		foreign table triggers; it is NULL when the foreign table has
  *		no relevant triggers.
  *
- *		MERGE passes actionState of the action it's currently executing;
- *		regular UPDATE passes NULL. This is used by ExecUpdate to know if it's
- *		being called from MERGE or regular UPDATE operation. ExecUpdate may
- *		pass this information to ExecInsert if it ends up running DELETE+INSERT
- *		for partition key updates.
- *
- *		If the UPDATE fails because the tuple is concurrently updated/deleted
- *		by this or some other transaction, hufdp is filled with the reason as
- *		well as other important information. Currently only MERGE needs this
- *		information.
- *
  *		Returns RETURNING result if any, otherwise NULL.
  * ----------------------------------------------------------------
  */
-extern TupleTableSlot *
+static TupleTableSlot *
 ExecUpdate(ModifyTableState *mtstate,
 		   ItemPointer tupleid,
 		   HeapTuple oldtuple,
@@ -991,9 +923,6 @@ ExecUpdate(ModifyTableState *mtstate,
 		   TupleTableSlot *planSlot,
 		   EPQState *epqstate,
 		   EState *estate,
-		   bool *tuple_updated,
-		   HeapUpdateFailureData *hufdp,
-		   MergeActionState *actionState,
 		   bool canSetTag)
 {
 	HeapTuple	tuple;
@@ -1009,17 +938,6 @@ ExecUpdate(ModifyTableState *mtstate,
 	 */
 	if (IsBootstrapProcessingMode())
 		elog(ERROR, "cannot UPDATE during bootstrap");
-
-	if (tuple_updated)
-		*tuple_updated = false;
-
-	/*
-	 * Initialize hufdp. Since the caller is only interested in the failure
-	 * status, initialize with the state that is used to indicate successful
-	 * operation.
-	 */
-	if (hufdp)
-		hufdp->result = HeapTupleMayBeUpdated;
 
 	/*
 	 * get the heap tuple out of the tuple table slot, making sure we have a
@@ -1038,7 +956,7 @@ ExecUpdate(ModifyTableState *mtstate,
 		resultRelInfo->ri_TrigDesc->trig_update_before_row)
 	{
 		slot = ExecBRUpdateTriggers(estate, epqstate, resultRelInfo,
-									tupleid, oldtuple, slot, hufdp);
+									tupleid, oldtuple, slot);
 
 		if (slot == NULL)		/* "do nothing" */
 			return NULL;
@@ -1084,6 +1002,7 @@ ExecUpdate(ModifyTableState *mtstate,
 	}
 	else
 	{
+		LockTupleMode lockmode;
 		bool		partition_constraint_failed;
 
 		/*
@@ -1112,7 +1031,7 @@ lreplace:;
 		 */
 		partition_constraint_failed =
 			resultRelInfo->ri_PartitionCheck &&
-			!ExecPartitionCheck(resultRelInfo, slot, estate);
+			!ExecPartitionCheck(resultRelInfo, slot, estate, false);
 
 		if (!partition_constraint_failed &&
 			resultRelInfo->ri_WithCheckOptions != NIL)
@@ -1162,8 +1081,8 @@ lreplace:;
 			 * processing. We want to return rows from INSERT.
 			 */
 			ExecDelete(mtstate, tupleid, oldtuple, planSlot, epqstate,
-					   estate, &tuple_deleted, false, hufdp, NULL,
-					   false /* canSetTag */, true /* changingPart */);
+					   estate, &tuple_deleted, false,
+					   false /* canSetTag */ , true /* changingPart */ );
 
 			/*
 			 * For some reason if DELETE didn't happen (e.g. trigger prevented
@@ -1199,36 +1118,16 @@ lreplace:;
 				saved_tcs_map = mtstate->mt_transition_capture->tcs_map;
 
 			/*
-			 * We should convert the tuple into root's tuple descriptor, since
-			 * ExecInsert() starts the search from root. To do that, we need to
-			 * retrieve the tuple conversion map for this resultRelInfo.
-			 *
-			 * If we're running MERGE then resultRelInfo is per-partition
-			 * resultRelInfo as initialized in ExecInitPartitionInfo(). Note
-			 * that we don't expand inheritance for the resultRelation in case
-			 * of MERGE and hence there is just one subplan. Whereas for
-			 * regular UPDATE, resultRelInfo is one of the per-subplan
-			 * resultRelInfos. In either case the position of this partition in
-			 * tracked in ri_PartitionLeafIndex;
-			 *
-			 * Retrieve the map either by looking at the resultRelInfo's
-			 * position in mtstate->resultRelInfo[] (for UPDATE) or by simply
-			 * using the ri_PartitionLeafIndex value (for MERGE).
+			 * resultRelInfo is one of the per-subplan resultRelInfos.  So we
+			 * should convert the tuple into root's tuple descriptor, since
+			 * ExecInsert() starts the search from root.  The tuple conversion
+			 * map list is in the order of mtstate->resultRelInfo[], so to
+			 * retrieve the one for this resultRel, we need to know the
+			 * position of the resultRel in mtstate->resultRelInfo[].
 			 */
-			if (mtstate->operation == CMD_MERGE)
-			{
-				map_index = resultRelInfo->ri_PartitionLeafIndex;
-				Assert(mtstate->rootResultRelInfo == NULL);
-				tupconv_map = TupConvMapForLeaf(proute,
-								mtstate->resultRelInfo,
-								map_index);
-			}
-			else
-			{
-				map_index = resultRelInfo - mtstate->resultRelInfo;
-				Assert(map_index >= 0 && map_index < mtstate->mt_nplans);
-				tupconv_map = tupconv_map_for_subplan(mtstate, map_index);
-			}
+			map_index = resultRelInfo - mtstate->resultRelInfo;
+			Assert(map_index >= 0 && map_index < mtstate->mt_nplans);
+			tupconv_map = tupconv_map_for_subplan(mtstate, map_index);
 			tuple = ConvertPartitionTupleSlot(tupconv_map,
 											  tuple,
 											  proute->root_tuple_slot,
@@ -1238,16 +1137,12 @@ lreplace:;
 			 * Prepare for tuple routing, making it look like we're inserting
 			 * into the root.
 			 */
+			Assert(mtstate->rootResultRelInfo != NULL);
 			slot = ExecPrepareTupleRouting(mtstate, estate, proute,
-										   getTargetResultRelInfo(mtstate),
-										   slot);
+										   mtstate->rootResultRelInfo, slot);
 
 			ret_slot = ExecInsert(mtstate, slot, planSlot,
-								  estate, actionState, canSetTag);
-
-			/* Update is successful. */
-			if (tuple_updated)
-				*tuple_updated = true;
+								  estate, canSetTag);
 
 			/* Revert ExecPrepareTupleRouting's node change. */
 			estate->es_result_relation_info = resultRelInfo;
@@ -1261,16 +1156,13 @@ lreplace:;
 		}
 
 		/*
-		 * Check the constraints of the tuple.  Note that we pass the same
-		 * slot for the orig_slot argument, because unlike ExecInsert(), no
-		 * tuple-routing is performed here, hence the slot remains unchanged.
-		 * We've already checked the partition constraint above; however, we
-		 * must still ensure the tuple passes all other constraints, so we
-		 * will call ExecConstraints() and have it validate all remaining
-		 * checks.
+		 * Check the constraints of the tuple.  We've already checked the
+		 * partition constraint above; however, we must still ensure the tuple
+		 * passes all other constraints, so we will call ExecConstraints() and
+		 * have it validate all remaining checks.
 		 */
 		if (resultRelationDesc->rd_att->constr)
-			ExecConstraints(resultRelInfo, slot, estate, false);
+			ExecConstraints(resultRelInfo, slot, estate);
 
 		/*
 		 * replace the heap tuple
@@ -1285,16 +1177,7 @@ lreplace:;
 							 estate->es_output_cid,
 							 estate->es_crosscheck_snapshot,
 							 true /* wait for commit */ ,
-							 &hufd);
-
-		/*
-		 * Copy the necessary information, if the caller has asked for it. We
-		 * must do this irrespective of whether the tuple was updated or
-		 * deleted.
-		 */
-		if (hufdp)
-			*hufdp = hufd;
-
+							 &hufd, &lockmode);
 		switch (result)
 		{
 			case HeapTupleSelfUpdated:
@@ -1348,37 +1231,22 @@ lreplace:;
 				{
 					TupleTableSlot *epqslot;
 
-					/*
-					 * If we're executing MERGE, then the onus of running
-					 * EvalPlanQual() and handling its outcome lies with the
-					 * caller.
-					 */
-					if (actionState != NULL)
-						return NULL;
-
-					/* Regular UPDATE path. */
 					epqslot = EvalPlanQual(estate,
 										   epqstate,
 										   resultRelationDesc,
-										   GetEPQRangeTableIndex(resultRelInfo),
-										   hufd.lockmode,
+										   resultRelInfo->ri_RangeTableIndex,
+										   lockmode,
 										   &hufd.ctid,
 										   hufd.xmax);
 					if (!TupIsNull(epqslot))
 					{
 						*tupleid = hufd.ctid;
-						/* Normal UPDATE path */
 						slot = ExecFilterJunk(resultRelInfo->ri_junkFilter, epqslot);
 						tuple = ExecMaterializeSlot(slot);
 						goto lreplace;
 					}
 				}
-
-				/*
-				 * tuple already deleted; nothing to do. But MERGE might want
-				 * to handle it differently. We've already filled-in hufdp
-				 * with sufficient information for MERGE to look at.
-				 */
+				/* tuple already deleted; nothing to do */
 				return NULL;
 
 			default:
@@ -1406,9 +1274,6 @@ lreplace:;
 			recheckIndexes = ExecInsertIndexTuples(slot, &(tuple->t_self),
 												   estate, false, NULL, NIL);
 	}
-
-	if (tuple_updated)
-		*tuple_updated = true;
 
 	if (canSetTag)
 		(estate->es_processed)++;
@@ -1504,9 +1369,9 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 			 * there's no historical behavior to break.
 			 *
 			 * It is the user's responsibility to prevent this situation from
-			 * occurring.  These problems are why SQL Standard similarly
-			 * specifies that for SQL MERGE, an exception must be raised in
-			 * the event of an attempt to update the same row twice.
+			 * occurring.  These problems are why SQL-2003 similarly specifies
+			 * that for SQL MERGE, an exception must be raised in the event of
+			 * an attempt to update the same row twice.
 			 */
 			if (TransactionIdIsCurrentTransactionId(HeapTupleHeaderGetXmin(tuple.t_data)))
 				ereport(ERROR,
@@ -1516,6 +1381,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 
 			/* This shouldn't happen */
 			elog(ERROR, "attempted to lock invisible tuple");
+			break;
 
 		case HeapTupleSelfUpdated:
 
@@ -1525,6 +1391,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 			 * seen this row to conflict with.
 			 */
 			elog(ERROR, "unexpected self-updated tuple");
+			break;
 
 		case HeapTupleUpdated:
 			if (IsolationUsesXactSnapshot())
@@ -1636,7 +1503,7 @@ ExecOnConflictUpdate(ModifyTableState *mtstate,
 	*returning = ExecUpdate(mtstate, &tuple.t_self, NULL,
 							mtstate->mt_conflproj, planSlot,
 							&mtstate->mt_epqstate, mtstate->ps.state,
-							NULL, NULL, NULL, canSetTag);
+							canSetTag);
 
 	ReleaseBuffer(buffer);
 	return true;
@@ -1673,14 +1540,6 @@ fireBSTriggers(ModifyTableState *node)
 			break;
 		case CMD_DELETE:
 			ExecBSDeleteTriggers(node->ps.state, resultRelInfo);
-			break;
-		case CMD_MERGE:
-			if (node->mt_merge_subcommands & MERGE_INSERT)
-				ExecBSInsertTriggers(node->ps.state, resultRelInfo);
-			if (node->mt_merge_subcommands & MERGE_UPDATE)
-				ExecBSUpdateTriggers(node->ps.state, resultRelInfo);
-			if (node->mt_merge_subcommands & MERGE_DELETE)
-				ExecBSDeleteTriggers(node->ps.state, resultRelInfo);
 			break;
 		default:
 			elog(ERROR, "unknown operation");
@@ -1736,17 +1595,6 @@ fireASTriggers(ModifyTableState *node)
 		case CMD_DELETE:
 			ExecASDeleteTriggers(node->ps.state, resultRelInfo,
 								 node->mt_transition_capture);
-			break;
-		case CMD_MERGE:
-			if (node->mt_merge_subcommands & MERGE_DELETE)
-				ExecASDeleteTriggers(node->ps.state, resultRelInfo,
-									 node->mt_transition_capture);
-			if (node->mt_merge_subcommands & MERGE_UPDATE)
-				ExecASUpdateTriggers(node->ps.state, resultRelInfo,
-									 node->mt_transition_capture);
-			if (node->mt_merge_subcommands & MERGE_INSERT)
-				ExecASInsertTriggers(node->ps.state, resultRelInfo,
-									 node->mt_transition_capture);
 			break;
 		default:
 			elog(ERROR, "unknown operation");
@@ -1810,7 +1658,7 @@ ExecSetupTransitionCaptureState(ModifyTableState *mtstate, EState *estate)
  *
  * Returns a slot holding the tuple of the partition rowtype.
  */
-TupleTableSlot *
+static TupleTableSlot *
 ExecPrepareTupleRouting(ModifyTableState *mtstate,
 						EState *estate,
 						PartitionTupleRouting *proute,
@@ -1823,8 +1671,8 @@ ExecPrepareTupleRouting(ModifyTableState *mtstate,
 	HeapTuple	tuple;
 
 	/*
-	 * Determine the target partition.  If ExecFindPartition does not find
-	 * a partition after all, it doesn't return here; otherwise, the returned
+	 * Determine the target partition.  If ExecFindPartition does not find a
+	 * partition after all, it doesn't return here; otherwise, the returned
 	 * value is to be used as an index into the arrays for the ResultRelInfo
 	 * and TupleConversionMap for the partition.
 	 */
@@ -1845,20 +1693,24 @@ ExecPrepareTupleRouting(ModifyTableState *mtstate,
 										partidx);
 
 	/*
-	 * Set up information needed for routing tuples to the partition if we
-	 * didn't yet (ExecInitRoutingInfo would abort the operation if the
-	 * partition isn't routable).
+	 * Check whether the partition is routable if we didn't yet
 	 *
 	 * Note: an UPDATE of a partition key invokes an INSERT that moves the
-	 * tuple to a new partition.  This setup would be needed for a subplan
+	 * tuple to a new partition.  This check would be applied to a subplan
 	 * partition of such an UPDATE that is chosen as the partition to route
-	 * the tuple to.  The reason we do this setup here rather than in
+	 * the tuple to.  The reason we do this check here rather than in
 	 * ExecSetupPartitionTupleRouting is to avoid aborting such an UPDATE
 	 * unnecessarily due to non-routable subplan partitions that may not be
 	 * chosen for update tuple movement after all.
 	 */
 	if (!partrel->ri_PartitionReadyForRouting)
+	{
+		/* Verify the partition is a valid target for INSERT. */
+		CheckValidResultRel(partrel, CMD_INSERT);
+
+		/* Set up information needed for routing tuples to the partition. */
 		ExecInitRoutingInfo(mtstate, estate, proute, partrel, partidx);
+	}
 
 	/*
 	 * Make it look like we are inserting into the partition.
@@ -2143,7 +1995,6 @@ ExecModifyTable(PlanState *pstate)
 		{
 			/* advance to next subplan if any */
 			node->mt_whichplan++;
-
 			if (node->mt_whichplan < node->mt_nplans)
 			{
 				resultRelInfo++;
@@ -2191,12 +2042,6 @@ ExecModifyTable(PlanState *pstate)
 
 		EvalPlanQualSetSlot(&node->mt_epqstate, planSlot);
 		slot = planSlot;
-
-		if (operation == CMD_MERGE)
-		{
-			ExecMerge(node, estate, slot, junkfilter, resultRelInfo);
-			continue;
-		}
 
 		tupleid = NULL;
 		oldtuple = NULL;
@@ -2279,21 +2124,20 @@ ExecModifyTable(PlanState *pstate)
 					slot = ExecPrepareTupleRouting(node, estate, proute,
 												   resultRelInfo, slot);
 				slot = ExecInsert(node, slot, planSlot,
-								  estate, NULL, node->canSetTag);
+								  estate, node->canSetTag);
 				/* Revert ExecPrepareTupleRouting's state change. */
 				if (proute)
 					estate->es_result_relation_info = resultRelInfo;
 				break;
 			case CMD_UPDATE:
 				slot = ExecUpdate(node, tupleid, oldtuple, slot, planSlot,
-								  &node->mt_epqstate, estate,
-								  NULL, NULL, NULL, node->canSetTag);
+								  &node->mt_epqstate, estate, node->canSetTag);
 				break;
 			case CMD_DELETE:
 				slot = ExecDelete(node, tupleid, oldtuple, planSlot,
 								  &node->mt_epqstate, estate,
-								  NULL, true, NULL, NULL, node->canSetTag,
-								  false /* changingPart */);
+								  NULL, true, node->canSetTag,
+								  false /* changingPart */ );
 				break;
 			default:
 				elog(ERROR, "unknown operation");
@@ -2383,16 +2227,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	saved_resultRelInfo = estate->es_result_relation_info;
 
 	resultRelInfo = mtstate->resultRelInfo;
-
-	/*
-	 * mergeTargetRelation must be set if we're running MERGE and mustn't be
-	 * set if we're not.
-	 */
-	Assert(operation != CMD_MERGE || node->mergeTargetRelation > 0);
-	Assert(operation == CMD_MERGE || node->mergeTargetRelation == 0);
-
-	resultRelInfo->ri_mergeTargetRTI = node->mergeTargetRelation;
-
 	i = 0;
 	foreach(l, node->plans)
 	{
@@ -2471,10 +2305,9 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * partition key.
 	 */
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE &&
-		(operation == CMD_INSERT || operation == CMD_MERGE ||
-		 update_tuple_routing_needed))
+		(operation == CMD_INSERT || update_tuple_routing_needed))
 		mtstate->mt_partition_tuple_routing =
-						ExecSetupPartitionTupleRouting(mtstate, rel);
+			ExecSetupPartitionTupleRouting(mtstate, rel);
 
 	/*
 	 * Build state for collecting transition tuples.  This requires having a
@@ -2482,15 +2315,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 */
 	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 		ExecSetupTransitionCaptureState(mtstate, estate);
-
-	/*
-	 * If we are doing MERGE then setup child-parent mapping. This will be
-	 * required in case we end up doing a partition-key update, triggering a
-	 * tuple routing.
-	 */
-	if (mtstate->operation == CMD_MERGE &&
-		mtstate->mt_partition_tuple_routing != NULL)
-		ExecSetupChildParentMapForLeaf(mtstate->mt_partition_tuple_routing);
 
 	/*
 	 * Construct mapping from each of the per-subplan partition attnos to the
@@ -2684,10 +2508,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 		}
 	}
 
-	resultRelInfo = mtstate->resultRelInfo;
-	if (mtstate->operation == CMD_MERGE)
-		ExecInitMerge(mtstate, estate, resultRelInfo);
-
 	/* select first subplan */
 	mtstate->mt_whichplan = 0;
 	subplan = (Plan *) linitial(node->plans);
@@ -2701,7 +2521,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	 * --- no need to look first.  Typically, this will be a 'ctid' or
 	 * 'wholerow' attribute, but in the case of a foreign data wrapper it
 	 * might be a set of junk attributes sufficient to identify the remote
-	 * row. We follow this logic for MERGE, so it always has a junk attributes.
+	 * row.
 	 *
 	 * If there are multiple result relations, each one needs its own junk
 	 * filter.  Note multiple rels are only possible for UPDATE/DELETE, so we
@@ -2729,7 +2549,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 				break;
 			case CMD_UPDATE:
 			case CMD_DELETE:
-			case CMD_MERGE:
 				junk_filter_needed = true;
 				break;
 			default:
@@ -2745,7 +2564,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 				JunkFilter *j;
 
 				subplan = mtstate->mt_plans[i]->plan;
-
 				if (operation == CMD_INSERT || operation == CMD_UPDATE)
 					ExecCheckPlanOutput(resultRelInfo->ri_RelationDesc,
 										subplan->targetlist);
@@ -2754,9 +2572,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 									   resultRelInfo->ri_RelationDesc->rd_att->tdhasoid,
 									   ExecInitExtraTupleSlot(estate, NULL));
 
-				if (operation == CMD_UPDATE ||
-					operation == CMD_DELETE ||
-					operation == CMD_MERGE)
+				if (operation == CMD_UPDATE || operation == CMD_DELETE)
 				{
 					/* For UPDATE/DELETE, find the appropriate junk attr now */
 					char		relkind;
@@ -2769,15 +2585,6 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 						j->jf_junkAttNo = ExecFindJunkAttribute(j, "ctid");
 						if (!AttributeNumberIsValid(j->jf_junkAttNo))
 							elog(ERROR, "could not find junk ctid column");
-
-						if (operation == CMD_MERGE &&
-							relkind == RELKIND_PARTITIONED_TABLE)
-						{
-							j->jf_otherJunkAttNo = ExecFindJunkAttribute(j, "tableoid");
-							if (!AttributeNumberIsValid(j->jf_otherJunkAttNo))
-								elog(ERROR, "could not find junk tableoid column");
-
-						}
 					}
 					else if (relkind == RELKIND_FOREIGN_TABLE)
 					{

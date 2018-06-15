@@ -18,9 +18,11 @@
 #include "access/heapam.h"
 #include "access/htup_details.h"
 #include "access/sysattr.h"
+#include "access/tupconvert.h"
 #include "catalog/dependency.h"
 #include "catalog/indexing.h"
 #include "catalog/objectaccess.h"
+#include "catalog/partition.h"
 #include "catalog/pg_constraint.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_type.h"
@@ -417,8 +419,8 @@ CloneForeignKeyConstraints(Oid parentId, Oid relationId, List **cloned)
 	Relation	pg_constraint;
 	Relation	parentRel;
 	Relation	rel;
-	ScanKeyData	key;
-	SysScanDesc	scan;
+	ScanKeyData key;
+	SysScanDesc scan;
 	TupleDesc	tupdesc;
 	HeapTuple	tuple;
 	AttrNumber *attmap;
@@ -446,7 +448,7 @@ CloneForeignKeyConstraints(Oid parentId, Oid relationId, List **cloned)
 
 	while ((tuple = systable_getnext(scan)) != NULL)
 	{
-		Form_pg_constraint	constrForm = (Form_pg_constraint) GETSTRUCT(tuple);
+		Form_pg_constraint constrForm = (Form_pg_constraint) GETSTRUCT(tuple);
 		AttrNumber	conkey[INDEX_MAX_KEYS];
 		AttrNumber	mapped_conkey[INDEX_MAX_KEYS];
 		AttrNumber	confkey[INDEX_MAX_KEYS];
@@ -571,8 +573,8 @@ CloneForeignKeyConstraints(Oid parentId, Oid relationId, List **cloned)
 								  nelem,
 								  nelem,
 								  InvalidOid,	/* not a domain constraint */
-								  constrForm->conindid,	/* same index */
-								  constrForm->confrelid, /* same foreign rel */
+								  constrForm->conindid, /* same index */
+								  constrForm->confrelid,	/* same foreign rel */
 								  confkey,
 								  conpfeqop,
 								  conppeqop,
@@ -604,8 +606,8 @@ CloneForeignKeyConstraints(Oid parentId, Oid relationId, List **cloned)
 		if (cloned)
 		{
 			/*
-			 * Feed back caller about the constraints we created, so that they can
-			 * set up constraint verification.
+			 * Feed back caller about the constraints we created, so that they
+			 * can set up constraint verification.
 			 */
 			newc = palloc(sizeof(ClonedConstraint));
 			newc->relid = relationId;
@@ -623,7 +625,7 @@ CloneForeignKeyConstraints(Oid parentId, Oid relationId, List **cloned)
 
 	if (rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
 	{
-		PartitionDesc	partdesc = RelationGetPartitionDesc(rel);
+		PartitionDesc partdesc = RelationGetPartitionDesc(rel);
 		int			i;
 
 		for (i = 0; i < partdesc->nparts; i++)
@@ -632,7 +634,7 @@ CloneForeignKeyConstraints(Oid parentId, Oid relationId, List **cloned)
 									   cloned);
 	}
 
-	heap_close(rel, NoLock);		/* keep lock till commit */
+	heap_close(rel, NoLock);	/* keep lock till commit */
 	heap_close(parentRel, NoLock);
 	heap_close(pg_constraint, RowShareLock);
 }
@@ -1018,12 +1020,12 @@ AlterConstraintNamespaces(Oid ownerId, Oid oldNspId,
 void
 ConstraintSetParentConstraint(Oid childConstrId, Oid parentConstrId)
 {
-	Relation		constrRel;
+	Relation	constrRel;
 	Form_pg_constraint constrForm;
-	HeapTuple		tuple,
-					newtup;
-	ObjectAddress	depender;
-	ObjectAddress	referenced;
+	HeapTuple	tuple,
+				newtup;
+	ObjectAddress depender;
+	ObjectAddress referenced;
 
 	constrRel = heap_open(ConstraintRelationId, RowExclusiveLock);
 	tuple = SearchSysCache1(CONSTROID, ObjectIdGetDatum(childConstrId));
@@ -1210,8 +1212,8 @@ Oid
 get_relation_idx_constraint_oid(Oid relationId, Oid indexId)
 {
 	Relation	pg_constraint;
-	SysScanDesc	scan;
-	ScanKeyData	key;
+	SysScanDesc scan;
+	ScanKeyData key;
 	HeapTuple	tuple;
 	Oid			constraintId = InvalidOid;
 
@@ -1226,7 +1228,7 @@ get_relation_idx_constraint_oid(Oid relationId, Oid indexId)
 							  true, NULL, 1, &key);
 	while ((tuple = systable_getnext(scan)) != NULL)
 	{
-		Form_pg_constraint	constrForm;
+		Form_pg_constraint constrForm;
 
 		constrForm = (Form_pg_constraint) GETSTRUCT(tuple);
 		if (constrForm->conindid == indexId)

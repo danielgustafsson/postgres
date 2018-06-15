@@ -1099,14 +1099,14 @@ DELETE FROM ft2 USING ft1 WHERE ft1.c1 = ft2.c2 AND ft1.c1 % 10 = 2;            
 DELETE FROM ft2 USING ft1 WHERE ft1.c1 = ft2.c2 AND ft1.c1 % 10 = 2;
 SELECT c1,c2,c3,c4 FROM ft2 ORDER BY c1;
 EXPLAIN (verbose, costs off)
-INSERT INTO ft2 (c1,c2,c3) VALUES (9999,999,'foo') RETURNING tableoid::regclass;
-INSERT INTO ft2 (c1,c2,c3) VALUES (9999,999,'foo') RETURNING tableoid::regclass;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1200,999,'foo') RETURNING tableoid::regclass;
+INSERT INTO ft2 (c1,c2,c3) VALUES (1200,999,'foo') RETURNING tableoid::regclass;
 EXPLAIN (verbose, costs off)
-UPDATE ft2 SET c3 = 'bar' WHERE c1 = 9999 RETURNING tableoid::regclass;             -- can be pushed down
-UPDATE ft2 SET c3 = 'bar' WHERE c1 = 9999 RETURNING tableoid::regclass;
+UPDATE ft2 SET c3 = 'bar' WHERE c1 = 1200 RETURNING tableoid::regclass;             -- can be pushed down
+UPDATE ft2 SET c3 = 'bar' WHERE c1 = 1200 RETURNING tableoid::regclass;
 EXPLAIN (verbose, costs off)
-DELETE FROM ft2 WHERE c1 = 9999 RETURNING tableoid::regclass;                       -- can be pushed down
-DELETE FROM ft2 WHERE c1 = 9999 RETURNING tableoid::regclass;
+DELETE FROM ft2 WHERE c1 = 1200 RETURNING tableoid::regclass;                       -- can be pushed down
+DELETE FROM ft2 WHERE c1 = 1200 RETURNING tableoid::regclass;
 
 -- Test UPDATE/DELETE with RETURNING on a three-table join
 INSERT INTO ft2 (c1,c2,c3)
@@ -1767,6 +1767,38 @@ drop table bar cascade;
 drop table loct1;
 drop table loct2;
 
+-- Test pushing down UPDATE/DELETE joins to the remote server
+create table parent (a int, b text);
+create table loct1 (a int, b text);
+create table loct2 (a int, b text);
+create foreign table remt1 (a int, b text)
+  server loopback options (table_name 'loct1');
+create foreign table remt2 (a int, b text)
+  server loopback options (table_name 'loct2');
+alter foreign table remt1 inherit parent;
+
+insert into remt1 values (1, 'foo');
+insert into remt1 values (2, 'bar');
+insert into remt2 values (1, 'foo');
+insert into remt2 values (2, 'bar');
+
+analyze remt1;
+analyze remt2;
+
+explain (verbose, costs off)
+update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a returning *;
+update parent set b = parent.b || remt2.b from remt2 where parent.a = remt2.a returning *;
+explain (verbose, costs off)
+delete from parent using remt2 where parent.a = remt2.a returning parent;
+delete from parent using remt2 where parent.a = remt2.a returning parent;
+
+-- cleanup
+drop foreign table remt1;
+drop foreign table remt2;
+drop table loct1;
+drop table loct2;
+drop table parent;
+
 -- ===================================================================
 -- test tuple routing for foreign-table partitions
 -- ===================================================================
@@ -1804,6 +1836,31 @@ insert into itrtest values (1, 'bar') on conflict (a) do update set b = excluded
 
 select tableoid::regclass, * FROM itrtest;
 
+delete from itrtest;
+
+drop index loct1_idx;
+
+-- Test that remote triggers work with insert tuple routing
+create function br_insert_trigfunc() returns trigger as $$
+begin
+	new.b := new.b || ' triggered !';
+	return new;
+end
+$$ language plpgsql;
+create trigger loct1_br_insert_trigger before insert on loct1
+	for each row execute procedure br_insert_trigfunc();
+create trigger loct2_br_insert_trigger before insert on loct2
+	for each row execute procedure br_insert_trigfunc();
+
+-- The new values are concatenated with ' triggered !'
+insert into itrtest values (1, 'foo') returning *;
+insert into itrtest values (2, 'qux') returning *;
+insert into itrtest values (1, 'test1'), (2, 'test2') returning *;
+with result as (insert into itrtest values (1, 'test1'), (2, 'test2') returning *) select * from result;
+
+drop trigger loct1_br_insert_trigger on loct1;
+drop trigger loct2_br_insert_trigger on loct2;
+
 drop table itrtest;
 drop table loct1;
 drop table loct2;
@@ -1835,6 +1892,30 @@ select tableoid::regclass, * FROM locp;
 
 -- The executor should not let unexercised FDWs shut down
 update utrtest set a = 1 where b = 'foo';
+
+-- Test that remote triggers work with update tuple routing
+create trigger loct_br_insert_trigger before insert on loct
+	for each row execute procedure br_insert_trigfunc();
+
+delete from utrtest;
+insert into utrtest values (2, 'qux');
+
+-- Check case where the foreign partition is a subplan target rel
+explain (verbose, costs off)
+update utrtest set a = 1 where a = 1 or a = 2 returning *;
+-- The new values are concatenated with ' triggered !'
+update utrtest set a = 1 where a = 1 or a = 2 returning *;
+
+delete from utrtest;
+insert into utrtest values (2, 'qux');
+
+-- Check case where the foreign partition isn't a subplan target rel
+explain (verbose, costs off)
+update utrtest set a = 1 where a = 2 returning *;
+-- The new values are concatenated with ' triggered !'
+update utrtest set a = 1 where a = 2 returning *;
+
+drop trigger loct_br_insert_trigger on loct;
 
 drop table utrtest;
 drop table loct;

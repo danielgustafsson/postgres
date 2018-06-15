@@ -312,9 +312,9 @@ static int pltcl_SPI_lastoid(ClientData cdata, Tcl_Interp *interp,
 static int pltcl_subtransaction(ClientData cdata, Tcl_Interp *interp,
 					 int objc, Tcl_Obj *const objv[]);
 static int pltcl_commit(ClientData cdata, Tcl_Interp *interp,
-					 int objc, Tcl_Obj *const objv[]);
+			 int objc, Tcl_Obj *const objv[]);
 static int pltcl_rollback(ClientData cdata, Tcl_Interp *interp,
-					 int objc, Tcl_Obj *const objv[]);
+			   int objc, Tcl_Obj *const objv[]);
 
 static void pltcl_subtrans_begin(MemoryContext oldcontext,
 					 ResourceOwner oldowner);
@@ -2451,7 +2451,8 @@ pltcl_process_SPI_result(Tcl_Interp *interp,
 				Tcl_SetObjResult(interp, Tcl_NewIntObj(0));
 				break;
 			}
-			/* FALL THRU for utility returning tuples */
+			/* fall through for utility returning tuples */
+			/* FALLTHROUGH */
 
 		case SPI_OK_SELECT:
 		case SPI_OK_INSERT_RETURNING:

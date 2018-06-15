@@ -77,6 +77,7 @@
 #include "parser/parse_type.h"
 #include "parser/parse_utilcmd.h"
 #include "parser/parser.h"
+#include "partitioning/partbounds.h"
 #include "pgstat.h"
 #include "rewrite/rewriteDefine.h"
 #include "rewrite/rewriteHandler.h"
@@ -92,6 +93,7 @@
 #include "utils/inval.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/partcache.h"
 #include "utils/relcache.h"
 #include "utils/ruleutils.h"
 #include "utils/snapmgr.h"
@@ -480,10 +482,9 @@ static void RemoveInheritance(Relation child_rel, Relation parent_rel);
 static ObjectAddress ATExecAttachPartition(List **wqueue, Relation rel,
 					  PartitionCmd *cmd);
 static void AttachPartitionEnsureIndexes(Relation rel, Relation attachrel);
-static void ValidatePartitionConstraints(List **wqueue, Relation scanrel,
-							 List *scanrel_children,
-							 List *partConstraint,
-							 bool validate_default);
+static void QueuePartitionConstraintValidation(List **wqueue, Relation scanrel,
+								   List *partConstraint,
+								   bool validate_default);
 static void CloneRowTriggersToPartition(Relation parent, Relation partition);
 static ObjectAddress ATExecDetachPartition(Relation rel, RangeVar *name);
 static ObjectAddress ATExecAttachPartitionIdx(List **wqueue, Relation rel,
@@ -491,6 +492,8 @@ static ObjectAddress ATExecAttachPartitionIdx(List **wqueue, Relation rel,
 static void validatePartitionedIndex(Relation partedIdx, Relation partedTbl);
 static void refuseDupeIndexAttach(Relation parentIdx, Relation partIdx,
 					  Relation partitionTbl);
+static void update_relispartition(Relation classRel, Oid relationId,
+					  bool newval);
 
 
 /* ----------------------------------------------------------------
@@ -852,7 +855,7 @@ DefineRelation(CreateStmt *stmt, char relkind, Oid ownerId,
 		 */
 		if (OidIsValid(defaultPartOid))
 		{
-			check_default_allows_bound(parent, defaultRel, bound);
+			check_default_partition_contents(parent, defaultRel, bound);
 			/* Keep the lock until commit. */
 			heap_close(defaultRel, NoLock);
 		}
@@ -1631,7 +1634,8 @@ ExecuteTruncateGuts(List *explicit_rels, List *relids, List *relids_logged,
 	}
 
 	/*
-	 * Write a WAL record to allow this set of actions to be logically decoded.
+	 * Write a WAL record to allow this set of actions to be logically
+	 * decoded.
 	 *
 	 * Assemble an array of relids so we can write a single WAL record for the
 	 * whole action.
@@ -1645,7 +1649,7 @@ ExecuteTruncateGuts(List *explicit_rels, List *relids, List *relids_logged,
 		Assert(XLogLogicalInfoActive());
 
 		logrelids = palloc(list_length(relids_logged) * sizeof(Oid));
-		foreach (cell, relids_logged)
+		foreach(cell, relids_logged)
 			logrelids[i++] = lfirst_oid(cell);
 
 		xlrec.dbId = MyDatabaseId;
@@ -5557,8 +5561,8 @@ ATExecAddColumn(List **wqueue, AlteredTableInfo *tab, Relation rel,
 		CommandCounterIncrement();
 
 		/*
-		 * Did the request for a missing value work? If not we'll have to do
-		 * a rewrite
+		 * Did the request for a missing value work? If not we'll have to do a
+		 * rewrite
 		 */
 		if (!rawEnt->missingMode)
 			tab->rewrite |= AT_REWRITE_DEFAULT_VAL;
@@ -7661,9 +7665,9 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 	ObjectAddressSet(address, ConstraintRelationId, constrOid);
 
 	/*
-	 * Create the triggers that will enforce the constraint.  We only want
-	 * the action triggers to appear for the parent partitioned relation,
-	 * even though the constraints also exist below.
+	 * Create the triggers that will enforce the constraint.  We only want the
+	 * action triggers to appear for the parent partitioned relation, even
+	 * though the constraints also exist below.
 	 */
 	createForeignKeyTriggers(rel, RelationGetRelid(pkrel), fkconstraint,
 							 constrOid, indexOid, !recursing);
@@ -8790,8 +8794,8 @@ createForeignKeyTriggers(Relation rel, Oid refRelOid, Constraint *fkconstraint,
 									   indexOid);
 
 	/*
-	 * For the referencing side, create the check triggers.  We only need these
-	 * on the partitions.
+	 * For the referencing side, create the check triggers.  We only need
+	 * these on the partitions.
 	 */
 	if (rel->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		createForeignKeyCheckTriggers(RelationGetRelid(rel), refRelOid,
@@ -11918,11 +11922,11 @@ ATExecDropInherit(Relation rel, RangeVar *parent, LOCKMODE lockmode)
 	/* Off to RemoveInheritance() where most of the work happens */
 	RemoveInheritance(rel, parent_rel);
 
-	/* keep our lock on the parent relation until commit */
-	heap_close(parent_rel, NoLock);
-
 	ObjectAddressSet(address, RelationRelationId,
 					 RelationGetRelid(parent_rel));
+
+	/* keep our lock on the parent relation until commit */
+	heap_close(parent_rel, NoLock);
 
 	return address;
 }
@@ -13939,29 +13943,23 @@ PartConstraintImpliedByRelConstraint(Relation scanrel,
 }
 
 /*
- * ValidatePartitionConstraints
+ * QueuePartitionConstraintValidation
  *
- * Check whether all rows in the given table obey the given partition
- * constraint; if so, it can be attached as a partition.  We do this by
- * scanning the table (or all of its leaf partitions) row by row, except when
- * the existing constraints are sufficient to prove that the new partitioning
- * constraint must already hold.
+ * Add an entry to wqueue to have the given partition constraint validated by
+ * Phase 3, for the given relation, and all its children.
+ *
+ * We first verify whether the given constraint is implied by pre-existing
+ * relation constraints; if it is, there's no need to scan the table to
+ * validate, so don't queue in that case.
  */
 static void
-ValidatePartitionConstraints(List **wqueue, Relation scanrel,
-							 List *scanrel_children,
-							 List *partConstraint,
-							 bool validate_default)
+QueuePartitionConstraintValidation(List **wqueue, Relation scanrel,
+								   List *partConstraint,
+								   bool validate_default)
 {
-	bool		found_whole_row;
-	ListCell   *lc;
-
-	if (partConstraint == NIL)
-		return;
-
 	/*
-	 * Based on the table's existing constraints, determine if we can skip
-	 * scanning the table to validate the partition constraint.
+	 * Based on the table's existing constraints, determine whether or not we
+	 * may skip scanning the table.
 	 */
 	if (PartConstraintImpliedByRelConstraint(scanrel, partConstraint))
 	{
@@ -13976,68 +13974,53 @@ ValidatePartitionConstraints(List **wqueue, Relation scanrel,
 		return;
 	}
 
-	/* Constraints proved insufficient, so we need to scan the table. */
-	foreach(lc, scanrel_children)
+	/*
+	 * Constraints proved insufficient. For plain relations, queue a
+	 * validation item now; for partitioned tables, recurse to process each
+	 * partition.
+	 */
+	if (scanrel->rd_rel->relkind == RELKIND_RELATION)
 	{
 		AlteredTableInfo *tab;
-		Oid			part_relid = lfirst_oid(lc);
-		Relation	part_rel;
-		List	   *my_partconstr = partConstraint;
 
-		/* Lock already taken */
-		if (part_relid != RelationGetRelid(scanrel))
-			part_rel = heap_open(part_relid, NoLock);
-		else
-			part_rel = scanrel;
+		/* Grab a work queue entry. */
+		tab = ATGetQueueEntry(wqueue, scanrel);
+		Assert(tab->partition_constraint == NULL);
+		tab->partition_constraint = (Expr *) linitial(partConstraint);
+		tab->validate_default = validate_default;
+	}
+	else if (scanrel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		PartitionDesc partdesc = RelationGetPartitionDesc(scanrel);
+		int			i;
 
-		/*
-		 * Skip if the partition is itself a partitioned table.  We can only
-		 * ever scan RELKIND_RELATION relations.
-		 */
-		if (part_rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		for (i = 0; i < partdesc->nparts; i++)
 		{
-			if (part_rel != scanrel)
-				heap_close(part_rel, NoLock);
-			continue;
-		}
+			Relation	part_rel;
+			bool		found_whole_row;
+			List	   *thisPartConstraint;
 
-		if (part_rel != scanrel)
-		{
+			/*
+			 * This is the minimum lock we need to prevent deadlocks.
+			 */
+			part_rel = heap_open(partdesc->oids[i], AccessExclusiveLock);
+
 			/*
 			 * Adjust the constraint for scanrel so that it matches this
 			 * partition's attribute numbers.
 			 */
-			my_partconstr = map_partition_varattnos(my_partconstr, 1,
-													part_rel, scanrel,
-													&found_whole_row);
+			thisPartConstraint =
+				map_partition_varattnos(partConstraint, 1,
+										part_rel, scanrel, &found_whole_row);
 			/* There can never be a whole-row reference here */
 			if (found_whole_row)
-				elog(ERROR, "unexpected whole-row reference found in partition key");
+				elog(ERROR, "unexpected whole-row reference found in partition constraint");
 
-			/* Can we skip scanning this part_rel? */
-			if (PartConstraintImpliedByRelConstraint(part_rel, my_partconstr))
-			{
-				if (!validate_default)
-					ereport(INFO,
-							(errmsg("partition constraint for table \"%s\" is implied by existing constraints",
-									RelationGetRelationName(part_rel))));
-				else
-					ereport(INFO,
-							(errmsg("updated partition constraint for default partition \"%s\" is implied by existing constraints",
-									RelationGetRelationName(part_rel))));
-				heap_close(part_rel, NoLock);
-				continue;
-			}
+			QueuePartitionConstraintValidation(wqueue, part_rel,
+											   thisPartConstraint,
+											   validate_default);
+			heap_close(part_rel, NoLock);	/* keep lock till commit */
 		}
-
-		/* Grab a work queue entry. */
-		tab = ATGetQueueEntry(wqueue, part_rel);
-		tab->partition_constraint = (Expr *) linitial(my_partconstr);
-		tab->validate_default = validate_default;
-
-		/* keep our lock until commit */
-		if (part_rel != scanrel)
-			heap_close(part_rel, NoLock);
 	}
 }
 
@@ -14067,8 +14050,8 @@ ATExecAttachPartition(List **wqueue, Relation rel, PartitionCmd *cmd)
 	ListCell   *l;
 
 	/*
-	 * We must lock the default partition, because attaching a new partition
-	 * will change its partition constraint.
+	 * We must lock the default partition if one exists, because attaching a
+	 * new partition will change its partition constraint.
 	 */
 	defaultPartOid =
 		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel));
@@ -14291,9 +14274,7 @@ ATExecAttachPartition(List **wqueue, Relation rel, PartitionCmd *cmd)
 		/*
 		 * Run the partition quals through const-simplification similar to
 		 * check constraints.  We skip canonicalize_qual, though, because
-		 * partition quals should be in canonical form already; also, since
-		 * the qual is in implicit-AND format, we'd have to explicitly convert
-		 * it to explicit-AND format and back again.
+		 * partition quals should be in canonical form already.
 		 */
 		partConstraint =
 			(List *) eval_const_expressions(NULL,
@@ -14314,32 +14295,30 @@ ATExecAttachPartition(List **wqueue, Relation rel, PartitionCmd *cmd)
 				 "unexpected whole-row reference found in partition key");
 
 		/* Validate partition constraints against the table being attached. */
-		ValidatePartitionConstraints(wqueue, attachrel, attachrel_children,
-									 partConstraint, false);
+		QueuePartitionConstraintValidation(wqueue, attachrel, partConstraint,
+										   false);
 	}
 
 	/*
-	 * Check whether default partition has a row that would fit the partition
-	 * being attached.
+	 * If we're attaching a partition other than the default partition and a
+	 * default one exists, then that partition's partition constraint changes,
+	 * so add an entry to the work queue to validate it, too.  (We must not do
+	 * this when the partition being attached is the default one; we already
+	 * did it above!)
 	 */
-	defaultPartOid =
-		get_default_oid_from_partdesc(RelationGetPartitionDesc(rel));
 	if (OidIsValid(defaultPartOid))
 	{
 		Relation	defaultrel;
-		List	   *defaultrel_children;
 		List	   *defPartConstraint;
 
-		/* We already have taken a lock on default partition. */
+		Assert(!cmd->bound->is_default);
+
+		/* we already hold a lock on the default partition */
 		defaultrel = heap_open(defaultPartOid, NoLock);
 		defPartConstraint =
 			get_proposed_default_constraint(partBoundConstraint);
-		defaultrel_children =
-			find_all_inheritors(defaultPartOid,
-								AccessExclusiveLock, NULL);
-		ValidatePartitionConstraints(wqueue, defaultrel,
-									 defaultrel_children,
-									 defPartConstraint, true);
+		QueuePartitionConstraintValidation(wqueue, defaultrel,
+										   defPartConstraint, true);
 
 		/* keep our lock until commit. */
 		heap_close(defaultrel, NoLock);
@@ -14431,10 +14410,11 @@ AttachPartitionEnsureIndexes(Relation rel, Relation attachrel)
 		 */
 		for (i = 0; i < list_length(attachRelIdxs); i++)
 		{
-			Oid		cldConstrOid = InvalidOid;
+			Oid			cldIdxId = RelationGetRelid(attachrelIdxRels[i]);
+			Oid			cldConstrOid = InvalidOid;
 
 			/* does this index have a parent?  if so, can't use it */
-			if (has_superclass(RelationGetRelid(attachrelIdxRels[i])))
+			if (attachrelIdxRels[i]->rd_rel->relispartition)
 				continue;
 
 			if (CompareIndexInfo(attachInfos[i], info,
@@ -14455,7 +14435,7 @@ AttachPartitionEnsureIndexes(Relation rel, Relation attachrel)
 				{
 					cldConstrOid =
 						get_relation_idx_constraint_oid(RelationGetRelid(attachrel),
-														RelationGetRelid(attachrelIdxRels[i]));
+														cldIdxId);
 					/* no dice */
 					if (!OidIsValid(cldConstrOid))
 						continue;
@@ -14465,6 +14445,7 @@ AttachPartitionEnsureIndexes(Relation rel, Relation attachrel)
 				IndexSetParentIndex(attachrelIdxRels[i], idx);
 				if (OidIsValid(constraintOid))
 					ConstraintSetParentConstraint(cldConstrOid, constraintOid);
+				update_relispartition(NULL, cldIdxId, true);
 				found = true;
 				break;
 			}
@@ -14589,7 +14570,8 @@ CloneRowTriggersToPartition(Relation parent, Relation partition)
 
 				col = TupleDescAttr(parent->rd_att,
 									trigForm->tgattr.values[i] - 1);
-				cols = lappend(cols, makeString(NameStr(col->attname)));
+				cols = lappend(cols,
+							   makeString(pstrdup(NameStr(col->attname))));
 			}
 		}
 
@@ -14685,7 +14667,6 @@ ATExecDetachPartition(Relation rel, RangeVar *name)
 	((Form_pg_class) GETSTRUCT(newtuple))->relispartition = false;
 	CatalogTupleUpdate(classRel, &newtuple->t_self, newtuple);
 	heap_freetuple(newtuple);
-	heap_close(classRel, RowExclusiveLock);
 
 	if (OidIsValid(defaultPartOid))
 	{
@@ -14714,12 +14695,14 @@ ATExecDetachPartition(Relation rel, RangeVar *name)
 			continue;
 
 		Assert((IndexGetRelation(get_partition_parent(idxid), false) ==
-			   RelationGetRelid(rel)));
+				RelationGetRelid(rel)));
 
 		idx = index_open(idxid, AccessExclusiveLock);
 		IndexSetParentIndex(idx, InvalidOid);
+		update_relispartition(classRel, idxid, false);
 		relation_close(idx, AccessExclusiveLock);
 	}
+	heap_close(classRel, RowExclusiveLock);
 
 	/*
 	 * Invalidate the parent's relcache so that the partition is no longer
@@ -14741,9 +14724,9 @@ ATExecDetachPartition(Relation rel, RangeVar *name)
  */
 struct AttachIndexCallbackState
 {
-	Oid		partitionOid;
-	Oid		parentTblOid;
-	bool	lockedParentTbl;
+	Oid			partitionOid;
+	Oid			parentTblOid;
+	bool		lockedParentTbl;
 };
 
 static void
@@ -14841,8 +14824,8 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 	ObjectAddressSet(address, RelationRelationId, RelationGetRelid(partIdx));
 
 	/* Silently do nothing if already in the right state */
-	currParent = !has_superclass(partIdxId) ? InvalidOid :
-		get_partition_parent(partIdxId);
+	currParent = partIdx->rd_rel->relispartition ?
+		get_partition_parent(partIdxId) : InvalidOid;
 	if (currParent != RelationGetRelid(parentIdx))
 	{
 		IndexInfo  *childInfo;
@@ -14855,7 +14838,8 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 					cldConstrId = InvalidOid;
 
 		/*
-		 * If this partition already has an index attached, refuse the operation.
+		 * If this partition already has an index attached, refuse the
+		 * operation.
 		 */
 		refuseDupeIndexAttach(parentIdx, partIdx, partTbl);
 
@@ -14909,8 +14893,8 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 					 errdetail("The index definitions do not match.")));
 
 		/*
-		 * If there is a constraint in the parent, make sure there is one
-		 * in the child too.
+		 * If there is a constraint in the parent, make sure there is one in
+		 * the child too.
 		 */
 		constraintOid = get_relation_idx_constraint_oid(RelationGetRelid(parentTbl),
 														RelationGetRelid(parentIdx));
@@ -14926,15 +14910,16 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 								RelationGetRelationName(partIdx),
 								RelationGetRelationName(parentIdx)),
 						 errdetail("The index \"%s\" belongs to a constraint in table \"%s\" but no constraint exists for index \"%s\".",
-								RelationGetRelationName(parentIdx),
-								RelationGetRelationName(parentTbl),
-								RelationGetRelationName(partIdx))));
+								   RelationGetRelationName(parentIdx),
+								   RelationGetRelationName(parentTbl),
+								   RelationGetRelationName(partIdx))));
 		}
 
 		/* All good -- do it */
 		IndexSetParentIndex(partIdx, RelationGetRelid(parentIdx));
 		if (OidIsValid(constraintOid))
 			ConstraintSetParentConstraint(cldConstrId, constraintOid);
+		update_relispartition(NULL, partIdxId, true);
 
 		pfree(attmap);
 
@@ -14956,10 +14941,10 @@ ATExecAttachPartitionIdx(List **wqueue, Relation parentIdx, RangeVar *name)
 static void
 refuseDupeIndexAttach(Relation parentIdx, Relation partIdx, Relation partitionTbl)
 {
-	Relation		pg_inherits;
-	ScanKeyData		key;
-	HeapTuple		tuple;
-	SysScanDesc		scan;
+	Relation	pg_inherits;
+	ScanKeyData key;
+	HeapTuple	tuple;
+	SysScanDesc scan;
 
 	pg_inherits = heap_open(InheritsRelationId, AccessShareLock);
 	ScanKeyInit(&key, Anum_pg_inherits_inhparent,
@@ -14969,7 +14954,7 @@ refuseDupeIndexAttach(Relation parentIdx, Relation partIdx, Relation partitionTb
 							  NULL, 1, &key);
 	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
 	{
-		Form_pg_inherits	inhForm;
+		Form_pg_inherits inhForm;
 		Oid			tab;
 
 		inhForm = (Form_pg_inherits) GETSTRUCT(tuple);
@@ -14997,12 +14982,12 @@ refuseDupeIndexAttach(Relation parentIdx, Relation partIdx, Relation partitionTb
 static void
 validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 {
-	Relation		inheritsRel;
-	SysScanDesc		scan;
-	ScanKeyData		key;
-	int				tuples = 0;
-	HeapTuple		inhTup;
-	bool			updated = false;
+	Relation	inheritsRel;
+	SysScanDesc scan;
+	ScanKeyData key;
+	int			tuples = 0;
+	HeapTuple	inhTup;
+	bool		updated = false;
 
 	Assert(partedIdx->rd_rel->relkind == RELKIND_PARTITIONED_INDEX);
 
@@ -15020,11 +15005,11 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 	while ((inhTup = systable_getnext(scan)) != NULL)
 	{
 		Form_pg_inherits inhForm = (Form_pg_inherits) GETSTRUCT(inhTup);
-		HeapTuple		indTup;
-		Form_pg_index	indexForm;
+		HeapTuple	indTup;
+		Form_pg_index indexForm;
 
 		indTup = SearchSysCache1(INDEXRELID,
-								ObjectIdGetDatum(inhForm->inhrelid));
+								 ObjectIdGetDatum(inhForm->inhrelid));
 		if (!indTup)
 			elog(ERROR, "cache lookup failed for index %u",
 				 inhForm->inhrelid);
@@ -15062,8 +15047,7 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 	 * If this index is in turn a partition of a larger index, validating it
 	 * might cause the parent to become valid also.  Try that.
 	 */
-	if (updated &&
-		has_superclass(RelationGetRelid(partedIdx)))
+	if (updated && partedIdx->rd_rel->relispartition)
 	{
 		Oid			parentIdxId,
 					parentTblId;
@@ -15084,4 +15068,36 @@ validatePartitionedIndex(Relation partedIdx, Relation partedTbl)
 		relation_close(parentIdx, AccessExclusiveLock);
 		relation_close(parentTbl, AccessExclusiveLock);
 	}
+}
+
+/*
+ * Update the relispartition flag of the given relation to the given value.
+ *
+ * classRel is the pg_class relation, already open and suitably locked.
+ * It can be passed as NULL, in which case it's opened and closed locally.
+ */
+static void
+update_relispartition(Relation classRel, Oid relationId, bool newval)
+{
+	HeapTuple	tup;
+	HeapTuple	newtup;
+	Form_pg_class classForm;
+	bool		opened = false;
+
+	if (classRel == NULL)
+	{
+		classRel = heap_open(RelationRelationId, RowExclusiveLock);
+		opened = true;
+	}
+
+	tup = SearchSysCache1(RELOID, ObjectIdGetDatum(relationId));
+	newtup = heap_copytuple(tup);
+	classForm = (Form_pg_class) GETSTRUCT(newtup);
+	classForm->relispartition = newval;
+	CatalogTupleUpdate(classRel, &tup->t_self, newtup);
+	heap_freetuple(newtup);
+	ReleaseSysCache(tup);
+
+	if (opened)
+		heap_close(classRel, RowExclusiveLock);
 }

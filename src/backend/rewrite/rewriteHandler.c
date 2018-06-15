@@ -77,8 +77,7 @@ static void markQueryForLocking(Query *qry, Node *jtnode,
 					bool pushedDown);
 static List *matchLocks(CmdType event, RuleLock *rulelocks,
 		   int varno, Query *parsetree, bool *hasUpdate);
-static Query *fireRIRrules(Query *parsetree, List *activeRIRs,
-			 bool forUpdatePushedDown);
+static Query *fireRIRrules(Query *parsetree, List *activeRIRs);
 static bool view_has_instead_trigger(Relation view, CmdType event);
 static Bitmapset *adjust_view_column_set(Bitmapset *cols, List *targetlist);
 
@@ -1377,57 +1376,6 @@ rewriteTargetListUD(Query *parsetree, RangeTblEntry *target_rte,
 	}
 }
 
-void
-rewriteTargetListMerge(Query *parsetree, Relation target_relation)
-{
-	Var		   *var = NULL;
-	const char *attrname;
-	TargetEntry *tle;
-
-	Assert(target_relation->rd_rel->relkind == RELKIND_RELATION ||
-		   target_relation->rd_rel->relkind == RELKIND_MATVIEW ||
-		   target_relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE);
-
-	/*
-	 * Emit CTID so that executor can find the row to update or delete.
-	 */
-	var = makeVar(parsetree->mergeTarget_relation,
-				  SelfItemPointerAttributeNumber,
-				  TIDOID,
-				  -1,
-				  InvalidOid,
-				  0);
-
-	attrname = "ctid";
-	tle = makeTargetEntry((Expr *) var,
-						  list_length(parsetree->targetList) + 1,
-						  pstrdup(attrname),
-						  true);
-
-	parsetree->targetList = lappend(parsetree->targetList, tle);
-
-	/*
-	 * If we are dealing with partitioned table, then emit TABLEOID so that
-	 * executor can find the partition the row belongs to.
-	 */
-	if (target_relation->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
-	{
-		var = makeVar(parsetree->mergeTarget_relation,
-				TableOidAttributeNumber,
-				OIDOID,
-				-1,
-				InvalidOid,
-				0);
-
-		attrname = "tableoid";
-		tle = makeTargetEntry((Expr *) var,
-				list_length(parsetree->targetList) + 1,
-				pstrdup(attrname),
-				true);
-
-		parsetree->targetList = lappend(parsetree->targetList, tle);
-	}
-}
 
 /*
  * matchLocks -
@@ -1504,8 +1452,7 @@ ApplyRetrieveRule(Query *parsetree,
 				  RewriteRule *rule,
 				  int rt_index,
 				  Relation relation,
-				  List *activeRIRs,
-				  bool forUpdatePushedDown)
+				  List *activeRIRs)
 {
 	Query	   *rule_action;
 	RangeTblEntry *rte,
@@ -1596,24 +1543,42 @@ ApplyRetrieveRule(Query *parsetree,
 	}
 
 	/*
-	 * If FOR [KEY] UPDATE/SHARE of view, be sure we get right initial lock on
-	 * the relations it references.
+	 * Check if there's a FOR [KEY] UPDATE/SHARE clause applying to this view.
+	 *
+	 * Note: we needn't explicitly consider any such clauses appearing in
+	 * ancestor query levels; their effects have already been pushed down to
+	 * here by markQueryForLocking, and will be reflected in "rc".
 	 */
 	rc = get_parse_rowmark(parsetree, rt_index);
-	forUpdatePushedDown |= (rc != NULL);
 
 	/*
 	 * Make a modifiable copy of the view query, and acquire needed locks on
-	 * the relations it mentions.
+	 * the relations it mentions.  Force at least RowShareLock for all such
+	 * rels if there's a FOR [KEY] UPDATE/SHARE clause affecting this view.
 	 */
 	rule_action = copyObject(linitial(rule->actions));
 
-	AcquireRewriteLocks(rule_action, true, forUpdatePushedDown);
+	AcquireRewriteLocks(rule_action, true, (rc != NULL));
+
+	/*
+	 * If FOR [KEY] UPDATE/SHARE of view, mark all the contained tables as
+	 * implicit FOR [KEY] UPDATE/SHARE, the same as the parser would have done
+	 * if the view's subquery had been written out explicitly.
+	 */
+	if (rc != NULL)
+		markQueryForLocking(rule_action, (Node *) rule_action->jointree,
+							rc->strength, rc->waitPolicy, true);
 
 	/*
 	 * Recursively expand any view references inside the view.
+	 *
+	 * Note: this must happen after markQueryForLocking.  That way, any UPDATE
+	 * permission bits needed for sub-views are initially applied to their
+	 * RTE_RELATION RTEs by markQueryForLocking, and then transferred to their
+	 * OLD rangetable entries by the action below (in a recursive call of this
+	 * routine).
 	 */
-	rule_action = fireRIRrules(rule_action, activeRIRs, forUpdatePushedDown);
+	rule_action = fireRIRrules(rule_action, activeRIRs);
 
 	/*
 	 * Now, plug the view query in as a subselect, replacing the relation's
@@ -1644,18 +1609,6 @@ ApplyRetrieveRule(Query *parsetree,
 	rte->selectedCols = NULL;
 	rte->insertedCols = NULL;
 	rte->updatedCols = NULL;
-
-	/*
-	 * If FOR [KEY] UPDATE/SHARE of view, mark all the contained tables as
-	 * implicit FOR [KEY] UPDATE/SHARE, the same as the parser would have done
-	 * if the view's subquery had been written out explicitly.
-	 *
-	 * Note: we don't consider forUpdatePushedDown here; such marks will be
-	 * made by recursing from the upper level in markQueryForLocking.
-	 */
-	if (rc != NULL)
-		markQueryForLocking(rule_action, (Node *) rule_action->jointree,
-							rc->strength, rc->waitPolicy, true);
 
 	return parsetree;
 }
@@ -1742,7 +1695,7 @@ fireRIRonSubLink(Node *node, List *activeRIRs)
 
 		/* Do what we came for */
 		sub->subselect = (Node *) fireRIRrules((Query *) sub->subselect,
-											   activeRIRs, false);
+											   activeRIRs);
 		/* Fall through to process lefthand args of SubLink */
 	}
 
@@ -1757,10 +1710,13 @@ fireRIRonSubLink(Node *node, List *activeRIRs)
 
 /*
  * fireRIRrules -
- *	Apply all RIR rules on each rangetable entry in a query
+ *	Apply all RIR rules on each rangetable entry in the given query
+ *
+ * activeRIRs is a list of the OIDs of views we're already processing RIR
+ * rules for, used to detect/reject recursion.
  */
 static Query *
-fireRIRrules(Query *parsetree, List *activeRIRs, bool forUpdatePushedDown)
+fireRIRrules(Query *parsetree, List *activeRIRs)
 {
 	int			origResultRelation = parsetree->resultRelation;
 	int			rt_index;
@@ -1791,9 +1747,7 @@ fireRIRrules(Query *parsetree, List *activeRIRs, bool forUpdatePushedDown)
 		 */
 		if (rte->rtekind == RTE_SUBQUERY)
 		{
-			rte->subquery = fireRIRrules(rte->subquery, activeRIRs,
-										 (forUpdatePushedDown ||
-										  get_parse_rowmark(parsetree, rt_index) != NULL));
+			rte->subquery = fireRIRrules(rte->subquery, activeRIRs);
 			continue;
 		}
 
@@ -1879,8 +1833,7 @@ fireRIRrules(Query *parsetree, List *activeRIRs, bool forUpdatePushedDown)
 												  rule,
 												  rt_index,
 												  rel,
-												  activeRIRs,
-												  forUpdatePushedDown);
+												  activeRIRs);
 				}
 
 				activeRIRs = list_delete_first(activeRIRs);
@@ -1896,7 +1849,7 @@ fireRIRrules(Query *parsetree, List *activeRIRs, bool forUpdatePushedDown)
 		CommonTableExpr *cte = (CommonTableExpr *) lfirst(lc);
 
 		cte->ctequery = (Node *)
-			fireRIRrules((Query *) cte->ctequery, activeRIRs, false);
+			fireRIRrules((Query *) cte->ctequery, activeRIRs);
 	}
 
 	/*
@@ -3382,55 +3335,12 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 		}
 		else if (event == CMD_UPDATE)
 		{
-			Assert(parsetree->override == OVERRIDING_NOT_SET);
 			parsetree->targetList =
 				rewriteTargetListIU(parsetree->targetList,
 									parsetree->commandType,
 									parsetree->override,
 									rt_entry_relation,
 									parsetree->resultRelation, NULL);
-		}
-		else if (event == CMD_MERGE)
-		{
-			Assert(parsetree->override == OVERRIDING_NOT_SET);
-
-			/*
-			 * Rewrite each action targetlist separately
-			 */
-			foreach(lc1, parsetree->mergeActionList)
-			{
-				MergeAction *action = (MergeAction *) lfirst(lc1);
-
-				switch (action->commandType)
-				{
-					case CMD_NOTHING:
-					case CMD_DELETE:	/* Nothing to do here */
-						break;
-					case CMD_UPDATE:
-						action->targetList =
-							rewriteTargetListIU(action->targetList,
-												action->commandType,
-												parsetree->override,
-												rt_entry_relation,
-												parsetree->resultRelation,
-												NULL);
-						break;
-					case CMD_INSERT:
-						{
-							action->targetList =
-								rewriteTargetListIU(action->targetList,
-													action->commandType,
-													action->override,
-													rt_entry_relation,
-													parsetree->resultRelation,
-													NULL);
-						}
-						break;
-					default:
-						elog(ERROR, "unrecognized commandType: %d", action->commandType);
-						break;
-				}
-			}
 		}
 		else if (event == CMD_DELETE)
 		{
@@ -3445,20 +3355,13 @@ RewriteQuery(Query *parsetree, List *rewrite_events)
 		locks = matchLocks(event, rt_entry_relation->rd_rules,
 						   result_relation, parsetree, &hasUpdate);
 
-		/*
-		 * XXX MERGE doesn't support write rules because they would violate
-		 * the SQL Standard spec and would be unclear how they should work.
-		 */
-		if (event == CMD_MERGE)
-			product_queries = NIL;
-		else
-			product_queries = fireRules(parsetree,
-										result_relation,
-										event,
-										locks,
-										&instead,
-										&returning,
-										&qual_product);
+		product_queries = fireRules(parsetree,
+									result_relation,
+									event,
+									locks,
+									&instead,
+									&returning,
+									&qual_product);
 
 		/*
 		 * If there were no INSTEAD rules, and the target relation is a view
@@ -3698,7 +3601,7 @@ QueryRewrite(Query *parsetree)
 	{
 		Query	   *query = (Query *) lfirst(l);
 
-		query = fireRIRrules(query, NIL, false);
+		query = fireRIRrules(query, NIL);
 
 		query->queryId = input_query_id;
 

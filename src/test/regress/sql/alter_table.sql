@@ -2367,21 +2367,14 @@ DROP TABLE quuux;
 
 -- check validation when attaching hash partitions
 
--- The default hash functions as they exist today aren't portable; they can
--- return different results on different machines.  Depending upon how the
--- values are hashed, the row may map to different partitions, which result in
--- regression failure.  To avoid this, let's create a non-default hash function
--- that just returns the input value unchanged.
-CREATE OR REPLACE FUNCTION dummy_hashint4(a int4, seed int8) RETURNS int8 AS
-$$ BEGIN RETURN (a + 1 + seed); END; $$ LANGUAGE 'plpgsql' IMMUTABLE;
-CREATE OPERATOR CLASS custom_opclass FOR TYPE int4 USING HASH AS
-OPERATOR 1 = , FUNCTION 2 dummy_hashint4(int4, int8);
+-- Use hand-rolled hash functions and operator class to get predictable result
+-- on different matchines. part_test_int4_ops is defined in insert.sql.
 
 -- check that the new partition won't overlap with an existing partition
 CREATE TABLE hash_parted (
 	a int,
 	b int
-) PARTITION BY HASH (a custom_opclass);
+) PARTITION BY HASH (a part_test_int4_ops);
 CREATE TABLE hpart_1 PARTITION OF hash_parted FOR VALUES WITH (MODULUS 4, REMAINDER 0);
 CREATE TABLE fail_part (LIKE hpart_1);
 ALTER TABLE hash_parted ATTACH PARTITION fail_part FOR VALUES WITH (MODULUS 8, REMAINDER 4);
@@ -2519,8 +2512,6 @@ SELECT * FROM list_parted;
 DROP TABLE list_parted, list_parted2, range_parted;
 DROP TABLE fail_def_part;
 DROP TABLE hash_parted;
-DROP OPERATOR CLASS custom_opclass USING HASH;
-DROP FUNCTION dummy_hashint4(a int4, seed int8);
 
 -- more tests for certain multi-level partitioning scenarios
 create table p (a int, b int) partition by range (a, b);
@@ -2564,3 +2555,21 @@ ANALYZE attmp;
 DROP TABLE attmp;
 
 DROP USER regress_alter_table_user1;
+
+-- check that violating rows are correctly reported when attaching as the
+-- default partition
+create table defpart_attach_test (a int) partition by list (a);
+create table defpart_attach_test1 partition of defpart_attach_test for values in (1);
+create table defpart_attach_test_d (like defpart_attach_test);
+insert into defpart_attach_test_d values (1), (2);
+
+-- error because its constraint as the default partition would be violated
+-- by the row containing 1
+alter table defpart_attach_test attach partition defpart_attach_test_d default;
+delete from defpart_attach_test_d where a = 1;
+alter table defpart_attach_test_d add check (a > 1);
+
+-- should be attached successfully and without needing to be scanned
+alter table defpart_attach_test attach partition defpart_attach_test_d default;
+
+drop table defpart_attach_test;

@@ -8,10 +8,6 @@
  * computation. Otherwise, fall back to the pure software implementation
  * (slicing-by-8).
  *
- * XXX: The glibc-specific getauxval() function, with the HWCAP_CRC32
- * flag, is used to determine if the CRC Extension is available on the
- * current platform. Is there a more portable way to determine that?
- *
  * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -22,19 +18,63 @@
  *-------------------------------------------------------------------------
  */
 
-#include "c.h"
+#ifndef FRONTEND
+#include "postgres.h"
+#else
+#include "postgres_fe.h"
+#endif
 
-#include <sys/auxv.h>
-#include <asm/hwcap.h>
+#include <setjmp.h>
+#include <signal.h>
 
 #include "port/pg_crc32c.h"
+
+
+static sigjmp_buf illegal_instruction_jump;
+
+/*
+ * Probe by trying to execute pg_comp_crc32c_armv8().  If the instruction
+ * isn't available, we expect to get SIGILL, which we can trap.
+ */
+static void
+illegal_instruction_handler(SIGNAL_ARGS)
+{
+	siglongjmp(illegal_instruction_jump, 1);
+}
 
 static bool
 pg_crc32c_armv8_available(void)
 {
-	unsigned long auxv = getauxval(AT_HWCAP);
+	uint64		data = 42;
+	int			result;
 
-	return (auxv & HWCAP_CRC32) != 0;
+	/*
+	 * Be careful not to do anything that might throw an error while we have
+	 * the SIGILL handler set to a nonstandard value.
+	 */
+	pqsignal(SIGILL, illegal_instruction_handler);
+	if (sigsetjmp(illegal_instruction_jump, 1) == 0)
+	{
+		/* Rather than hard-wiring an expected result, compare to SB8 code */
+		result = (pg_comp_crc32c_armv8(0, &data, sizeof(data)) ==
+				  pg_comp_crc32c_sb8(0, &data, sizeof(data)));
+	}
+	else
+	{
+		/* We got the SIGILL trap */
+		result = -1;
+	}
+	pqsignal(SIGILL, SIG_DFL);
+
+#ifndef FRONTEND
+	/* We don't expect this case, so complain loudly */
+	if (result == 0)
+		elog(ERROR, "crc32 hardware and software results disagree");
+
+	elog(DEBUG1, "using armv8 crc32 hardware = %d", (result > 0));
+#endif
+
+	return (result > 0);
 }
 
 /*

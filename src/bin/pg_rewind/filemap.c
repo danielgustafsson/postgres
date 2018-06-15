@@ -19,7 +19,6 @@
 #include "pg_rewind.h"
 
 #include "common/string.h"
-#include "catalog/catalog.h"
 #include "catalog/pg_tablespace_d.h"
 #include "storage/fd.h"
 
@@ -49,7 +48,7 @@ static const char *excludeDirContents[] =
 	 * when stats_temp_directory is set because PGSS_TEXT_FILE is always
 	 * created there.
 	 */
-	"pg_stat_tmp",	/* defined as PG_STAT_TMP_DIR */
+	"pg_stat_tmp",				/* defined as PG_STAT_TMP_DIR */
 
 	/*
 	 * It is generally not useful to backup the contents of this directory
@@ -59,7 +58,7 @@ static const char *excludeDirContents[] =
 	"pg_replslot",
 
 	/* Contents removed on startup, see dsm_cleanup_for_mmap(). */
-	"pg_dynshmem",	/* defined as PG_DYNSHMEM_DIR */
+	"pg_dynshmem",				/* defined as PG_DYNSHMEM_DIR */
 
 	/* Contents removed on startup, see AsyncShmemInit(). */
 	"pg_notify",
@@ -493,9 +492,9 @@ process_block_change(ForkNumber forknum, RelFileNode rnode, BlockNumber blkno)
 static bool
 check_file_excluded(const char *path, const char *type)
 {
-	char	localpath[MAXPGPATH];
-	int		excludeIdx;
-	const char	*filename;
+	char		localpath[MAXPGPATH];
+	int			excludeIdx;
+	const char *filename;
 
 	/* check individual files... */
 	for (excludeIdx = 0; excludeFiles[excludeIdx] != NULL; excludeIdx++)
@@ -734,8 +733,8 @@ isRelDataFile(const char *path)
 	/*
 	 * The sscanf tests above can match files that have extra characters at
 	 * the end. To eliminate such cases, cross-check that GetRelationPath
-	 * creates the exact same filename, when passed the RelFileNode information
-	 * we extracted from the filename.
+	 * creates the exact same filename, when passed the RelFileNode
+	 * information we extracted from the filename.
 	 */
 	if (matched)
 	{

@@ -38,6 +38,7 @@
 #include "optimizer/plancat.h"
 #include "optimizer/predtest.h"
 #include "optimizer/prep.h"
+#include "partitioning/partbounds.h"
 #include "parser/parse_relation.h"
 #include "parser/parsetree.h"
 #include "rewrite/rewriteManip.h"
@@ -45,8 +46,9 @@
 #include "storage/bufmgr.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
-#include "utils/syscache.h"
+#include "utils/partcache.h"
 #include "utils/rel.h"
+#include "utils/syscache.h"
 #include "utils/snapmgr.h"
 
 
@@ -242,7 +244,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			info->nkeycolumns = nkeycolumns = index->indnkeyatts;
 
 			info->indexkeys = (int *) palloc(sizeof(int) * ncolumns);
-			info->indexcollations = (Oid *) palloc(sizeof(Oid) * ncolumns);
+			info->indexcollations = (Oid *) palloc(sizeof(Oid) * nkeycolumns);
 			info->opfamily = (Oid *) palloc(sizeof(Oid) * nkeycolumns);
 			info->opcintype = (Oid *) palloc(sizeof(Oid) * nkeycolumns);
 			info->canreturn = (bool *) palloc(sizeof(bool) * ncolumns);
@@ -250,7 +252,6 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			for (i = 0; i < ncolumns; i++)
 			{
 				info->indexkeys[i] = index->indkey.values[i];
-				info->indexcollations[i] = indexRelation->rd_indcollation[i];
 				info->canreturn[i] = index_can_return(indexRelation, i + 1);
 			}
 
@@ -258,6 +259,7 @@ get_relation_info(PlannerInfo *root, Oid relationObjectId, bool inhparent,
 			{
 				info->opfamily[i] = indexRelation->rd_opfamily[i];
 				info->opcintype[i] = indexRelation->rd_opcintype[i];
+				info->indexcollations[i] = indexRelation->rd_indcollation[i];
 			}
 
 			info->relam = indexRelation->rd_rel->relam;
@@ -1270,7 +1272,7 @@ get_relation_constraints(PlannerInfo *root,
 	 * descriptor, instead of constraint exclusion which is driven by the
 	 * individual partition's partition constraint.
 	 */
-	if (root->parse->commandType != CMD_SELECT)
+	if (enable_partition_pruning && root->parse->commandType != CMD_SELECT)
 	{
 		List	   *pcqual = RelationGetPartitionQual(relation);
 
@@ -1413,14 +1415,43 @@ relation_excluded_by_constraints(PlannerInfo *root,
 			return true;
 	}
 
-	/* Skip further tests if constraint exclusion is disabled for the rel */
-	if (constraint_exclusion == CONSTRAINT_EXCLUSION_OFF ||
-		(constraint_exclusion == CONSTRAINT_EXCLUSION_PARTITION &&
-		 !(rel->reloptkind == RELOPT_OTHER_MEMBER_REL ||
-		   (root->hasInheritedTarget &&
-			rel->reloptkind == RELOPT_BASEREL &&
-			rel->relid == root->parse->resultRelation))))
-		return false;
+	/*
+	 * Skip further tests, depending on constraint_exclusion.
+	 */
+	switch (constraint_exclusion)
+	{
+		case CONSTRAINT_EXCLUSION_OFF:
+
+			/*
+			 * Don't prune if feature turned off -- except if the relation is
+			 * a partition.  While partprune.c-style partition pruning is not
+			 * yet in use for all cases (update/delete is not handled), it
+			 * would be a UI horror to use different user-visible controls
+			 * depending on such a volatile implementation detail.  Therefore,
+			 * for partitioned tables we use enable_partition_pruning to
+			 * control this behavior.
+			 */
+			if (root->inhTargetKind == INHKIND_PARTITIONED)
+				break;
+			return false;
+
+		case CONSTRAINT_EXCLUSION_PARTITION:
+
+			/*
+			 * When constraint_exclusion is set to 'partition' we only handle
+			 * OTHER_MEMBER_RELs, or BASERELs in cases where the result target
+			 * is an inheritance parent or a partitioned table.
+			 */
+			if ((rel->reloptkind != RELOPT_OTHER_MEMBER_REL) &&
+				!(rel->reloptkind == RELOPT_BASEREL &&
+				  root->inhTargetKind != INHKIND_NONE &&
+				  rel->relid == root->parse->resultRelation))
+				return false;
+			break;
+
+		case CONSTRAINT_EXCLUSION_ON:
+			break;				/* always try to exclude */
+	}
 
 	/*
 	 * Check for self-contradictory restriction clauses.  We dare not make
@@ -1850,10 +1881,6 @@ has_row_triggers(PlannerInfo *root, Index rti, CmdType event)
 				(trigDesc->trig_delete_after_row ||
 				 trigDesc->trig_delete_before_row))
 				result = true;
-			break;
-			/* There is no separate event for MERGE, only INSERT/UPDATE/DELETE */
-		case CMD_MERGE:
-			result = false;
 			break;
 		default:
 			elog(ERROR, "unrecognized CmdType: %d", (int) event);

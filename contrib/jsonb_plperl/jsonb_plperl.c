@@ -18,7 +18,7 @@ static SV  *Jsonb_to_SV(JsonbContainer *jsonb);
 static JsonbValue *SV_to_JsonbValue(SV *obj, JsonbParseState **ps, bool is_elem);
 
 
-static SV *
+static SV  *
 JsonbValue_to_SV(JsonbValue *jbv)
 {
 	dTHX;
@@ -33,6 +33,7 @@ JsonbValue_to_SV(JsonbValue *jbv)
 				char	   *str = DatumGetCString(DirectFunctionCall1(numeric_out,
 																	  NumericGetDatum(jbv->val.numeric)));
 				SV		   *result = newSVnv(SvNV(cstr2sv(str)));
+
 				pfree(str);
 				return result;
 			}
@@ -42,6 +43,7 @@ JsonbValue_to_SV(JsonbValue *jbv)
 				char	   *str = pnstrdup(jbv->val.string.val,
 										   jbv->val.string.len);
 				SV		   *result = cstr2sv(str);
+
 				pfree(str);
 				return result;
 			}
@@ -209,10 +211,22 @@ SV_to_JsonbValue(SV *in, JsonbParseState **jsonb_state, bool is_elem)
 			{
 				double		nval = SvNV(in);
 
+				/*
+				 * jsonb doesn't allow infinity or NaN (per JSON
+				 * specification), but the numeric type that is used for the
+				 * storage accepts NaN, so we have to prevent it here
+				 * explicitly.  We don't really have to check for isinf()
+				 * here, as numeric doesn't allow it and it would be caught
+				 * later, but it makes for a nicer error message.
+				 */
 				if (isinf(nval))
 					ereport(ERROR,
-							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-							 (errmsg("cannot convert infinite value to jsonb"))));
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 (errmsg("cannot convert infinity to jsonb"))));
+				if (isnan(nval))
+					ereport(ERROR,
+							(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+							 (errmsg("cannot convert NaN to jsonb"))));
 
 				out.type = jbvNumeric;
 				out.val.numeric =

@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * streamutil.c - utility functions for pg_basebackup, pg_receivewal and
- * 					pg_recvlogical
+ *					pg_recvlogical
  *
  * Author: Magnus Hagander <magnus@hagander.net>
  *
@@ -219,18 +219,18 @@ GetConnection(void)
 
 	/*
 	 * Set always-secure search path, so malicious users can't get control.
-	 * The capacity to run normal SQL queries was added in PostgreSQL
-	 * 10, so the search path cannot be changed (by us or attackers) on
-	 * earlier versions.
+	 * The capacity to run normal SQL queries was added in PostgreSQL 10, so
+	 * the search path cannot be changed (by us or attackers) on earlier
+	 * versions.
 	 */
-	if (dbname != NULL && PQserverVersion(conn) >= 100000)
+	if (dbname != NULL && PQserverVersion(tmpconn) >= 100000)
 	{
 		PGresult   *res;
 
 		res = PQexec(tmpconn, ALWAYS_SECURE_SEARCH_PATH_SQL);
 		if (PQresultStatus(res) != PGRES_TUPLES_OK)
 		{
-			fprintf(stderr, _("%s: could not clear search_path: %s\n"),
+			fprintf(stderr, _("%s: could not clear search_path: %s"),
 					progname, PQerrorMessage(tmpconn));
 			PQclear(res);
 			PQfinish(tmpconn);
@@ -300,7 +300,7 @@ RetrieveWalSegSize(PGconn *conn)
 	res = PQexec(conn, "SHOW wal_segment_size");
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s\n"),
+		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
 				progname, "SHOW wal_segment_size", PQerrorMessage(conn));
 
 		PQclear(res);
@@ -336,7 +336,9 @@ RetrieveWalSegSize(PGconn *conn)
 	if (!IsValidWalSegSize(WalSegSz))
 	{
 		fprintf(stderr,
-				_("%s: WAL segment size must be a power of two between 1MB and 1GB, but the remote server reported a value of %d bytes\n"),
+				ngettext("%s: WAL segment size must be a power of two between 1 MB and 1 GB, but the remote server reported a value of %d byte\n",
+						 "%s: WAL segment size must be a power of two between 1 MB and 1 GB, but the remote server reported a value of %d bytes\n",
+						 WalSegSz),
 				progname, WalSegSz);
 		return false;
 	}
@@ -372,7 +374,7 @@ RetrieveDataDirCreatePerm(PGconn *conn)
 	res = PQexec(conn, "SHOW data_directory_mode");
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		fprintf(stderr, _("%s: could not send replication command \"%s\": %s\n"),
+		fprintf(stderr, _("%s: could not send replication command \"%s\": %s"),
 				progname, "SHOW data_directory_mode", PQerrorMessage(conn));
 
 		PQclear(res);

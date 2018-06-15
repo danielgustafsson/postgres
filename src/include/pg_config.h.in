@@ -170,6 +170,14 @@
    don't. */
 #undef HAVE_DECL_STRNLEN
 
+/* Define to 1 if you have the declaration of `strtoll', and to 0 if you
+   don't. */
+#undef HAVE_DECL_STRTOLL
+
+/* Define to 1 if you have the declaration of `strtoull', and to 0 if you
+   don't. */
+#undef HAVE_DECL_STRTOULL
+
 /* Define to 1 if you have the declaration of `sys_siglist', and to 0 if you
    don't. */
 #undef HAVE_DECL_SYS_SIGLIST
@@ -238,9 +246,6 @@
 
 /* Define to 1 if you have the `getaddrinfo' function. */
 #undef HAVE_GETADDRINFO
-
-/* Define to 1 if you have the `getauxval' function. */
-#undef HAVE_GETAUXVAL
 
 /* Define to 1 if you have the `gethostbyname_r' function. */
 #undef HAVE_GETHOSTBYNAME_R
@@ -745,7 +750,13 @@
 /* Define to 1 if your compiler understands __VA_ARGS__ in macros. */
 #undef HAVE__VA_ARGS
 
-/* Define to the appropriate snprintf length modifier for 64-bit ints. */
+/* Define to 1 if you have the `__strtoll' function. */
+#undef HAVE___STRTOLL
+
+/* Define to 1 if you have the `__strtoull' function. */
+#undef HAVE___STRTOULL
+
+/* Define to the appropriate printf length modifier for 64-bit ints. */
 #undef INT64_MODIFIER
 
 /* Define to 1 if `locale_t' requires <xlocale.h>. */

@@ -251,7 +251,7 @@ static char *convertRegProcReference(Archive *fout,
 						const char *proc);
 static char *getFormattedOperatorName(Archive *fout, const char *oproid);
 static char *convertTSFunction(Archive *fout, Oid funcOid);
-static Oid	findLastBuiltinOid_V71(Archive *fout, const char *);
+static Oid	findLastBuiltinOid_V71(Archive *fout);
 static char *getFormattedTypeName(Archive *fout, Oid oid, OidOptions opts);
 static void getBlobs(Archive *fout);
 static void dumpBlob(Archive *fout, BlobInfo *binfo);
@@ -735,8 +735,7 @@ main(int argc, char **argv)
 	 * With 8.1 and above, we can just use FirstNormalObjectId - 1.
 	 */
 	if (fout->remoteVersion < 80100)
-		g_last_builtin_oid = findLastBuiltinOid_V71(fout,
-													PQdb(GetConnection(fout)));
+		g_last_builtin_oid = findLastBuiltinOid_V71(fout);
 	else
 		g_last_builtin_oid = FirstNormalObjectId - 1;
 
@@ -982,6 +981,7 @@ help(const char *progname)
 	printf(_("  --exclude-table-data=TABLE   do NOT dump data for the named table(s)\n"));
 	printf(_("  --if-exists                  use IF EXISTS when dropping objects\n"));
 	printf(_("  --inserts                    dump data as INSERT commands, rather than COPY\n"));
+	printf(_("  --load-via-partition-root    load partitions via the root table\n"));
 	printf(_("  --no-comments                do not dump comments\n"));
 	printf(_("  --no-publications            do not dump publications\n"));
 	printf(_("  --no-security-labels         do not dump security label assignments\n"));
@@ -990,7 +990,6 @@ help(const char *progname)
 	printf(_("  --no-tablespaces             do not dump tablespace assignments\n"));
 	printf(_("  --no-unlogged-table-data     do not dump unlogged table data\n"));
 	printf(_("  --quote-all-identifiers      quote all identifiers, even if not key words\n"));
-	printf(_("  --load-via-partition-root    load partitions via the root table\n"));
 	printf(_("  --section=SECTION            dump named section (pre-data, data, or post-data)\n"));
 	printf(_("  --serializable-deferrable    wait until the dump can run without anomalies\n"));
 	printf(_("  --snapshot=SNAPSHOT          use given snapshot for the dump\n"));
@@ -2538,6 +2537,7 @@ dumpDatabase(Archive *fout)
 	PGresult   *res;
 	int			i_tableoid,
 				i_oid,
+				i_datname,
 				i_dba,
 				i_encoding,
 				i_collate,
@@ -2565,16 +2565,13 @@ dumpDatabase(Archive *fout)
 				minmxid;
 	char	   *qdatname;
 
-	datname = PQdb(conn);
-	qdatname = pg_strdup(fmtId(datname));
-
 	if (g_verbose)
 		write_msg(NULL, "saving database definition\n");
 
 	/* Fetch the database-level properties for this database */
 	if (fout->remoteVersion >= 90600)
 	{
-		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, "
+		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, datname, "
 						  "(%s datdba) AS dba, "
 						  "pg_encoding_to_char(encoding) AS encoding, "
 						  "datcollate, datctype, datfrozenxid, datminmxid, "
@@ -2591,13 +2588,12 @@ dumpDatabase(Archive *fout)
 						  "shobj_description(oid, 'pg_database') AS description "
 
 						  "FROM pg_database "
-						  "WHERE datname = ",
+						  "WHERE datname = current_database()",
 						  username_subquery);
-		appendStringLiteralAH(dbQry, datname, fout);
 	}
 	else if (fout->remoteVersion >= 90300)
 	{
-		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, "
+		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, datname, "
 						  "(%s datdba) AS dba, "
 						  "pg_encoding_to_char(encoding) AS encoding, "
 						  "datcollate, datctype, datfrozenxid, datminmxid, "
@@ -2606,13 +2602,12 @@ dumpDatabase(Archive *fout)
 						  "shobj_description(oid, 'pg_database') AS description "
 
 						  "FROM pg_database "
-						  "WHERE datname = ",
+						  "WHERE datname = current_database()",
 						  username_subquery);
-		appendStringLiteralAH(dbQry, datname, fout);
 	}
 	else if (fout->remoteVersion >= 80400)
 	{
-		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, "
+		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, datname, "
 						  "(%s datdba) AS dba, "
 						  "pg_encoding_to_char(encoding) AS encoding, "
 						  "datcollate, datctype, datfrozenxid, 0 AS datminmxid, "
@@ -2621,13 +2616,12 @@ dumpDatabase(Archive *fout)
 						  "shobj_description(oid, 'pg_database') AS description "
 
 						  "FROM pg_database "
-						  "WHERE datname = ",
+						  "WHERE datname = current_database()",
 						  username_subquery);
-		appendStringLiteralAH(dbQry, datname, fout);
 	}
 	else if (fout->remoteVersion >= 80200)
 	{
-		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, "
+		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, datname, "
 						  "(%s datdba) AS dba, "
 						  "pg_encoding_to_char(encoding) AS encoding, "
 						  "NULL AS datcollate, NULL AS datctype, datfrozenxid, 0 AS datminmxid, "
@@ -2636,13 +2630,12 @@ dumpDatabase(Archive *fout)
 						  "shobj_description(oid, 'pg_database') AS description "
 
 						  "FROM pg_database "
-						  "WHERE datname = ",
+						  "WHERE datname = current_database()",
 						  username_subquery);
-		appendStringLiteralAH(dbQry, datname, fout);
 	}
 	else
 	{
-		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, "
+		appendPQExpBuffer(dbQry, "SELECT tableoid, oid, datname, "
 						  "(%s datdba) AS dba, "
 						  "pg_encoding_to_char(encoding) AS encoding, "
 						  "NULL AS datcollate, NULL AS datctype, datfrozenxid, 0 AS datminmxid, "
@@ -2650,15 +2643,15 @@ dumpDatabase(Archive *fout)
 						  "-1 as datconnlimit, "
 						  "(SELECT spcname FROM pg_tablespace t WHERE t.oid = dattablespace) AS tablespace "
 						  "FROM pg_database "
-						  "WHERE datname = ",
+						  "WHERE datname = current_database()",
 						  username_subquery);
-		appendStringLiteralAH(dbQry, datname, fout);
 	}
 
 	res = ExecuteSqlQueryForSingleRow(fout, dbQry->data);
 
 	i_tableoid = PQfnumber(res, "tableoid");
 	i_oid = PQfnumber(res, "oid");
+	i_datname = PQfnumber(res, "datname");
 	i_dba = PQfnumber(res, "dba");
 	i_encoding = PQfnumber(res, "encoding");
 	i_collate = PQfnumber(res, "datcollate");
@@ -2673,6 +2666,7 @@ dumpDatabase(Archive *fout)
 
 	dbCatId.tableoid = atooid(PQgetvalue(res, 0, i_tableoid));
 	dbCatId.oid = atooid(PQgetvalue(res, 0, i_oid));
+	datname = PQgetvalue(res, 0, i_datname);
 	dba = PQgetvalue(res, 0, i_dba);
 	encoding = PQgetvalue(res, 0, i_encoding);
 	collate = PQgetvalue(res, 0, i_collate);
@@ -2684,6 +2678,8 @@ dumpDatabase(Archive *fout)
 	datistemplate = PQgetvalue(res, 0, i_datistemplate);
 	datconnlimit = PQgetvalue(res, 0, i_datconnlimit);
 	tablespace = PQgetvalue(res, 0, i_tablespace);
+
+	qdatname = pg_strdup(fmtId(datname));
 
 	/*
 	 * Prepare the CREATE DATABASE command.  We must specify encoding, locale,
@@ -6726,7 +6722,7 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 				i_indexname,
 				i_parentidx,
 				i_indexdef,
-				i_indnnkeyatts,
+				i_indnkeyatts,
 				i_indnatts,
 				i_indkey,
 				i_indisclustered,
@@ -6786,7 +6782,6 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 							  "pg_catalog.pg_get_indexdef(i.indexrelid) AS indexdef, "
 							  "i.indnkeyatts AS indnkeyatts, "
 							  "i.indnatts AS indnatts, "
-							  "t.relnatts AS indnkeys, "
 							  "i.indkey, i.indisclustered, "
 							  "i.indisreplident, t.relpages, "
 							  "c.contype, c.conname, "
@@ -6824,7 +6819,6 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 							  "pg_catalog.pg_get_indexdef(i.indexrelid) AS indexdef, "
 							  "i.indnatts AS indnkeyatts, "
 							  "i.indnatts AS indnatts, "
-							  "t.relnatts AS indnkeys, "
 							  "i.indkey, i.indisclustered, "
 							  "i.indisreplident, t.relpages, "
 							  "c.contype, c.conname, "
@@ -6858,7 +6852,6 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 							  "pg_catalog.pg_get_indexdef(i.indexrelid) AS indexdef, "
 							  "i.indnatts AS indnkeyatts, "
 							  "i.indnatts AS indnatts, "
-							  "t.relnatts AS indnkeys, "
 							  "i.indkey, i.indisclustered, "
 							  "false AS indisreplident, t.relpages, "
 							  "c.contype, c.conname, "
@@ -6888,7 +6881,6 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 							  "pg_catalog.pg_get_indexdef(i.indexrelid) AS indexdef, "
 							  "i.indnatts AS indnkeyatts, "
 							  "i.indnatts AS indnatts, "
-							  "t.relnatts AS indnkeys, "
 							  "i.indkey, i.indisclustered, "
 							  "false AS indisreplident, t.relpages, "
 							  "c.contype, c.conname, "
@@ -6919,7 +6911,8 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 							  "t.relname AS indexname, "
 							  "0 AS parentidx, "
 							  "pg_catalog.pg_get_indexdef(i.indexrelid) AS indexdef, "
-							  "t.relnatts AS indnkeys, "
+							  "t.relnatts AS indnkeyatts, "
+							  "t.relnatts AS indnatts, "
 							  "i.indkey, i.indisclustered, "
 							  "false AS indisreplident, t.relpages, "
 							  "c.contype, c.conname, "
@@ -6952,7 +6945,7 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 		i_indexname = PQfnumber(res, "indexname");
 		i_parentidx = PQfnumber(res, "parentidx");
 		i_indexdef = PQfnumber(res, "indexdef");
-		i_indnnkeyatts = PQfnumber(res, "indnkeyatts");
+		i_indnkeyatts = PQfnumber(res, "indnkeyatts");
 		i_indnatts = PQfnumber(res, "indnatts");
 		i_indkey = PQfnumber(res, "indkey");
 		i_indisclustered = PQfnumber(res, "indisclustered");
@@ -6986,7 +6979,7 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 			indxinfo[j].dobj.namespace = tbinfo->dobj.namespace;
 			indxinfo[j].indextable = tbinfo;
 			indxinfo[j].indexdef = pg_strdup(PQgetvalue(res, j, i_indexdef));
-			indxinfo[j].indnkeyattrs = atoi(PQgetvalue(res, j, i_indnnkeyatts));
+			indxinfo[j].indnkeyattrs = atoi(PQgetvalue(res, j, i_indnkeyatts));
 			indxinfo[j].indnattrs = atoi(PQgetvalue(res, j, i_indnatts));
 			indxinfo[j].tablespace = pg_strdup(PQgetvalue(res, j, i_tablespace));
 			indxinfo[j].indreloptions = pg_strdup(PQgetvalue(res, j, i_indreloptions));
@@ -13840,8 +13833,8 @@ dumpAgg(Archive *fout, AggInfo *agginfo)
 				case AGGMODIFY_READ_ONLY:
 					appendPQExpBufferStr(details, ",\n    FINALFUNC_MODIFY = READ_ONLY");
 					break;
-				case AGGMODIFY_SHARABLE:
-					appendPQExpBufferStr(details, ",\n    FINALFUNC_MODIFY = SHARABLE");
+				case AGGMODIFY_SHAREABLE:
+					appendPQExpBufferStr(details, ",\n    FINALFUNC_MODIFY = SHAREABLE");
 					break;
 				case AGGMODIFY_READ_WRITE:
 					appendPQExpBufferStr(details, ",\n    FINALFUNC_MODIFY = READ_WRITE");
@@ -13896,8 +13889,8 @@ dumpAgg(Archive *fout, AggInfo *agginfo)
 				case AGGMODIFY_READ_ONLY:
 					appendPQExpBufferStr(details, ",\n    MFINALFUNC_MODIFY = READ_ONLY");
 					break;
-				case AGGMODIFY_SHARABLE:
-					appendPQExpBufferStr(details, ",\n    MFINALFUNC_MODIFY = SHARABLE");
+				case AGGMODIFY_SHAREABLE:
+					appendPQExpBufferStr(details, ",\n    MFINALFUNC_MODIFY = SHAREABLE");
 					break;
 				case AGGMODIFY_READ_WRITE:
 					appendPQExpBufferStr(details, ",\n    MFINALFUNC_MODIFY = READ_WRITE");
@@ -16433,13 +16426,13 @@ dumpConstraint(Archive *fout, ConstraintInfo *coninfo)
 	}
 	else if (coninfo->contype == 'f')
 	{
-		char *only;
+		char	   *only;
 
 		/*
-		 * Foreign keys on partitioned tables are always declared as inheriting
-		 * to partitions; for all other cases, emit them as applying ONLY
-		 * directly to the named table, because that's how they work for
-		 * regular inherited tables.
+		 * Foreign keys on partitioned tables are always declared as
+		 * inheriting to partitions; for all other cases, emit them as
+		 * applying ONLY directly to the named table, because that's how they
+		 * work for regular inherited tables.
 		 */
 		only = tbinfo->relkind == RELKIND_PARTITIONED_TABLE ? "" : "ONLY ";
 
@@ -16589,23 +16582,19 @@ dumpTableConstraintComment(Archive *fout, ConstraintInfo *coninfo)
  * find the last built in oid
  *
  * For 7.1 through 8.0, we do this by retrieving datlastsysoid from the
- * pg_database entry for the current database.
+ * pg_database entry for the current database.  (Note: current_database()
+ * requires 7.3; pg_dump requires 8.0 now.)
  */
 static Oid
-findLastBuiltinOid_V71(Archive *fout, const char *dbname)
+findLastBuiltinOid_V71(Archive *fout)
 {
 	PGresult   *res;
 	Oid			last_oid;
-	PQExpBuffer query = createPQExpBuffer();
 
-	resetPQExpBuffer(query);
-	appendPQExpBufferStr(query, "SELECT datlastsysoid from pg_database where datname = ");
-	appendStringLiteralAH(query, dbname, fout);
-
-	res = ExecuteSqlQueryForSingleRow(fout, query->data);
+	res = ExecuteSqlQueryForSingleRow(fout,
+									  "SELECT datlastsysoid FROM pg_database WHERE datname = current_database()");
 	last_oid = atooid(PQgetvalue(res, 0, PQfnumber(res, "datlastsysoid")));
 	PQclear(res);
-	destroyPQExpBuffer(query);
 
 	return last_oid;
 }

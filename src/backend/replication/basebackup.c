@@ -17,7 +17,6 @@
 #include <time.h>
 
 #include "access/xlog_internal.h"	/* for pg_start/stop_backup */
-#include "catalog/catalog.h"
 #include "catalog/pg_type.h"
 #include "common/file_perm.h"
 #include "lib/stringinfo.h"
@@ -244,8 +243,8 @@ perform_base_backup(basebackup_options *opt)
 	/*
 	 * Once do_pg_start_backup has been called, ensure that any failure causes
 	 * us to abort the backup so we don't "leak" a backup counter. For this
-	 * reason, *all* functionality between do_pg_start_backup() and
-	 * the end of do_pg_stop_backup() should be inside the error cleanup block!
+	 * reason, *all* functionality between do_pg_start_backup() and the end of
+	 * do_pg_stop_backup() should be inside the error cleanup block!
 	 */
 
 	PG_ENSURE_ERROR_CLEANUP(base_backup_cleanup, (Datum) 0);
@@ -599,7 +598,7 @@ perform_base_backup(basebackup_options *opt)
 	{
 		if (total_checksum_failures > 1)
 		{
-			char buf[64];
+			char		buf[64];
 
 			snprintf(buf, sizeof(buf), INT64_FORMAT, total_checksum_failures);
 
@@ -1016,15 +1015,15 @@ sendDir(const char *path, int basepathlen, bool sizeonly, List *tablespaces,
 	char		pathbuf[MAXPGPATH * 2];
 	struct stat statbuf;
 	int64		size = 0;
-	const char 	*lastDir;			/* Split last dir from parent path. */
-	bool 		isDbDir = false;	/* Does this directory contain relations? */
+	const char *lastDir;		/* Split last dir from parent path. */
+	bool		isDbDir = false;	/* Does this directory contain relations? */
 
 	/*
-	 * Determine if the current path is a database directory that can
-	 * contain relations.
+	 * Determine if the current path is a database directory that can contain
+	 * relations.
 	 *
-	 * Start by finding the location of the delimiter between the parent
-	 * path and the current path.
+	 * Start by finding the location of the delimiter between the parent path
+	 * and the current path.
 	 */
 	lastDir = last_dir_separator(path);
 
@@ -1033,7 +1032,7 @@ sendDir(const char *path, int basepathlen, bool sizeonly, List *tablespaces,
 		strspn(lastDir + 1, "0123456789") == strlen(lastDir + 1))
 	{
 		/* Part of path that contains the parent directory. */
-		int parentPathLen = lastDir - path;
+		int			parentPathLen = lastDir - path;
 
 		/*
 		 * Mark path as a database directory if the parent path is either
@@ -1052,7 +1051,7 @@ sendDir(const char *path, int basepathlen, bool sizeonly, List *tablespaces,
 	{
 		int			excludeIdx;
 		bool		excludeFound;
-		ForkNumber	relForkNum;		/* Type of fork if file is a relation */
+		ForkNumber	relForkNum; /* Type of fork if file is a relation */
 		int			relOidChars;	/* Chars in filename that are the rel oid */
 
 		/* Skip special stuff */
@@ -1105,8 +1104,8 @@ sendDir(const char *path, int basepathlen, bool sizeonly, List *tablespaces,
 			/* Never exclude init forks */
 			if (relForkNum != INIT_FORKNUM)
 			{
-				char initForkFile[MAXPGPATH];
-				char relOid[OIDCHARS + 1];
+				char		initForkFile[MAXPGPATH];
+				char		relOid[OIDCHARS + 1];
 
 				/*
 				 * If any other type of fork, check if there is an init fork
@@ -1362,7 +1361,7 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 	char		buf[TAR_SEND_SIZE];
 	uint16		checksum;
 	int			checksum_failures = 0;
-	size_t		cnt;
+	off_t		cnt;
 	int			i;
 	pgoff_t		len = 0;
 	char	   *page;
@@ -1418,10 +1417,10 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 	while ((cnt = fread(buf, 1, Min(sizeof(buf), statbuf->st_size - len), fp)) > 0)
 	{
 		/*
-		 * The checksums are verified at block level, so we iterate over
-		 * the buffer in chunks of BLCKSZ, after making sure that
-		 * TAR_SEND_SIZE/buf is divisible by BLCKSZ and we read a multiple
-		 * of BLCKSZ bytes.
+		 * The checksums are verified at block level, so we iterate over the
+		 * buffer in chunks of BLCKSZ, after making sure that
+		 * TAR_SEND_SIZE/buf is divisible by BLCKSZ and we read a multiple of
+		 * BLCKSZ bytes.
 		 */
 		Assert(TAR_SEND_SIZE % BLCKSZ == 0);
 
@@ -1446,9 +1445,10 @@ sendFile(const char *readfilename, const char *tarfilename, struct stat *statbuf
 				 * start of the base backup. Otherwise, they might have been
 				 * written only halfway and the checksum would not be valid.
 				 * However, replaying WAL would reinstate the correct page in
-				 * this case.
+				 * this case. We also skip completely new pages, since they
+				 * don't have a checksum yet.
 				 */
-				if (PageGetLSN(page) < startptr)
+				if (!PageIsNew(page) && PageGetLSN(page) < startptr)
 				{
 					checksum = pg_checksum_page((char *) page, blkno + segmentno * RELSEG_SIZE);
 					phdr = (PageHeader) page;

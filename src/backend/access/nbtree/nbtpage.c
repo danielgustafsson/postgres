@@ -155,11 +155,11 @@ void
 _bt_update_meta_cleanup_info(Relation rel, TransactionId oldestBtpoXact,
 							 float8 numHeapTuples)
 {
-	Buffer			metabuf;
-	Page			metapg;
+	Buffer		metabuf;
+	Page		metapg;
 	BTMetaPageData *metad;
-	bool			needsRewrite = false;
-	XLogRecPtr		recptr;
+	bool		needsRewrite = false;
+	XLogRecPtr	recptr;
 
 	/* read the metapage and check if it needs rewrite */
 	metabuf = _bt_getbuf(rel, BTREE_METAPAGE, BT_READ);
@@ -189,7 +189,7 @@ _bt_update_meta_cleanup_info(Relation rel, TransactionId oldestBtpoXact,
 	if (metad->btm_version < BTREE_VERSION)
 		_bt_upgrademetapage(metapg);
 
-	/* update cleanup-related infromation */
+	/* update cleanup-related information */
 	metad->btm_oldest_btpo_xact = oldestBtpoXact;
 	metad->btm_last_cleanup_num_heap_tuples = numHeapTuples;
 	MarkBufferDirty(metabuf);
@@ -341,10 +341,6 @@ _bt_getroot(Relation rel, int access)
 		LockBuffer(metabuf, BUFFER_LOCK_UNLOCK);
 		LockBuffer(metabuf, BT_WRITE);
 
-		/* upgrade metapage if needed */
-		if (metad->btm_version < BTREE_VERSION)
-			_bt_upgrademetapage(metapg);
-
 		/*
 		 * Race condition:	if someone else initialized the metadata between
 		 * the time we released the read lock and acquired the write lock, we
@@ -378,6 +374,10 @@ _bt_getroot(Relation rel, int access)
 
 		/* NO ELOG(ERROR) till meta is updated */
 		START_CRIT_SECTION();
+
+		/* upgrade metapage if needed */
+		if (metad->btm_version < BTREE_VERSION)
+			_bt_upgrademetapage(metapg);
 
 		metad->btm_root = rootblkno;
 		metad->btm_level = 0;
@@ -1602,9 +1602,10 @@ _bt_mark_page_halfdead(Relation rel, Buffer leafbuf, BTStack stack)
 	MemSet(&trunctuple, 0, sizeof(IndexTupleData));
 	trunctuple.t_info = sizeof(IndexTupleData);
 	if (target != leafblkno)
-		ItemPointerSetBlockNumber(&trunctuple.t_tid, target);
+		BTreeTupleSetTopParent(&trunctuple, target);
 	else
-		ItemPointerSetInvalid(&trunctuple.t_tid);
+		BTreeTupleSetTopParent(&trunctuple, InvalidBlockNumber);
+
 	if (PageAddItem(page, (Item) &trunctuple, sizeof(IndexTupleData), P_HIKEY,
 					false, false) == InvalidOffsetNumber)
 		elog(ERROR, "could not add dummy high key to half-dead page");
@@ -1688,7 +1689,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, bool *rightsib_empty)
 	BTPageOpaque opaque;
 	bool		rightsib_is_rightmost;
 	int			targetlevel;
-	ItemPointer leafhikey;
+	IndexTuple	leafhikey;
 	BlockNumber nextchild;
 
 	page = BufferGetPage(leafbuf);
@@ -1700,7 +1701,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, bool *rightsib_empty)
 	 * Remember some information about the leaf page.
 	 */
 	itemid = PageGetItemId(page, P_HIKEY);
-	leafhikey = &((IndexTuple) PageGetItem(page, itemid))->t_tid;
+	leafhikey = (IndexTuple) PageGetItem(page, itemid);
 	leafleftsib = opaque->btpo_prev;
 	leafrightsib = opaque->btpo_next;
 
@@ -1712,9 +1713,10 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, bool *rightsib_empty)
 	 * parent in the branch.  Set 'target' and 'buf' to reference the page
 	 * actually being unlinked.
 	 */
-	if (ItemPointerIsValid(leafhikey))
+	target = BTreeTupleGetTopParent(leafhikey);
+
+	if (target != InvalidBlockNumber)
 	{
-		target = ItemPointerGetBlockNumberNoCheck(leafhikey);
 		Assert(target != leafblkno);
 
 		/* fetch the block number of the topmost parent's left sibling */
@@ -1917,12 +1919,7 @@ _bt_unlink_halfdead_page(Relation rel, Buffer leafbuf, bool *rightsib_empty)
 	 * branch.
 	 */
 	if (target != leafblkno)
-	{
-		if (nextchild == InvalidBlockNumber)
-			ItemPointerSetInvalid(leafhikey);
-		else
-			ItemPointerSetBlockNumber(leafhikey, nextchild);
-	}
+		BTreeTupleSetTopParent(leafhikey, nextchild);
 
 	/*
 	 * Mark the page itself deleted.  It can be recycled when all current

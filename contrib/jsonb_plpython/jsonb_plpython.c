@@ -5,6 +5,7 @@
 #include "plpy_typeio.h"
 #include "utils/jsonb.h"
 #include "utils/fmgrprotos.h"
+#include "utils/numeric.h"
 
 PG_MODULE_MAGIC;
 
@@ -25,7 +26,7 @@ static PyObject *decimal_constructor;
 
 static PyObject *PLyObject_FromJsonbContainer(JsonbContainer *jsonb);
 static JsonbValue *PLyObject_ToJsonbValue(PyObject *obj,
-					  JsonbParseState **jsonb_state, bool is_elem);
+					   JsonbParseState **jsonb_state, bool is_elem);
 
 #if PY_MAJOR_VERSION >= 3
 typedef PyObject *(*PLyUnicode_FromStringAndSize_t)
@@ -325,8 +326,13 @@ PLyNumber_ToJsonbValue(PyObject *obj, JsonbValue *jbvNum)
 
 	PG_TRY();
 	{
-		num = DatumGetNumeric(DirectFunctionCall3(numeric_in,
-												  CStringGetDatum(str), 0, -1));
+		Datum		numd;
+
+		numd = DirectFunctionCall3(numeric_in,
+								   CStringGetDatum(str),
+								   ObjectIdGetDatum(InvalidOid),
+								   Int32GetDatum(-1));
+		num = DatumGetNumeric(numd);
 	}
 	PG_CATCH();
 	{
@@ -337,6 +343,16 @@ PLyNumber_ToJsonbValue(PyObject *obj, JsonbValue *jbvNum)
 	PG_END_TRY();
 
 	pfree(str);
+
+	/*
+	 * jsonb doesn't allow NaN (per JSON specification), so we have to prevent
+	 * it here explicitly.  (Infinity is also not allowed in jsonb, but
+	 * numeric_in above already catches that.)
+	 */
+	if (numeric_is_nan(num))
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 (errmsg("cannot convert NaN to jsonb"))));
 
 	jbvNum->type = jbvNumeric;
 	jbvNum->val.numeric = num;
@@ -373,10 +389,11 @@ PLyObject_ToJsonbValue(PyObject *obj, JsonbParseState **jsonb_state, bool is_ele
 		out->type = jbvNull;
 	else if (PyString_Check(obj) || PyUnicode_Check(obj))
 		PLyString_ToJsonbValue(obj, out);
-   /*
-	* PyNumber_Check() returns true for booleans, so boolean check should come
-	* first.
-	*/
+
+	/*
+	 * PyNumber_Check() returns true for booleans, so boolean check should
+	 * come first.
+	 */
 	else if (PyBool_Check(obj))
 	{
 		out = palloc(sizeof(JsonbValue));
