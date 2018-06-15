@@ -315,9 +315,8 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 		return FAILED;
 	}
 
-	ereport(DEBUG1,
-			(errmsg("started background worker for checksums in \"%s\"",
-					db->dbname)));
+	elog(DEBUG1, "started background worker for checksums in \"%s\"",
+		 db->dbname);
 
 	snprintf(activity, sizeof(activity) - 1,
 			 "Waiting for worker in database %s (pid %d)", db->dbname, pid);
@@ -338,9 +337,8 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 				(errmsg("checksumhelper was aborted during processing in \"%s\"",
 						db->dbname)));
 
-	ereport(DEBUG1,
-			(errmsg("background worker for checksums in \"%s\" completed",
-					db->dbname)));
+	elog(DEBUG1, "background worker for checksums in \"%s\" completed",
+		 db->dbname);
 
 	pgstat_report_activity(STATE_IDLE, NULL);
 
@@ -377,8 +375,7 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	if (RecoveryInProgress())
 	{
-		ereport(DEBUG1,
-				(errmsg("not starting checksumhelper launcher, recovery is in progress")));
+		elog(DEBUG1, "not starting checksumhelper launcher, recovery is in progress");
 		return;
 	}
 
@@ -391,15 +388,13 @@ ChecksumHelperLauncherMain(Datum arg)
 	 */
 	if (DataChecksumsNeedVerifyLocked())
 	{
-		ereport(DEBUG1,
-				(errmsg("not starting checksumhelper launcher, checksums already enabled")));
+		elog(DEBUG1, "not starting checksumhelper launcher, checksums already enabled");
 		return;
 	}
 
 	on_shmem_exit(launcher_exit, 0);
 
-	ereport(DEBUG1,
-			(errmsg("checksumhelper launcher started")));
+	elog(DEBUG1, "checksumhelper launcher started");
 
 	pqsignal(SIGTERM, die);
 	pqsignal(SIGINT, launcher_cancel_handler);
@@ -687,8 +682,7 @@ ChecksumHelperWorkerMain(Datum arg)
 
 	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_WORKER), "", "", "");
 
-	ereport(DEBUG1,
-			(errmsg("checksum worker starting for database oid %d", dboid)));
+	elog(DEBUG1, "checksum worker starting for database oid %d", dboid);
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid, BGWORKER_BYPASS_ALLOWCONN);
 
@@ -725,12 +719,10 @@ ChecksumHelperWorkerMain(Datum arg)
 	if (aborted)
 	{
 		ChecksumHelperShmem->success = ABORTED;
-		ereport(DEBUG1,
-				(errmsg("checksum worker aborted in database oid %d", dboid)));
+		elog(DEBUG1, "checksum worker aborted in database oid %d", dboid);
 		return;
 	}
 
 	ChecksumHelperShmem->success = SUCCESSFUL;
-	ereport(DEBUG1,
-			(errmsg("checksum worker completed in database oid %d", dboid)));
+	elog(DEBUG1, "checksum worker completed in database oid %d", dboid);
 }
