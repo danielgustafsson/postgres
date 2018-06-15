@@ -51,13 +51,9 @@ typedef enum
 
 typedef struct ChecksumHelperShmemStruct
 {
-	pg_atomic_flag launcher_started;
 	ChecksumHelperResult success;
 	bool		process_shared_catalogs;
 	bool		abort;
-	/* Parameter values set on start */
-	int			cost_delay;
-	int			cost_limit;
 }			ChecksumHelperShmemStruct;
 
 /* Shared memory segment for checksumhelper */
@@ -79,27 +75,24 @@ typedef struct ChecksumHelperRelation
 /* Prototypes */
 static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool include_shared);
-static List *BuildTempTableList(void);
 static ChecksumHelperResult ProcessDatabase(ChecksumHelperDatabase * db);
 static void launcher_cancel_handler(SIGNAL_ARGS);
+static void checksumhelper_sighup(SIGNAL_ARGS);
+
+/* GUCs */
+int checksumhelper_cost_limit;
+int checksumhelper_cost_delay;
+
+/* Flags set by signal handlers */
+static volatile sig_atomic_t got_SIGHUP = false;
 
 /*
  * Main entry point for checksumhelper launcher process.
  */
 bool
-StartChecksumHelperLauncher(int cost_delay, int cost_limit)
+ChecksumHelperLauncherRegister(void)
 {
 	BackgroundWorker bgw;
-	BackgroundWorkerHandle *bgw_handle;
-
-	if (ChecksumHelperShmem->abort)
-	{
-		ereport(ERROR,
-				(errmsg("could not start checksumhelper: has been cancelled")));
-	}
-
-	ChecksumHelperShmem->cost_delay = cost_delay;
-	ChecksumHelperShmem->cost_limit = cost_limit;
 
 	memset(&bgw, 0, sizeof(bgw));
 	bgw.bgw_flags = BGWORKER_SHMEM_ACCESS | BGWORKER_BACKEND_DATABASE_CONNECTION;
@@ -109,21 +102,10 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	snprintf(bgw.bgw_name, BGW_MAXLEN, "checksumhelper launcher");
 	snprintf(bgw.bgw_type, BGW_MAXLEN, "checksumhelper launcher");
 	bgw.bgw_restart_time = BGW_NEVER_RESTART;
-	bgw.bgw_notify_pid = MyProcPid;
+	bgw.bgw_notify_pid = 0;
 	bgw.bgw_main_arg = (Datum) 0;
 
-	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
-	{
-		/* Failed to set means somebody else started */
-		ereport(ERROR,
-				(errmsg("could not start checksumhelper: already running")));
-	}
-
-	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
-	{
-		pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
-		return false;
-	}
+	RegisterBackgroundWorker(&bgw);
 
 	return true;
 }
@@ -138,13 +120,8 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 void
 ShutdownChecksumHelperIfRunning(void)
 {
-	/* If the launcher isn't started, there is nothing to shut down */
-	if (pg_atomic_unlocked_test_flag(&ChecksumHelperShmem->launcher_started))
-		return;
-
 	/*
-	 * We don't need an atomic variable for aborting, setting it multiple
-	 * times will not change the handling.
+	 * Tell any running process to quit.
 	 */
 	ChecksumHelperShmem->abort = true;
 }
@@ -152,6 +129,11 @@ ShutdownChecksumHelperIfRunning(void)
 /*
  * ProcessSingleRelationFork
  *		Enable checksums in a single relation/fork.
+ *
+ * Loops over all existing blocks in this fork and calculates the checksum on them,
+ * and writes them out. For any blocks added by another process extending this
+ * fork while we run checksums will already set by the process extending it,
+ * so we don't need to care about those.
  *
  * Returns true if successful, and false if *aborted*. On error, an actual
  * error is raised in the lower levels.
@@ -190,10 +172,14 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		 * were off. This can happen if there was a valid checksum on the page
 		 * at one point in the past, so only when checksums are first on, then
 		 * off, and then turned on again.
+		 * Full page writes should only happen for relations that are actually
+		 * logged (not unlogged or temp tables), but we still need to mark their
+		 * buffers as dirty so the local file gets updated.
 		 */
 		START_CRIT_SECTION();
 		MarkBufferDirty(buf);
-		log_newpage_buffer(buf, false);
+		if (RelationNeedsWAL(reln))
+			log_newpage_buffer(buf, false);
 		END_CRIT_SECTION();
 
 		UnlockReleaseBuffer(buf);
@@ -204,6 +190,27 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		 */
 		if (ChecksumHelperShmem->abort)
 			return false;
+
+		/*
+		 * Update cost based delay parameters if changed, and then initiate the
+		 * cost delay point.
+		 */
+		if (got_SIGHUP)
+		{
+			got_SIGHUP = false;
+			ProcessConfigFile(PGC_SIGHUP);
+			if (checksumhelper_cost_delay >= 0 && checksumhelper_cost_delay != VacuumCostDelay)
+			{
+				VacuumCostDelay = checksumhelper_cost_delay;
+				elog(DEBUG1, "Checksumhelper cost delay changed to %i", VacuumCostDelay);
+			}
+			if (checksumhelper_cost_limit >= 0 && checksumhelper_cost_limit != VacuumCostLimit)
+			{
+				VacuumCostLimit = checksumhelper_cost_limit;
+				elog(DEBUG1, "Checksumhelper cost limit changed to %i", VacuumCostLimit);
+			}
+			VacuumCostActive = (VacuumCostDelay > 0);
+		}
 
 		vacuum_delay_point();
 	}
@@ -347,7 +354,6 @@ static void
 launcher_exit(int code, Datum arg)
 {
 	ChecksumHelperShmem->abort = false;
-	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
 }
 
 static void
@@ -357,40 +363,9 @@ launcher_cancel_handler(SIGNAL_ARGS)
 }
 
 static void
-WaitForAllTransactionsToFinish(void)
+checksumhelper_sighup(SIGNAL_ARGS)
 {
-	TransactionId waitforxid;
-
-	LWLockAcquire(XidGenLock, LW_SHARED);
-	waitforxid = ShmemVariableCache->nextXid;
-	LWLockRelease(XidGenLock);
-
-	while (true)
-	{
-		TransactionId oldestxid = GetOldestActiveTransactionId();
-
-		elog(DEBUG1, "Checking old transactions");
-		if (TransactionIdPrecedes(oldestxid, waitforxid))
-		{
-			char		activity[64];
-
-			/* Oldest running xid is older than us, so wait */
-			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (waiting for %d)", waitforxid);
-			pgstat_report_activity(STATE_RUNNING, activity);
-
-			/* Retry every 5 seconds */
-			ResetLatch(MyLatch);
-			(void) WaitLatch(MyLatch,
-							 WL_LATCH_SET | WL_TIMEOUT,
-							 5000,
-							 WAIT_EVENT_PG_SLEEP);
-		}
-		else
-		{
-			pgstat_report_activity(STATE_IDLE, NULL);
-			return;
-		}
-	}
+	got_SIGHUP = true;
 }
 
 void
@@ -402,6 +377,27 @@ ChecksumHelperLauncherMain(Datum arg)
 			   *lc2;
 	List	   *CurrentDatabases = NIL;
 	bool		found_failed = false;
+
+	if (RecoveryInProgress())
+	{
+		ereport(DEBUG1,
+				(errmsg("not starting checksumhelper launcher, recovery is in progress")));
+		return;
+	}
+
+	/*
+	 * If a standby was restarted when in pending state, a background worker was
+	 * registered to start. If it's later promoted after the master has completed
+	 * enabling checksums, we need to terminate immediately and not do anything.
+	 * If the cluster is still in pending state when promoted, the background
+	 * worker should start to complete the job.
+	 */
+	if (DataChecksumsNeedVerifyLocked())
+	{
+		ereport(DEBUG1,
+				(errmsg("not starting checksumhelper launcher, checksums already enabled")));
+		return;
+	}
 
 	on_shmem_exit(launcher_exit, 0);
 
@@ -427,14 +423,6 @@ ChecksumHelperLauncherMain(Datum arg)
 	ChecksumHelperShmem->process_shared_catalogs = true;
 
 	/*
-	 * Wait for all existing transactions to finish. This will make sure that
-	 * we can see all tables all databases, so we don't miss any. Anything
-	 * created after this point is known to have checksums on all pages
-	 * already, so we don't have to care about those.
-	 */
-	WaitForAllTransactionsToFinish();
-
-	/*
 	 * Create a database list.  We don't need to concern ourselves with
 	 * rebuilding this list during runtime since any database created after
 	 * this process started will be running with checksums turned on from the
@@ -458,9 +446,6 @@ ChecksumHelperLauncherMain(Datum arg)
 
 		if (processing == SUCCESSFUL)
 		{
-			pfree(db->dbname);
-			pfree(db);
-
 			if (ChecksumHelperShmem->process_shared_catalogs)
 
 				/*
@@ -480,7 +465,6 @@ ChecksumHelperLauncherMain(Datum arg)
 			/* aborted */
 			return;
 	}
-	list_free(DatabaseList);
 
 	/*
 	 * remaining now has all databases not yet processed. This can be because
@@ -520,21 +504,7 @@ ChecksumHelperLauncherMain(Datum arg)
 					(errmsg("database \"%s\" has been dropped, skipping",
 							db->dbname)));
 		}
-
-		pfree(db->dbname);
-		pfree(db);
 	}
-	list_free(remaining);
-
-	/* Free the extra list of databases */
-	foreach(lc, CurrentDatabases)
-	{
-		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-
-		pfree(db->dbname);
-		pfree(db);
-	}
-	list_free(CurrentDatabases);
 
 	if (found_failed)
 	{
@@ -590,7 +560,6 @@ ChecksumHelperShmemInit(void)
 	if (!found)
 	{
 		MemSet(ChecksumHelperShmem, 0, ChecksumHelperShmemSize());
-		pg_atomic_init_flag(&ChecksumHelperShmem->launcher_started);
 	}
 }
 
@@ -679,7 +648,9 @@ BuildRelationList(bool include_shared)
 		 * Foreign tables have by definition no local storage that can be
 		 * checksummed, so skip.
 		 */
-		if (pgc->relkind == RELKIND_FOREIGN_TABLE)
+		if (pgc->relkind == RELKIND_VIEW ||
+			pgc->relkind == RELKIND_COMPOSITE_TYPE ||
+			pgc->relkind == RELKIND_FOREIGN_TABLE)
 			continue;
 
 		oldctx = MemoryContextSwitchTo(ctx);
@@ -702,47 +673,6 @@ BuildRelationList(bool include_shared)
 }
 
 /*
- * BuildTempTableList
- *		Compile a list of all temporary tables in database
- *
- * Returns a List of oids.
- */
-static List *
-BuildTempTableList(void)
-{
-	List	   *RelationList = NIL;
-	Relation	rel;
-	HeapScanDesc scan;
-	HeapTuple	tup;
-	MemoryContext ctx = CurrentMemoryContext;
-	MemoryContext oldctx;
-
-	StartTransactionCommand();
-
-	rel = heap_open(RelationRelationId, AccessShareLock);
-	scan = heap_beginscan_catalog(rel, 0, NULL);
-
-	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
-	{
-		Form_pg_class pgc = (Form_pg_class) GETSTRUCT(tup);
-
-		if (pgc->relpersistence != 't')
-			continue;
-
-		oldctx = MemoryContextSwitchTo(ctx);
-		RelationList = lappend_oid(RelationList, HeapTupleGetOid(tup));
-		MemoryContextSwitchTo(oldctx);
-	}
-
-	heap_endscan(scan);
-	heap_close(rel, AccessShareLock);
-
-	CommitTransactionCommand();
-
-	return RelationList;
-}
-
-/*
  * Main function for enabling checksums in a single database
  */
 void
@@ -750,12 +680,12 @@ ChecksumHelperWorkerMain(Datum arg)
 {
 	Oid			dboid = DatumGetObjectId(arg);
 	List	   *RelationList = NIL;
-	List	   *InitialTempTableList = NIL;
 	ListCell   *lc;
 	BufferAccessStrategy strategy;
 	bool		aborted = false;
 
 	pqsignal(SIGTERM, die);
+	pqsignal(SIGHUP, checksumhelper_sighup);
 
 	BackgroundWorkerUnblockSignals();
 
@@ -767,17 +697,12 @@ ChecksumHelperWorkerMain(Datum arg)
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid, BGWORKER_BYPASS_ALLOWCONN);
 
 	/*
-	 * Get a list of all temp tables present as we start in this database. We
-	 * need to wait until they are all gone until we are done, since we cannot
-	 * access those files and modify them.
-	 */
-	InitialTempTableList = BuildTempTableList();
-
-	/*
 	 * Enable vacuum cost delay, if any.
 	 */
-	VacuumCostDelay = ChecksumHelperShmem->cost_delay;
-	VacuumCostLimit = ChecksumHelperShmem->cost_limit;
+	if (checksumhelper_cost_delay >= 0)
+		VacuumCostDelay = checksumhelper_cost_delay;
+	if (checksumhelper_cost_limit >= 0)
+		VacuumCostLimit = checksumhelper_cost_limit;
 	VacuumCostActive = (VacuumCostDelay > 0);
 	VacuumCostBalance = 0;
 	VacuumPageHit = 0;
@@ -800,7 +725,6 @@ ChecksumHelperWorkerMain(Datum arg)
 			break;
 		}
 	}
-	list_free_deep(RelationList);
 
 	if (aborted)
 	{
@@ -809,45 +733,6 @@ ChecksumHelperWorkerMain(Datum arg)
 				(errmsg("checksum worker aborted in database oid %d", dboid)));
 		return;
 	}
-
-	/*
-	 * Wait for all temp tables that existed when we started to go away. This
-	 * is necessary since we cannot "reach" them to enable checksums. Any temp
-	 * tables created after we started will already have checksums in them
-	 * (due to the inprogress state), so those are safe.
-	 */
-	while (true)
-	{
-		List	   *CurrentTempTables;
-		ListCell   *lc;
-		int			numleft;
-		char		activity[64];
-
-		CurrentTempTables = BuildTempTableList();
-		numleft = 0;
-		foreach(lc, InitialTempTableList)
-		{
-			if (list_member_oid(CurrentTempTables, lfirst_oid(lc)))
-				numleft++;
-		}
-		list_free(CurrentTempTables);
-
-		if (numleft == 0)
-			break;
-
-		/* At least one temp table left to wait for */
-		snprintf(activity, sizeof(activity), "Waiting for %d temp tables to be removed", numleft);
-		pgstat_report_activity(STATE_RUNNING, activity);
-
-		/* Retry every 5 seconds */
-		ResetLatch(MyLatch);
-		(void) WaitLatch(MyLatch,
-						 WL_LATCH_SET | WL_TIMEOUT,
-						 5000,
-						 WAIT_EVENT_PG_SLEEP);
-	}
-
-	list_free(InitialTempTableList);
 
 	ChecksumHelperShmem->success = SUCCESSFUL;
 	ereport(DEBUG1,

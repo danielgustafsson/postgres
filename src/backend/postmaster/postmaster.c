@@ -110,6 +110,7 @@
 #include "port/pg_bswap.h"
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
+#include "postmaster/checksumhelper.h"
 #include "postmaster/fork_process.h"
 #include "postmaster/pgarch.h"
 #include "postmaster/postmaster.h"
@@ -986,6 +987,17 @@ PostmasterMain(int argc, char *argv[])
 	 * background worker slots.
 	 */
 	ApplyLauncherRegister();
+
+	/*
+	 * If checksums are set to pending, start the checksum helper launcher
+	 * to start enabling checksums.
+	 */
+	if (DataChecksumsInProgress())
+	{
+		ereport(LOG,
+				(errmsg("data checksums in pending state, starting background worker to enable")));
+		ChecksumHelperLauncherRegister();
+	}
 
 	/*
 	 * process any libraries that should be preloaded at postmaster start

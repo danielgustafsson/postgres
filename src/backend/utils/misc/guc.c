@@ -60,6 +60,7 @@
 #include "postmaster/autovacuum.h"
 #include "postmaster/bgworker_internals.h"
 #include "postmaster/bgwriter.h"
+#include "postmaster/checksumhelper.h"
 #include "postmaster/postmaster.h"
 #include "postmaster/syslogger.h"
 #include "postmaster/walwriter.h"
@@ -2202,6 +2203,27 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&autovacuum_vac_cost_limit,
+		-1, -1, 10000,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"checksumhelper_cost_delay", PGC_SIGHUP, AUTOVACUUM,
+			gettext_noop("Checksum helper cost delay in milliseconds."),
+			NULL,
+			GUC_UNIT_MS
+		},
+		&checksumhelper_cost_delay,
+		20, -1, 100,
+		NULL, NULL, NULL
+	},
+
+	{
+		{"checksumhelper_cost_limit", PGC_SIGHUP, AUTOVACUUM,
+			gettext_noop("Checksum helper cost amount available before napping."),
+			NULL
+		},
+		&checksumhelper_cost_limit,
 		-1, -1, 10000,
 		NULL, NULL, NULL
 	},

@@ -48,12 +48,15 @@ $result = $node_master->safe_psql('postgres',
 is($result, "inprogress", 'ensure checksums are in progress on master');
 
 # Wait for checksum enable to be replayed
-$node_master->wait_for_catchup($node_standby_1, 'replay');
+$node_master->wait_for_catchup($node_standby_1, 'replay', $node_master->lsn('insert'));
 
 # Ensure that the standby has switched to inprogress
 $result = $node_standby_1->safe_psql('postgres',
 	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
 is($result, "inprogress", 'ensure checksums are in progress on standby_1');
+
+# Restart master to trigger background worker to enable checksums
+$node_master->restart();
 
 # Insert some more data which should be checksummed on INSERT
 $node_master->safe_psql('postgres',
@@ -90,7 +93,7 @@ $result = $node_master->safe_psql('postgres',
 is($result, "off", 'ensure checksums are in progress on master');
 
 # Wait for checksum disable to be replayed
-$node_master->wait_for_catchup($node_standby_1, 'replay');
+$node_master->wait_for_catchup($node_standby_1, 'replay', $node_master->lsn('insert'));
 
 # Ensure that the standby has switched to off
 $result = $node_standby_1->safe_psql('postgres',

@@ -705,8 +705,13 @@ pg_backup_start_time(PG_FUNCTION_ARGS)
  * Has immediate effect - the checksums are set to off right away.
  */
 Datum
-disable_data_checksums(PG_FUNCTION_ARGS)
+pg_disable_data_checksums(PG_FUNCTION_ARGS)
 {
+	if (RecoveryInProgress())
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("recovery is in progress"),
+				 errhint("checksum state cannot be changed during recovery.")));
 	/*
 	 * If we don't need to write new checksums, then clearly they are already
 	 * disabled.
@@ -725,34 +730,30 @@ disable_data_checksums(PG_FUNCTION_ARGS)
 /*
  * Enables checksums for the cluster, unless already enabled.
  *
- * Supports vacuum-like cost-based throttling, to limit system load.
- * Starts a background worker that updates checksums on existing data.
+ * This sets the system into a pending state. To initiate the actual
+ * checksum updates, a restart is required to make sure there can be
+ * no parallel backends doing things we cannot work with here.
  */
 Datum
-enable_data_checksums(PG_FUNCTION_ARGS)
+pg_enable_data_checksums(PG_FUNCTION_ARGS)
 {
-	int			cost_delay = PG_GETARG_INT32(0);
-	int			cost_limit = PG_GETARG_INT32(1);
-
-	if (cost_delay < 0)
+	if (RecoveryInProgress())
 		ereport(ERROR,
-				(errmsg("cost delay cannot be less than zero")));
-	if (cost_limit <= 0)
-		ereport(ERROR,
-				(errmsg("cost limit must be a positive value")));
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("recovery is in progress"),
+				 errhint("checksum state cannot be changed during recovery.")));
 
-	/*
-	 * Allow state change from "off" or from "inprogress", since this is how
-	 * we restart the worker if necessary.
-	 */
 	if (DataChecksumsNeedVerify())
 		ereport(ERROR,
 				(errmsg("data checksums already enabled")));
+	if (DataChecksumsNeedWrite())
+		ereport(ERROR,
+				(errmsg("data checksums already pending. A restart may be required to complete the process")));
 
 	SetDataChecksumsInProgress();
-	if (!StartChecksumHelperLauncher(cost_delay, cost_limit))
-		ereport(ERROR,
-				(errmsg("failed to start checksum helper process")));
+
+	ereport(NOTICE,
+			(errmsg("data checksums set to pending. To complete the operation, a restart of PostgreSQL is required")));
 
 	PG_RETURN_VOID();
 }

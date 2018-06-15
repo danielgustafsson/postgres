@@ -19,7 +19,7 @@ extern Size ChecksumHelperShmemSize(void);
 extern void ChecksumHelperShmemInit(void);
 
 /* Start the background processes for enabling checksums */
-bool		StartChecksumHelperLauncher(int cost_delay, int cost_limit);
+bool		ChecksumHelperLauncherRegister(void);
 
 /* Shutdown the background processes, if any */
 void		ShutdownChecksumHelperIfRunning(void);
@@ -27,5 +27,9 @@ void		ShutdownChecksumHelperIfRunning(void);
 /* Background worker entrypoints */
 void		ChecksumHelperLauncherMain(Datum arg);
 void		ChecksumHelperWorkerMain(Datum arg);
+
+/* GUCs */
+extern int checksumhelper_cost_limit;
+extern int checksumhelper_cost_delay;
 
 #endif							/* CHECKSUMHELPER_H */
