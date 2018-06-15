@@ -4774,6 +4774,26 @@ DataChecksumsNeedVerify(void)
 }
 
 bool
+DataChecksumsNeedVerifyLocked(void)
+{
+	bool ret;
+
+	Assert(ControlFile != NULL);
+
+	/*
+	 * Only verify checksums if they are fully enabled in the cluster. In
+	 * inprogress state they are only updated, not verified.
+	 * Make the check while holding the ControlFileLock, to make sure we are
+	 * looking at the latest version.
+	 */
+	LWLockAcquire(ControlFileLock, LW_SHARED);
+	ret = (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_VERSION);
+	LWLockRelease(ControlFileLock);
+
+	return ret;
+}
+
+bool
 DataChecksumsInProgress(void)
 {
 	Assert(ControlFile != NULL);

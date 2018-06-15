@@ -98,7 +98,17 @@ PageIsVerified(Page page, BlockNumber blkno)
 			checksum = pg_checksum_page((char *) page, blkno);
 
 			if (checksum != p->pd_checksum)
-				checksum_failure = true;
+			{
+				/*
+				 * It is possible we get this failure because the user
+				 * has disabled checksums, but we have not yet seen this
+				 * in pg_control and therefor think we should verify it.
+				 * To make sure we have seen any change, make a locked
+				 * access to verify it as well.
+				 */
+				if (DataChecksumsNeedVerifyLocked())
+					checksum_failure = true;
+			}
 		}
 
 		/*

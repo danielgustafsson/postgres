@@ -259,6 +259,7 @@ extern uint64 GetSystemIdentifier(void);
 extern char *GetMockAuthenticationNonce(void);
 extern bool DataChecksumsNeedWrite(void);
 extern bool DataChecksumsNeedVerify(void);
+extern bool DataChecksumsNeedVerifyLocked(void);
 extern bool DataChecksumsInProgress(void);
 extern void SetDataChecksumsInProgress(void);
 extern void SetDataChecksumsOn(void);
