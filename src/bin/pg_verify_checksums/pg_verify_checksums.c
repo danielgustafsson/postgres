@@ -307,7 +307,10 @@ main(int argc, char *argv[])
 	printf(_("Data checksum version: %d\n"), ControlFile->data_checksum_version);
 	printf(_("Files scanned:  %" INT64_MODIFIER "d\n"), files);
 	printf(_("Blocks scanned: %" INT64_MODIFIER "d\n"), blocks);
-	printf(_("Bad checksums:  %" INT64_MODIFIER "d\n"), badblocks);
+	if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
+		printf(_("Blocks left in progress: %" INT64_MODIFIER "d\n"), badblocks);
+	else
+		printf(_("Bad checksums:  %" INT64_MODIFIER "d\n"), badblocks);
 
 	if (badblocks > 0)
 		return 1;
