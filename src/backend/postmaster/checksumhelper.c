@@ -38,6 +38,7 @@
 #include "storage/procarray.h"
 #include "storage/smgr.h"
 #include "tcop/tcopprot.h"
+#include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/ps_status.h"
 
@@ -405,10 +406,11 @@ void
 ChecksumHelperLauncherMain(Datum arg)
 {
 	List	   *DatabaseList;
-	List	   *remaining = NIL;
+	HTAB	   *ProcessedDatabases = NULL;
+	List	   *FailedDatabases = NIL;
 	ListCell   *lc,
 			   *lc2;
-	List	   *CurrentDatabases = NIL;
+	HASHCTL		hash_ctl;
 	bool		found_failed = false;
 
 	if (RecoveryInProgress())
@@ -441,6 +443,14 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_LAUNCHER), "", "", "");
 
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(ChecksumHelperResult);
+	ProcessedDatabases = hash_create("Processed databases",
+									 64,
+									 &hash_ctl,
+									 HASH_ELEM);
+
 	/*
 	 * Initialize a connection to shared catalogs only.
 	 */
@@ -452,67 +462,105 @@ ChecksumHelperLauncherMain(Datum arg)
 	 */
 	ChecksumHelperShmem->process_shared_catalogs = true;
 
-	/*
-	 * Create a database list.  We don't need to concern ourselves with
-	 * rebuilding this list during runtime since any database created after
-	 * this process started will be running with checksums turned on from the
-	 * start.
-	 */
-	DatabaseList = BuildDatabaseList();
-
-	/*
-	 * If there are no databases at all to checksum, we can exit immediately
-	 * as there is no work to do.
-	 */
-	if (DatabaseList == NIL || list_length(DatabaseList) == 0)
-		return;
-
-	foreach(lc, DatabaseList)
+	while (true)
 	{
-		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-		ChecksumHelperResult processing;
+		int processed_databases;
 
-		processing = ProcessDatabase(db);
+		/*
+		 * Get a list of all databases to process. This may include databases
+		 * that were created during our runtime.
+		 *
+		 * Before we do this, wait for all pending transactions to finish. This
+		 * will ensure there are no concurrently running CREATE DATABASE, which
+		 * could cause us to miss the creation of a database that was copied
+		 * without checksums.
+		 *
+		 * Since a database can be created as a copy of any other database
+		 * (which may not have existed in our last run), we have to repeat this
+		 * loop until no new databases show up in the list. Since we wait for
+		 * all pre-existing transactions finish, this way we can be certain that
+		 * there are no databases left without checksums.
+		 *
+		 * XXX: is there a race condition between waiting and databaselist? Do
+		 *      we perhaps need to wait inside BuildDatabaseList()?
+		 */
+		WaitForAllTransactionsToFinish();
 
-		if (processing == SUCCESSFUL)
-		{
-			if (ChecksumHelperShmem->process_shared_catalogs)
+		DatabaseList = BuildDatabaseList();
 
-				/*
-				 * Now that one database has completed shared catalogs, we
-				 * don't have to process them again.
-				 */
-				ChecksumHelperShmem->process_shared_catalogs = false;
-		}
-		else if (processing == FAILED)
-		{
-			/*
-			 * Put failed databases on the remaining list.
-			 */
-			remaining = lappend(remaining, db);
-		}
-		else
-			/* aborted */
+		/*
+		 * If there are no databases at all to checksum, we can exit immediately
+		 * as there is no work to do.
+		 * This probably can never happen, but just in case.
+		 */
+		if (DatabaseList == NIL || list_length(DatabaseList) == 0)
 			return;
+
+		processed_databases = 0;
+
+		foreach(lc, DatabaseList)
+		{
+			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+			ChecksumHelperResult processing;
+
+			if (hash_search(ProcessedDatabases, (void *) &db->dboid, HASH_FIND, NULL))
+				/* This database has already been processed */
+				continue;
+
+			processing = ProcessDatabase(db);
+			hash_search(ProcessedDatabases, (void *) &db->dboid, HASH_ENTER, NULL);
+			processed_databases++;
+
+			if (processing == SUCCESSFUL)
+			{
+				if (ChecksumHelperShmem->process_shared_catalogs)
+
+					/*
+					 * Now that one database has completed shared catalogs, we
+					 * don't have to process them again.
+					 */
+					ChecksumHelperShmem->process_shared_catalogs = false;
+			}
+			else if (processing == FAILED)
+			{
+				/*
+				 * Put failed databases on the list of failures.
+				 */
+				FailedDatabases = lappend(FailedDatabases, db);
+			}
+			else
+				/* Abort flag set, so exit the whole process */
+				return;
+		}
+
+		elog(DEBUG1, "Completed one loop of checksum enabling, %i databases processed", processed_databases);
+		if (processed_databases == 0)
+			/*
+			 * No databases processed in this run of the loop, we have now
+			 * finished all databases and no concurrently created ones can
+			 * exist.
+			 */
+			break;
 	}
 
 	/*
-	 * remaining now has all databases not yet processed. This can be because
-	 * they failed for some reason, or because the database was dropped
-	 * between us getting the database list and trying to process it. Get a
-	 * fresh list of databases to detect the second case where the database
-	 * was dropped before we had started processing it. If a database still
-	 * exists, but enabling checksums failed then we fail the entire
-	 * checksumming process and exit with an error.
+	 * FailedDatabases now has all databases that failed one way or another.
+	 * This can be because they actually failed for some reason, or because
+	 * the database was dropped between us getting the database list and
+	 * trying to process it. Get a fresh list of databases to detect the
+	 * second case where the database was dropped before we had started
+	 * processing it. If a database still exists, but enabling checksums
+	 * failed then we fail the entire checksumming process and exit with an
+	 * error.
 	 */
-	CurrentDatabases = BuildDatabaseList();
+	DatabaseList = BuildDatabaseList();
 
-	foreach(lc, remaining)
+	foreach(lc, FailedDatabases)
 	{
 		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 		bool		found = false;
 
-		foreach(lc2, CurrentDatabases)
+		foreach(lc2, DatabaseList)
 		{
 			ChecksumHelperDatabase *db2 = (ChecksumHelperDatabase *) lfirst(lc2);
 
