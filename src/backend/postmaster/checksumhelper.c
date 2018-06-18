@@ -198,16 +198,10 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		{
 			got_SIGHUP = false;
 			ProcessConfigFile(PGC_SIGHUP);
-			if (checksumhelper_cost_delay >= 0 && checksumhelper_cost_delay != VacuumCostDelay)
-			{
+			if (checksumhelper_cost_delay >= 0)
 				VacuumCostDelay = checksumhelper_cost_delay;
-				elog(DEBUG1, "Checksumhelper cost delay changed to %i", VacuumCostDelay);
-			}
-			if (checksumhelper_cost_limit >= 0 && checksumhelper_cost_limit != VacuumCostLimit)
-			{
+			if (checksumhelper_cost_limit >= 0)
 				VacuumCostLimit = checksumhelper_cost_limit;
-				elog(DEBUG1, "Checksumhelper cost limit changed to %i", VacuumCostLimit);
-			}
 			VacuumCostActive = (VacuumCostDelay > 0);
 		}
 
