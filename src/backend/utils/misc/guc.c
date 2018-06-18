@@ -2208,7 +2208,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"checksumhelper_cost_delay", PGC_SIGHUP, AUTOVACUUM,
+		{"checksumhelper_cost_delay", PGC_SIGHUP, RESOURCES_VACUUM_DELAY,
 			gettext_noop("Checksum helper cost delay in milliseconds."),
 			NULL,
 			GUC_UNIT_MS
@@ -2219,7 +2219,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"checksumhelper_cost_limit", PGC_SIGHUP, AUTOVACUUM,
+		{"checksumhelper_cost_limit", PGC_SIGHUP, RESOURCES_VACUUM_DELAY,
 			gettext_noop("Checksum helper cost amount available before napping."),
 			NULL
 		},
