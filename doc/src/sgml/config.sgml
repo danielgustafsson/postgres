@@ -2055,6 +2055,42 @@ include_dir 'conf.d'
      </para>
     </sect2>
 
+    <sect2 id="runtime-config-online-checksum">
+     <title>Online Checksumming</title>
+
+     <variablelist>
+      <varlistentry id="guc-checksumhelper-cost-delay" xreflabel="checksumhelper_cost_delay">
+       <term><varname>checksumhelper_cost_delay</varname> (<type>integer</type>)
+       <indexterm>
+        <primary><varname>checksumhelper_cost_delay</varname> configuration parameter</primary>
+       </indexterm>
+       </term>
+       <listitem>
+        <para>
+         The length of time, in milliseconds, that the process will sleep when
+         the cost limit has been exceeded. The default value is zero, which
+         disables the cost-based checksumming delay feature. Positive values
+         enable cost-based checksumming.
+        </para>
+       </listitem>
+      </varlistentry>
+
+      <varlistentry id="guc-checksumhelper-cost-limit" xreflabel="checksumhelper_cost_limit">
+       <term><varname>checksumhelper_cost_limit</varname> (<type>integer</type>)
+       <indexterm>
+        <primary><varname>checksumhelper_cost_limit</varname> configuration parameter</primary>
+       </indexterm>
+       </term>
+       <listitem>
+        <para>
+         The accumulated cost that will cause the checksumming process to sleep.
+         It is turned off by default.
+        </para>
+       </listitem>
+      </varlistentry>
+     </variablelist>
+    </sect2>
+
     <sect2 id="runtime-config-resource-async-behavior">
      <title>Asynchronous Behavior</title>
 
