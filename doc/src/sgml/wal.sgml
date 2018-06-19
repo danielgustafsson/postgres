@@ -272,8 +272,10 @@
    </para>
 
    <para>
-    Enabling checksums will put the cluster in <literal>inprogress</literal> mode.
-    During this time, checksums will be written but not verified. In addition to
+    Enabling checksums will put the cluster in <literal>inprogress</literal> mode,
+    but will not start the checksumming of data. In order to start checksumming
+    the data in the cluster, a restart is needed. When the cluster is restarted,
+    checksums will be written but not verified. In addition to
     this, a background worker process is started that enables checksums on all
     existing data in the cluster. Once this worker has completed processing all
     databases in the cluster, the checksum mode will automatically switch to
@@ -281,23 +283,20 @@
    </para>
 
    <para>
-    The process will initially wait for all open transactions to finish before
-    it starts, so that it can be certain that there are no tables that have been
-    created inside a transaction that has not committed yet and thus would not
-    be visible to the process enabling checksums. It will also, for each database,
-    wait for all pre-existing temporary tables to get removed before it finishes.
-    If long-lived temporary tables are used in the application it may be necessary
-    to terminate these application connections to allow the process to complete.
-    Information about open transactions and connections with temporary tables is
-    written to log.
+    The process will track all created databases so that it can be certain that
+    no database has been created from a non-checksummed template database. The
+    process wont set the checksum mode to <literal>on</literal> until no database
+    can be created from a non-checksummed template. If an application repeatedly
+    creates databases it may be necessary to terminate this application to allow
+    the process to complete.
    </para>
 
    <para>
     If the cluster is stopped while in <literal>inprogress</literal> mode, for
-    any reason, then this process must be restarted manually. To do this,
-    re-execute the function <function>pg_enable_data_checksums()</function>
-    once the cluster has been restarted. It is not possible to resume the work,
-    the process has to start over and re-process the cluster.
+    any reason, then this process must be started over. When the cluster is
+    restarted, the checksum process will again checksum all data in the cluster
+    It is not possible to resume the work, the process has to start over and
+    re-process the cluster.
    </para>
 
    <note>
