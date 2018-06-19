@@ -154,7 +154,9 @@
 #vacuum_cost_page_dirty = 20		# 0-10000 credits
 #vacuum_cost_limit = 200		# 1-10000 credits
 
-#checksumhelper_cost_delay = -1		# 0-100 milliseconds, -1 to use vacuum_cost_delay
+# - Checksumhelper -
+
+#checksumhelper_cost_delay = 20		# 0-100 milliseconds, -1 to use vacuum_cost_delay
 #checksumhelper_cost_limit = -1		# 0-10000 credits, -1 to use vacuum_cost_limit
 
 # - Background Writer -
