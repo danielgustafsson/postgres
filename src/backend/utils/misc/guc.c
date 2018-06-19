@@ -603,6 +603,8 @@ const char *const config_group_names[] =
 	gettext_noop("Resource Usage / Kernel Resources"),
 	/* RESOURCES_VACUUM_DELAY */
 	gettext_noop("Resource Usage / Cost-Based Vacuum Delay"),
+	/* RESOURCES_CHECKSUMHELPER */
+	gettext_noop("Resource Usage / Checksumhelper"),
 	/* RESOURCES_BGWRITER */
 	gettext_noop("Resource Usage / Background Writer"),
 	/* RESOURCES_ASYNCHRONOUS */
@@ -2208,7 +2210,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"checksumhelper_cost_delay", PGC_SIGHUP, RESOURCES_VACUUM_DELAY,
+		{"checksumhelper_cost_delay", PGC_SIGHUP, RESOURCES_CHECKSUMHELPER,
 			gettext_noop("Checksum helper cost delay in milliseconds."),
 			NULL,
 			GUC_UNIT_MS
@@ -2219,7 +2221,7 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
-		{"checksumhelper_cost_limit", PGC_SIGHUP, RESOURCES_VACUUM_DELAY,
+		{"checksumhelper_cost_limit", PGC_SIGHUP, RESOURCES_CHECKSUMHELPER,
 			gettext_noop("Checksum helper cost amount available before napping."),
 			NULL
 		},
