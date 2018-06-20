@@ -588,6 +588,7 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	/*
 	 * Force a checkpoint to get everything out to disk.
+	 * XXX: this should probably not be an IMMEDIATE checkpoint, but leave it there for now for testing */
 	 */
 	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
 
