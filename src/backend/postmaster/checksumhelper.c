@@ -592,8 +592,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	 * probably not be an IMMEDIATE checkpoint, but leave it there for now for
 	 * testing
 	 */
-	*/
-		RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
+	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
 
 	/*
 	 * Everything has been processed, so flag checksums enabled.
