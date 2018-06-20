@@ -82,8 +82,8 @@ static void launcher_cancel_handler(SIGNAL_ARGS);
 static void checksumhelper_sighup(SIGNAL_ARGS);
 
 /* GUCs */
-int checksumhelper_cost_limit;
-int checksumhelper_cost_delay;
+int			checksumhelper_cost_limit;
+int			checksumhelper_cost_delay;
 
 /* Flags set by signal handlers */
 static volatile sig_atomic_t got_SIGHUP = false;
@@ -170,10 +170,10 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		 * changes (e.g. hintbits) on the master happening while checksums
 		 * were off. This can happen if there was a valid checksum on the page
 		 * at one point in the past, so only when checksums are first on, then
-		 * off, and then turned on again.
-		 * Full page writes should only happen for relations that are actually
-		 * logged (not unlogged or temp tables), but we still need to mark their
-		 * buffers as dirty so the local file gets updated.
+		 * off, and then turned on again. Full page writes should only happen
+		 * for relations that are actually logged (not unlogged or temp
+		 * tables), but we still need to mark their buffers as dirty so the
+		 * local file gets updated.
 		 */
 		START_CRIT_SECTION();
 		MarkBufferDirty(buf);
@@ -191,8 +191,8 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 			return false;
 
 		/*
-		 * Update cost based delay parameters if changed, and then initiate the
-		 * cost delay point.
+		 * Update cost based delay parameters if changed, and then initiate
+		 * the cost delay point.
 		 */
 		if (got_SIGHUP)
 		{
@@ -375,7 +375,7 @@ WaitForAllTransactionsToFinish(void)
 		elog(DEBUG1, "Waiting for old transactions to finish");
 		if (TransactionIdPrecedes(oldestxid, waitforxid))
 		{
-			char        activity[64];
+			char		activity[64];
 
 			/* Oldest running xid is older than us, so wait */
 			snprintf(activity, sizeof(activity), "Waiting for current transactions to finish (waiting for %d)", waitforxid);
@@ -394,7 +394,7 @@ WaitForAllTransactionsToFinish(void)
 			return;
 		}
 	}
- }
+}
 
 void
 ChecksumHelperLauncherMain(Datum arg)
@@ -414,11 +414,11 @@ ChecksumHelperLauncherMain(Datum arg)
 	}
 
 	/*
-	 * If a standby was restarted when in pending state, a background worker was
-	 * registered to start. If it's later promoted after the master has completed
-	 * enabling checksums, we need to terminate immediately and not do anything.
-	 * If the cluster is still in pending state when promoted, the background
-	 * worker should start to complete the job.
+	 * If a standby was restarted when in pending state, a background worker
+	 * was registered to start. If it's later promoted after the master has
+	 * completed enabling checksums, we need to terminate immediately and not
+	 * do anything. If the cluster is still in pending state when promoted,
+	 * the background worker should start to complete the job.
 	 */
 	if (DataChecksumsNeedVerifyLocked())
 	{
@@ -458,34 +458,34 @@ ChecksumHelperLauncherMain(Datum arg)
 
 	while (true)
 	{
-		int processed_databases;
+		int			processed_databases;
 
 		/*
 		 * Get a list of all databases to process. This may include databases
 		 * that were created during our runtime.
 		 *
-		 * Before we do this, wait for all pending transactions to finish. This
-		 * will ensure there are no concurrently running CREATE DATABASE, which
-		 * could cause us to miss the creation of a database that was copied
-		 * without checksums.
+		 * Before we do this, wait for all pending transactions to finish.
+		 * This will ensure there are no concurrently running CREATE DATABASE,
+		 * which could cause us to miss the creation of a database that was
+		 * copied without checksums.
 		 *
 		 * Since a database can be created as a copy of any other database
-		 * (which may not have existed in our last run), we have to repeat this
-		 * loop until no new databases show up in the list. Since we wait for
-		 * all pre-existing transactions finish, this way we can be certain that
-		 * there are no databases left without checksums.
+		 * (which may not have existed in our last run), we have to repeat
+		 * this loop until no new databases show up in the list. Since we wait
+		 * for all pre-existing transactions finish, this way we can be
+		 * certain that there are no databases left without checksums.
 		 *
 		 * XXX: is there a race condition between waiting and databaselist? Do
-		 *      we perhaps need to wait inside BuildDatabaseList()?
+		 * we perhaps need to wait inside BuildDatabaseList()?
 		 */
 		WaitForAllTransactionsToFinish();
 
 		DatabaseList = BuildDatabaseList();
 
 		/*
-		 * If there are no databases at all to checksum, we can exit immediately
-		 * as there is no work to do.
-		 * This probably can never happen, but just in case.
+		 * If there are no databases at all to checksum, we can exit
+		 * immediately as there is no work to do. This probably can never
+		 * happen, but just in case.
 		 */
 		if (DatabaseList == NIL || list_length(DatabaseList) == 0)
 			return;
@@ -529,6 +529,7 @@ ChecksumHelperLauncherMain(Datum arg)
 
 		elog(DEBUG1, "Completed one loop of checksum enabling, %i databases processed", processed_databases);
 		if (processed_databases == 0)
+
 			/*
 			 * No databases processed in this run of the loop, we have now
 			 * finished all databases and no concurrently created ones can
@@ -587,10 +588,12 @@ ChecksumHelperLauncherMain(Datum arg)
 	}
 
 	/*
-	 * Force a checkpoint to get everything out to disk.
-	 * XXX: this should probably not be an IMMEDIATE checkpoint, but leave it there for now for testing */
+	 * Force a checkpoint to get everything out to disk. XXX: this should
+	 * probably not be an IMMEDIATE checkpoint, but leave it there for now for
+	 * testing
 	 */
-	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
+	*/
+		RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
 
 	/*
 	 * Everything has been processed, so flag checksums enabled.
