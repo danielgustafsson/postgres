@@ -17,8 +17,27 @@ users.
 Running the tests
 =================
 
+NOTE: You must have given the --enable-tap-tests argument to configure.
+
+Run
     make check
-
 or
-
     make installcheck
+You can use "make installcheck" if you previously did "make install".
+In that case, the code in the installation tree is tested.  With
+"make check", a temporary installation tree is built from the current
+sources and then tested.
+
+Either way, this test initializes, starts, and stops a test Postgres
+cluster, as well as a test LDAP server.
+
+Requirements
+============
+
+LDAP server and client tools are required.
+
+Debian/Ubuntu packages: slapd ldap-utils
+
+RHEL/CentOS packages: openldap openldap-clients openldap-servers
+
+FreeBSD: openldap24-server openldap24-client
