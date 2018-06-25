@@ -464,21 +464,12 @@ ChecksumHelperLauncherMain(Datum arg)
 		 * Get a list of all databases to process. This may include databases
 		 * that were created during our runtime.
 		 *
-		 * Before we do this, wait for all pending transactions to finish.
-		 * This will ensure there are no concurrently running CREATE DATABASE,
-		 * which could cause us to miss the creation of a database that was
-		 * copied without checksums.
-		 *
 		 * Since a database can be created as a copy of any other database
 		 * (which may not have existed in our last run), we have to repeat
 		 * this loop until no new databases show up in the list. Since we wait
 		 * for all pre-existing transactions finish, this way we can be
 		 * certain that there are no databases left without checksums.
-		 *
-		 * XXX: is there a race condition between waiting and databaselist? Do
-		 * we perhaps need to wait inside BuildDatabaseList()?
 		 */
-		WaitForAllTransactionsToFinish();
 
 		DatabaseList = BuildDatabaseList();
 
@@ -659,6 +650,15 @@ BuildDatabaseList(void)
 	StartTransactionCommand();
 
 	rel = heap_open(DatabaseRelationId, AccessShareLock);
+
+	/*
+	 * Before we do this, wait for all pending transactions to finish. This
+	 * will ensure there are no concurrently running CREATE DATABASE, which
+	 * could cause us to miss the creation of a database that was copied
+	 * without checksums.
+	 */
+	WaitForAllTransactionsToFinish();
+
 	scan = heap_beginscan_catalog(rel, 0, NULL);
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
