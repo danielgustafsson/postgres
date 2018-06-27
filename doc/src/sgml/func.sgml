@@ -19615,15 +19615,15 @@ postgres=# SELECT * FROM pg_walfile_name_offset(pg_stop_backup());
        <entry>
         <para>
          Initiates data checksums for the cluster. This will switch the data checksums mode
-         to <literal>in progress</literal>, but will not initiate the checksumming process.
+         to <literal>inprogress</literal>, but will not initiate the checksumming process.
          In order to start checksumming the data pages the database must be restarted. Upon
          restart a background worker will start processing all data in the database and enable
          checksums for it. When all data pages have had checksums enabled, the cluster will
          automatically switch to checksums <literal>on</literal>.
         </para>
         <para>
-         The <xref linkend="runtime-checksumhelper-cost-delay"/> and
-         <xref linkend="runtime-checksumhelper-cost-limit"/> GUCs are used to 
+         The <xref linkend="guc-checksumhelper-cost-delay"/> and
+         <xref linkend="guc-checksumhelper-cost-limit"/> GUCs are used to 
          <link linkend="runtime-config-online-checksum">throttle the
          speed of the process</link> is throttled using the same principles as
          <link linkend="runtime-config-resource-vacuum-cost">Cost-based Vacuum Delay</link>.
