@@ -22,6 +22,14 @@
 #ifdef USE_OPENSSL
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#elif USE_SECURETRANSPORT
+/*
+ * Ideally we should include the Secure Transport headers here but doing so
+ * cause namespace collisions with CoreFoundation on, among others "Size"
+ * and ACL definitions. To avoid polluting with workarounds, use void * for
+ * instead of the actual Secure Transport variables and perform type casting
+ * in the Secure Transport implementation.
+ */
 #endif
 #ifdef HAVE_NETINET_TCP_H
 #include <netinet/tcp.h>
@@ -183,12 +191,28 @@ typedef struct Port
 	bool		peer_cert_valid;
 
 	/*
-	 * OpenSSL structures. (Keep these last so that the locations of other
-	 * fields are the same whether or not you build with OpenSSL.)
+	 * SSL library structures. (Keep these last so that the locations of
+	 * other fields are the same whether or not you build with SSL.)
 	 */
 #ifdef USE_OPENSSL
 	SSL		   *ssl;
 	X509	   *peer;
+#elif USE_SECURETRANSPORT
+
+	/*
+	 * ssl is an SSLContextRef, but including the appropriate header file from
+	 * Secure Transport causes a clash on the Size type so we need to cast it
+	 * from a void pointer when used.
+	 */
+	void	   *ssl;
+
+	/*
+	 * When writing data to the socket, Secure Transport can buffer some of
+	 * the data instead of writing it to the socket. ssl_buffered tracks the
+	 * number of buffered bytes to ensure that we drain the buffer.
+	 */
+	int			ssl_buffered;
+	int			waitfor;
 #endif
 } Port;
 
