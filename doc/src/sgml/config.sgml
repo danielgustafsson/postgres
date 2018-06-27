@@ -2024,7 +2024,7 @@ include_dir 'conf.d'
        <listitem>
         <para>
          The length of time, in milliseconds, that the process will sleep when
-         the cost limit has been exceeded. The default value is zero, which
+         the cost limit has been exceeded. The default value is <literal>-1</literal>, which
          disables the cost-based checksumming delay feature. Positive values
          enable cost-based checksumming.
         </para>
@@ -2040,7 +2040,7 @@ include_dir 'conf.d'
        <listitem>
         <para>
          The accumulated cost that will cause the checksumming process to sleep.
-         It is turned off by default.
+         The default value is <literal>200</literal>.
         </para>
        </listitem>
       </varlistentry>
