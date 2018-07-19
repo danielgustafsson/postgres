@@ -12852,8 +12852,6 @@ fi
 rm -f core conftest.err conftest.$ac_objext conftest.$ac_ext
 fi
 
-fi
-
 if test "$with_pam" = yes ; then
   for ac_header in security/pam_appl.h
 do :

@@ -1356,8 +1356,6 @@ if test "$with_securetransport" = yes ; then
   [AC_DEFINE(HAVE_KTLSPROTOCOL13, 1, [])], [])
 fi
 
-fi
-
 if test "$with_pam" = yes ; then
   AC_CHECK_HEADERS(security/pam_appl.h, [],
                    [AC_CHECK_HEADERS(pam/pam_appl.h, [],
