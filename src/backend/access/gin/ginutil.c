@@ -104,7 +104,7 @@ initGinState(GinState *state, Relation index)
 			state->tupdesc[i] = state->origTupdesc;
 		else
 		{
-			state->tupdesc[i] = CreateTemplateTupleDesc(2, false);
+			state->tupdesc[i] = CreateTemplateTupleDesc(2);
 
 			TupleDescInitEntry(state->tupdesc[i], (AttrNumber) 1, NULL,
 							   INT2OID, -1, 0);
@@ -309,12 +309,7 @@ GinNewBuffer(Relation index)
 		 */
 		if (ConditionalLockBuffer(buffer))
 		{
-			Page		page = BufferGetPage(buffer);
-
-			if (PageIsNew(page))
-				return buffer;	/* OK to use, if never initialized */
-
-			if (GinPageIsDeleted(page))
+			if (GinPageIsRecyclable(BufferGetPage(buffer)))
 				return buffer;	/* OK to use */
 
 			LockBuffer(buffer, GIN_UNLOCK);

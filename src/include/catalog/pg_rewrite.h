@@ -31,6 +31,7 @@
  */
 CATALOG(pg_rewrite,2618,RewriteRelationId)
 {
+	Oid			oid;			/* oid */
 	NameData	rulename;
 	Oid			ev_class;
 	char		ev_type;
@@ -38,8 +39,8 @@ CATALOG(pg_rewrite,2618,RewriteRelationId)
 	bool		is_instead;
 
 #ifdef CATALOG_VARLEN			/* variable-length fields start here */
-	pg_node_tree ev_qual;
-	pg_node_tree ev_action;
+	pg_node_tree ev_qual BKI_FORCE_NOT_NULL;
+	pg_node_tree ev_action BKI_FORCE_NOT_NULL;
 #endif
 } FormData_pg_rewrite;
 

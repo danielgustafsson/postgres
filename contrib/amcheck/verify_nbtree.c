@@ -289,12 +289,12 @@ btree_index_checkable(Relation rel)
 				 errdetail("Index \"%s\" is associated with temporary relation.",
 						   RelationGetRelationName(rel))));
 
-	if (!IndexIsValid(rel->rd_index))
+	if (!rel->rd_index->indisvalid)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot check index \"%s\"",
 						RelationGetRelationName(rel)),
-				 errdetail("Index is not valid")));
+				 errdetail("Index is not valid.")));
 }
 
 /*

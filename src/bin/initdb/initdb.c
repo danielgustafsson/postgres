@@ -173,7 +173,8 @@ static char *pgdata_native;
 /* defaults */
 static int	n_connections = 10;
 static int	n_buffers = 50;
-static char *dynamic_shared_memory_type = NULL;
+static const char *dynamic_shared_memory_type = NULL;
+static const char *default_timezone = NULL;
 
 /*
  * Warning messages for authentication methods
@@ -717,6 +718,8 @@ struct tsearch_config_match
 
 static const struct tsearch_config_match tsearch_config_languages[] =
 {
+	{"arabic", "ar"},
+	{"arabic", "Arabic"},
 	{"danish", "da"},
 	{"danish", "Danish"},
 	{"dutch", "nl"},
@@ -733,8 +736,16 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 	{"german", "German"},
 	{"hungarian", "hu"},
 	{"hungarian", "Hungarian"},
+	{"indonesian", "id"},
+	{"indonesian", "Indonesian"},
+	{"irish", "ga"},
+	{"irish", "Irish"},
 	{"italian", "it"},
 	{"italian", "Italian"},
+	{"lithuanian", "lt"},
+	{"lithuanian", "Lithuanian"},
+	{"nepali", "ne"},
+	{"nepali", "Nepali"},
 	{"norwegian", "no"},
 	{"norwegian", "Norwegian"},
 	{"portuguese", "pt"},
@@ -746,6 +757,8 @@ static const struct tsearch_config_match tsearch_config_languages[] =
 	{"spanish", "Spanish"},
 	{"swedish", "sv"},
 	{"swedish", "Swedish"},
+	{"tamil", "ta"},
+	{"tamil", "Tamil"},
 	{"turkish", "tr"},
 	{"turkish", "Turkish"},
 	{NULL, NULL}				/* end marker */
@@ -916,11 +929,14 @@ set_null_conf(void)
  * the postmaster either, and configure the cluster for System V shared
  * memory instead.
  */
-static char *
+static const char *
 choose_dsm_implementation(void)
 {
 #ifdef HAVE_SHM_OPEN
 	int			ntries = 10;
+
+	/* Initialize random(); this function is its only user in this program. */
+	srandom((unsigned int) (getpid() ^ time(NULL)));
 
 	while (ntries > 0)
 	{
@@ -952,9 +968,7 @@ choose_dsm_implementation(void)
 /*
  * Determine platform-specific config settings
  *
- * Use reasonable values if kernel will let us, else scale back.  Probe
- * for max_connections first since it is subject to more constraints than
- * shared_buffers.
+ * Use reasonable values if kernel will let us, else scale back.
  */
 static void
 test_config_settings(void)
@@ -983,7 +997,19 @@ test_config_settings(void)
 				test_buffs,
 				ok_buffers = 0;
 
+	/*
+	 * Need to determine working DSM implementation first so that subsequent
+	 * tests don't fail because DSM setting doesn't work.
+	 */
+	printf(_("selecting dynamic shared memory implementation ... "));
+	fflush(stdout);
+	dynamic_shared_memory_type = choose_dsm_implementation();
+	printf("%s\n", dynamic_shared_memory_type);
 
+	/*
+	 * Probe for max_connections before shared_buffers, since it is subject to
+	 * more constraints than shared_buffers.
+	 */
 	printf(_("selecting default max_connections ... "));
 	fflush(stdout);
 
@@ -996,10 +1022,11 @@ test_config_settings(void)
 				 "\"%s\" --boot -x0 %s "
 				 "-c max_connections=%d "
 				 "-c shared_buffers=%d "
-				 "-c dynamic_shared_memory_type=none "
+				 "-c dynamic_shared_memory_type=%s "
 				 "< \"%s\" > \"%s\" 2>&1",
 				 backend_exec, boot_options,
 				 test_conns, test_buffs,
+				 dynamic_shared_memory_type,
 				 DEVNULL, DEVNULL);
 		status = system(cmd);
 		if (status == 0)
@@ -1031,10 +1058,11 @@ test_config_settings(void)
 				 "\"%s\" --boot -x0 %s "
 				 "-c max_connections=%d "
 				 "-c shared_buffers=%d "
-				 "-c dynamic_shared_memory_type=none "
+				 "-c dynamic_shared_memory_type=%s "
 				 "< \"%s\" > \"%s\" 2>&1",
 				 backend_exec, boot_options,
 				 n_connections, test_buffs,
+				 dynamic_shared_memory_type,
 				 DEVNULL, DEVNULL);
 		status = system(cmd);
 		if (status == 0)
@@ -1047,10 +1075,10 @@ test_config_settings(void)
 	else
 		printf("%dkB\n", n_buffers * (BLCKSZ / 1024));
 
-	printf(_("selecting dynamic shared memory implementation ... "));
+	printf(_("selecting default timezone ... "));
 	fflush(stdout);
-	dynamic_shared_memory_type = choose_dsm_implementation();
-	printf("%s\n", dynamic_shared_memory_type);
+	default_timezone = select_default_timezone(share_path);
+	printf("%s\n", default_timezone ? default_timezone : "GMT");
 }
 
 /*
@@ -1079,7 +1107,6 @@ setup_config(void)
 	char	  **conflines;
 	char		repltok[MAXPGPATH];
 	char		path[MAXPGPATH];
-	const char *default_timezone;
 	char	   *autoconflines[3];
 
 	fputs(_("creating configuration files ... "), stdout);
@@ -1161,7 +1188,6 @@ setup_config(void)
 							  "#default_text_search_config = 'pg_catalog.simple'",
 							  repltok);
 
-	default_timezone = select_default_timezone(share_path);
 	if (default_timezone)
 	{
 		snprintf(repltok, sizeof(repltok), "timezone = '%s'",
@@ -1684,7 +1710,7 @@ setup_description(FILE *cmdfd)
 				"	objoid oid, "
 				"	classname name, "
 				"	objsubid int4, "
-				"	description text) WITHOUT OIDS;\n\n");
+				"	description text);\n\n");
 
 	PG_CMD_PRINTF1("COPY tmp_pg_description FROM E'%s';\n\n",
 				   escape_quotes(desc_file));
@@ -1697,7 +1723,7 @@ setup_description(FILE *cmdfd)
 	PG_CMD_PUTS("CREATE TEMP TABLE tmp_pg_shdescription ( "
 				" objoid oid, "
 				" classname name, "
-				" description text) WITHOUT OIDS;\n\n");
+				" description text);\n\n");
 
 	PG_CMD_PRINTF1("COPY tmp_pg_shdescription FROM E'%s';\n\n",
 				   escape_quotes(shdesc_file));
@@ -1740,7 +1766,8 @@ setup_collation(FILE *cmdfd)
 	 * in pg_collation.h.  But add it before reading system collations, so
 	 * that it wins if libc defines a locale named ucs_basic.
 	 */
-	PG_CMD_PRINTF3("INSERT INTO pg_collation (collname, collnamespace, collowner, collprovider, collencoding, collcollate, collctype) VALUES ('ucs_basic', 'pg_catalog'::regnamespace, %u, '%c', %d, 'C', 'C');\n\n",
+	PG_CMD_PRINTF3("INSERT INTO pg_collation (oid, collname, collnamespace, collowner, collprovider, collencoding, collcollate, collctype)"
+				   "VALUES (pg_nextoid('pg_catalog.pg_collation', 'oid', 'pg_catalog.pg_collation_oid_index'), 'ucs_basic', 'pg_catalog'::regnamespace, %u, '%c', %d, 'C', 'C');\n\n",
 				   BOOTSTRAP_SUPERUSERID, COLLPROVIDER_LIBC, PG_UTF8);
 
 	/* Now import all collations we can find in the operating system */
@@ -2915,7 +2942,7 @@ create_xlog_or_symlink(void)
 			exit_nicely();
 		}
 #else
-		fprintf(stderr, _("%s: symlinks are not supported on this platform"));
+		fprintf(stderr, _("%s: symlinks are not supported on this platform\n"), progname);
 		exit_nicely();
 #endif
 	}

@@ -75,7 +75,6 @@ typedef struct _SPI_plan *SPIPlanPtr;
 #define SPI_restore_connection()	((void) 0)
 
 extern PGDLLIMPORT uint64 SPI_processed;
-extern PGDLLIMPORT Oid SPI_lastoid;
 extern PGDLLIMPORT SPITupleTable *SPI_tuptable;
 extern PGDLLIMPORT int SPI_result;
 
@@ -166,5 +165,6 @@ extern void SPI_rollback(void);
 extern void SPICleanup(void);
 extern void AtEOXact_SPI(bool isCommit);
 extern void AtEOSubXact_SPI(bool isCommit, SubTransactionId mySubid);
+extern bool SPI_inside_nonatomic_context(void);
 
 #endif							/* SPI_H */

@@ -22,6 +22,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_clause.h"
+#include "parser/parse_collate.h"
 #include "parser/parse_node.h"
 #include "parser/parse_relation.h"
 #include "rewrite/rowsecurity.h"
@@ -80,8 +81,8 @@ test_rls_hooks_permissive(CmdType cmdtype, Relation relation)
 
 	qual_pstate = make_parsestate(NULL);
 
-	rte = addRangeTableEntryForRelation(qual_pstate, relation, NULL, false,
-										false);
+	rte = addRangeTableEntryForRelation(qual_pstate, relation, AccessShareLock,
+										NULL, false, false);
 	addRTEtoQuery(qual_pstate, rte, false, true, true);
 
 	role = ObjectIdGetDatum(ACL_ID_PUBLIC);
@@ -107,6 +108,8 @@ test_rls_hooks_permissive(CmdType cmdtype, Relation relation)
 	policy->qual = (Expr *) transformWhereClause(qual_pstate, copyObject(e),
 												 EXPR_KIND_POLICY,
 												 "POLICY");
+	/* Fix up collation information */
+	assign_expr_collations(qual_pstate, (Node *) policy->qual);
 
 	policy->with_check_qual = copyObject(policy->qual);
 	policy->hassublinks = false;
@@ -143,8 +146,8 @@ test_rls_hooks_restrictive(CmdType cmdtype, Relation relation)
 
 	qual_pstate = make_parsestate(NULL);
 
-	rte = addRangeTableEntryForRelation(qual_pstate, relation, NULL, false,
-										false);
+	rte = addRangeTableEntryForRelation(qual_pstate, relation, AccessShareLock,
+										NULL, false, false);
 	addRTEtoQuery(qual_pstate, rte, false, true, true);
 
 	role = ObjectIdGetDatum(ACL_ID_PUBLIC);
@@ -165,6 +168,8 @@ test_rls_hooks_restrictive(CmdType cmdtype, Relation relation)
 	policy->qual = (Expr *) transformWhereClause(qual_pstate, copyObject(e),
 												 EXPR_KIND_POLICY,
 												 "POLICY");
+	/* Fix up collation information */
+	assign_expr_collations(qual_pstate, (Node *) policy->qual);
 
 	policy->with_check_qual = copyObject(policy->qual);
 	policy->hassublinks = false;

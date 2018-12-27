@@ -374,10 +374,20 @@ lazy_vacuum_rel(Relation onerel, int options, VacuumParams *params,
 			 * emitting individual parts of the message when not applicable.
 			 */
 			initStringInfo(&buf);
-			if (aggressive)
-				msgfmt = _("automatic aggressive vacuum of table \"%s.%s.%s\": index scans: %d\n");
+			if (params->is_wraparound)
+			{
+				if (aggressive)
+					msgfmt = _("automatic aggressive vacuum to prevent wraparound of table \"%s.%s.%s\": index scans: %d\n");
+				else
+					msgfmt = _("automatic vacuum to prevent wraparound of table \"%s.%s.%s\": index scans: %d\n");
+			}
 			else
-				msgfmt = _("automatic vacuum of table \"%s.%s.%s\": index scans: %d\n");
+			{
+				if (aggressive)
+					msgfmt = _("automatic aggressive vacuum of table \"%s.%s.%s\": index scans: %d\n");
+				else
+					msgfmt = _("automatic vacuum of table \"%s.%s.%s\": index scans: %d\n");
+			}
 			appendStringInfo(&buf, msgfmt,
 							 get_database_name(MyDatabaseId),
 							 get_namespace_name(RelationGetNamespace(onerel)),
@@ -1043,12 +1053,6 @@ lazy_scan_heap(Relation onerel, int options, LVRelStats *vacrelstats,
 					all_visible = false;
 					break;
 				case HEAPTUPLE_LIVE:
-					/* Tuple is good --- but let's do some validity checks */
-					if (onerel->rd_rel->relhasoids &&
-						!OidIsValid(HeapTupleGetOid(&tuple)))
-						elog(WARNING, "relation \"%s\" TID %u/%u: OID is invalid",
-							 relname, blkno, offnum);
-
 					/*
 					 * Count it as live.  Not only is this natural, but it's
 					 * also what acquire_sample_rows() does.

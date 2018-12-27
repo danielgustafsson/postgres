@@ -741,9 +741,6 @@ ER_get_flat_size(ExpandedObjectHeader *eohptr)
 	if (hasnull)
 		len += BITMAPLEN(tupdesc->natts);
 
-	if (tupdesc->tdhasoid)
-		len += sizeof(Oid);
-
 	hoff = len = MAXALIGN(len); /* align user data safely */
 
 	data_len = heap_compute_data_size(tupdesc, erh->dvalues, erh->dnulls);
@@ -803,9 +800,6 @@ ER_flatten_into(ExpandedObjectHeader *eohptr,
 
 	HeapTupleHeaderSetNatts(tuphdr, tupdesc->natts);
 	tuphdr->t_hoff = erh->hoff;
-
-	if (tupdesc->tdhasoid)		/* else leave infomask = 0 */
-		tuphdr->t_infomask = HEAP_HASOID;
 
 	/* And fill the data area from dvalues/dnulls */
 	heap_fill_tuple(tupdesc,
@@ -1025,6 +1019,7 @@ expanded_record_lookup_field(ExpandedRecordHeader *erh, const char *fieldname,
 	TupleDesc	tupdesc;
 	int			fno;
 	Form_pg_attribute attr;
+	const FormData_pg_attribute *sysattr;
 
 	tupdesc = expanded_record_get_tupdesc(erh);
 
@@ -1044,13 +1039,13 @@ expanded_record_lookup_field(ExpandedRecordHeader *erh, const char *fieldname,
 	}
 
 	/* How about system attributes? */
-	attr = SystemAttributeByName(fieldname, tupdesc->tdhasoid);
-	if (attr != NULL)
+	sysattr = SystemAttributeByName(fieldname);
+	if (sysattr != NULL)
 	{
-		finfo->fnumber = attr->attnum;
-		finfo->ftypeid = attr->atttypid;
-		finfo->ftypmod = attr->atttypmod;
-		finfo->fcollation = attr->attcollation;
+		finfo->fnumber = sysattr->attnum;
+		finfo->ftypeid = sysattr->atttypid;
+		finfo->ftypmod = sysattr->atttypmod;
+		finfo->fcollation = sysattr->attcollation;
 		return true;
 	}
 

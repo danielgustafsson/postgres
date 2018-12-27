@@ -708,7 +708,17 @@ AcceptInvalidationMessages(void)
 		}
 	}
 #elif defined(CLOBBER_CACHE_RECURSIVELY)
-	InvalidateSystemCaches();
+	{
+		static int	recursion_depth = 0;
+
+		/* Maximum depth is arbitrary depending on your threshold of pain */
+		if (recursion_depth < 3)
+		{
+			recursion_depth++;
+			InvalidateSystemCaches();
+			recursion_depth--;
+		}
+	}
 #endif
 }
 
@@ -1156,7 +1166,7 @@ CacheInvalidateHeapTuple(Relation relation,
 	{
 		Form_pg_class classtup = (Form_pg_class) GETSTRUCT(tuple);
 
-		relationId = HeapTupleGetOid(tuple);
+		relationId = classtup->oid;
 		if (classtup->relisshared)
 			databaseId = InvalidOid;
 		else
@@ -1282,7 +1292,7 @@ CacheInvalidateRelcacheByTuple(HeapTuple classTuple)
 
 	PrepareInvalidationState();
 
-	relationId = HeapTupleGetOid(classTuple);
+	relationId = classtup->oid;
 	if (classtup->relisshared)
 		databaseId = InvalidOid;
 	else

@@ -261,8 +261,7 @@ static void write_relcache_init_file(bool shared);
 static void write_item(const void *data, Size len, FILE *fp);
 
 static void formrdesc(const char *relationName, Oid relationReltype,
-		  bool isshared, bool hasoids,
-		  int natts, const FormData_pg_attribute *attrs);
+		  bool isshared, int natts, const FormData_pg_attribute *attrs);
 
 static HeapTuple ScanPgRelation(Oid targetRelId, bool indexOK, bool force_non_historic);
 static Relation AllocateRelationDesc(Form_pg_class relp);
@@ -328,7 +327,7 @@ ScanPgRelation(Oid targetRelId, bool indexOK, bool force_non_historic)
 	 * form a scan key
 	 */
 	ScanKeyInit(&key[0],
-				ObjectIdAttributeNumber,
+				Anum_pg_class_oid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(targetRelId));
 
@@ -414,8 +413,7 @@ AllocateRelationDesc(Form_pg_class relp)
 	relation->rd_rel = relationForm;
 
 	/* and allocate attribute tuple form storage */
-	relation->rd_att = CreateTemplateTupleDesc(relationForm->relnatts,
-											   relationForm->relhasoids);
+	relation->rd_att = CreateTemplateTupleDesc(relationForm->relnatts);
 	/* which we mark as a reference-counted tupdesc */
 	relation->rd_att->tdrefcount = 1;
 
@@ -505,7 +503,6 @@ RelationBuildTupleDesc(Relation relation)
 	/* copy some fields from pg_class row to rd_att */
 	relation->rd_att->tdtypeid = relation->rd_rel->reltype;
 	relation->rd_att->tdtypmod = -1;	/* unnecessary, but... */
-	relation->rd_att->tdhasoid = relation->rd_rel->relhasoids;
 
 	constr = (TupleConstr *) MemoryContextAlloc(CacheMemoryContext,
 												sizeof(TupleConstr));
@@ -789,7 +786,7 @@ RelationBuildRuleLock(Relation relation)
 		rule = (RewriteRule *) MemoryContextAlloc(rulescxt,
 												  sizeof(RewriteRule));
 
-		rule->ruleId = HeapTupleGetOid(rewrite_tuple);
+		rule->ruleId = rewrite_form->oid;
 
 		rule->event = rewrite_form->ev_type - '0';
 		rule->enabled = rewrite_form->ev_enabled;
@@ -1090,8 +1087,8 @@ RelationBuildDesc(Oid targetRelId, bool insertIt)
 	/*
 	 * get information from the pg_class_tuple
 	 */
-	relid = HeapTupleGetOid(pg_class_tuple);
 	relp = (Form_pg_class) GETSTRUCT(pg_class_tuple);
+	relid = relp->oid;
 	Assert(relid == targetRelId);
 
 	/*
@@ -1641,7 +1638,7 @@ LookupOpclassInfo(Oid operatorClassOid,
 	 * work while bootstrapping.
 	 */
 	ScanKeyInit(&skey[0],
-				ObjectIdAttributeNumber,
+				Anum_pg_opclass_oid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(operatorClassOid));
 	rel = heap_open(OperatorClassRelationId, AccessShareLock);
@@ -1725,7 +1722,7 @@ LookupOpclassInfo(Oid operatorClassOid,
  */
 static void
 formrdesc(const char *relationName, Oid relationReltype,
-		  bool isshared, bool hasoids,
+		  bool isshared,
 		  int natts, const FormData_pg_attribute *attrs)
 {
 	Relation	relation;
@@ -1789,7 +1786,6 @@ formrdesc(const char *relationName, Oid relationReltype,
 	relation->rd_rel->reltuples = 0;
 	relation->rd_rel->relallvisible = 0;
 	relation->rd_rel->relkind = RELKIND_RELATION;
-	relation->rd_rel->relhasoids = hasoids;
 	relation->rd_rel->relnatts = (int16) natts;
 
 	/*
@@ -1799,7 +1795,7 @@ formrdesc(const char *relationName, Oid relationReltype,
 	 * because it will never be replaced.  The data comes from
 	 * src/include/catalog/ headers via genbki.pl.
 	 */
-	relation->rd_att = CreateTemplateTupleDesc(natts, hasoids);
+	relation->rd_att = CreateTemplateTupleDesc(natts);
 	relation->rd_att->tdrefcount = 1;	/* mark as refcounted */
 
 	relation->rd_att->tdtypeid = relationReltype;
@@ -2964,7 +2960,6 @@ AtEOXact_cleanup(Relation relation, bool isCommit)
 	{
 		list_free(relation->rd_indexlist);
 		relation->rd_indexlist = NIL;
-		relation->rd_oidindex = InvalidOid;
 		relation->rd_pkindex = InvalidOid;
 		relation->rd_replidindex = InvalidOid;
 		relation->rd_indexvalid = 0;
@@ -3077,7 +3072,6 @@ AtEOSubXact_cleanup(Relation relation, bool isCommit,
 	{
 		list_free(relation->rd_indexlist);
 		relation->rd_indexlist = NIL;
-		relation->rd_oidindex = InvalidOid;
 		relation->rd_pkindex = InvalidOid;
 		relation->rd_replidindex = InvalidOid;
 		relation->rd_indexvalid = 0;
@@ -3208,7 +3202,6 @@ RelationBuildLocalRelation(const char *relname,
 	rel->rd_rel->relnamespace = relnamespace;
 
 	rel->rd_rel->relkind = relkind;
-	rel->rd_rel->relhasoids = rel->rd_att->tdhasoid;
 	rel->rd_rel->relnatts = natts;
 	rel->rd_rel->reltype = InvalidOid;
 	/* needed when bootstrapping: */
@@ -3508,15 +3501,15 @@ RelationCacheInitializePhase2(void)
 	if (!load_relcache_init_file(true))
 	{
 		formrdesc("pg_database", DatabaseRelation_Rowtype_Id, true,
-				  true, Natts_pg_database, Desc_pg_database);
+				  Natts_pg_database, Desc_pg_database);
 		formrdesc("pg_authid", AuthIdRelation_Rowtype_Id, true,
-				  true, Natts_pg_authid, Desc_pg_authid);
+				  Natts_pg_authid, Desc_pg_authid);
 		formrdesc("pg_auth_members", AuthMemRelation_Rowtype_Id, true,
-				  false, Natts_pg_auth_members, Desc_pg_auth_members);
+				  Natts_pg_auth_members, Desc_pg_auth_members);
 		formrdesc("pg_shseclabel", SharedSecLabelRelation_Rowtype_Id, true,
-				  false, Natts_pg_shseclabel, Desc_pg_shseclabel);
+				  Natts_pg_shseclabel, Desc_pg_shseclabel);
 		formrdesc("pg_subscription", SubscriptionRelation_Rowtype_Id, true,
-				  true, Natts_pg_subscription, Desc_pg_subscription);
+				  Natts_pg_subscription, Desc_pg_subscription);
 
 #define NUM_CRITICAL_SHARED_RELS	5	/* fix if you change list above */
 	}
@@ -3567,13 +3560,13 @@ RelationCacheInitializePhase3(void)
 		needNewCacheFile = true;
 
 		formrdesc("pg_class", RelationRelation_Rowtype_Id, false,
-				  true, Natts_pg_class, Desc_pg_class);
+				  Natts_pg_class, Desc_pg_class);
 		formrdesc("pg_attribute", AttributeRelation_Rowtype_Id, false,
-				  false, Natts_pg_attribute, Desc_pg_attribute);
+				  Natts_pg_attribute, Desc_pg_attribute);
 		formrdesc("pg_proc", ProcedureRelation_Rowtype_Id, false,
-				  true, Natts_pg_proc, Desc_pg_proc);
+				  Natts_pg_proc, Desc_pg_proc);
 		formrdesc("pg_type", TypeRelation_Rowtype_Id, false,
-				  true, Natts_pg_type, Desc_pg_type);
+				  Natts_pg_type, Desc_pg_type);
 
 #define NUM_CRITICAL_LOCAL_RELS 4	/* fix if you change list above */
 	}
@@ -3725,7 +3718,6 @@ RelationCacheInitializePhase3(void)
 			 */
 			Assert(relation->rd_att->tdtypeid == relp->reltype);
 			Assert(relation->rd_att->tdtypmod == -1);
-			Assert(relation->rd_att->tdhasoid == relp->relhasoids);
 
 			ReleaseSysCache(htup);
 
@@ -3868,8 +3860,7 @@ load_critical_index(Oid indexoid, Oid heapoid)
  * extracting fields.
  */
 static TupleDesc
-BuildHardcodedDescriptor(int natts, const FormData_pg_attribute *attrs,
-						 bool hasoids)
+BuildHardcodedDescriptor(int natts, const FormData_pg_attribute *attrs)
 {
 	TupleDesc	result;
 	MemoryContext oldcxt;
@@ -3877,7 +3868,7 @@ BuildHardcodedDescriptor(int natts, const FormData_pg_attribute *attrs,
 
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 
-	result = CreateTemplateTupleDesc(natts, hasoids);
+	result = CreateTemplateTupleDesc(natts);
 	result->tdtypeid = RECORDOID;	/* not right, but we don't care */
 	result->tdtypmod = -1;
 
@@ -3906,8 +3897,7 @@ GetPgClassDescriptor(void)
 	/* Already done? */
 	if (pgclassdesc == NULL)
 		pgclassdesc = BuildHardcodedDescriptor(Natts_pg_class,
-											   Desc_pg_class,
-											   true);
+											   Desc_pg_class);
 
 	return pgclassdesc;
 }
@@ -3920,8 +3910,7 @@ GetPgIndexDescriptor(void)
 	/* Already done? */
 	if (pgindexdesc == NULL)
 		pgindexdesc = BuildHardcodedDescriptor(Natts_pg_index,
-											   Desc_pg_index,
-											   false);
+											   Desc_pg_index);
 
 	return pgindexdesc;
 }
@@ -4016,7 +4005,7 @@ CheckConstraintFetch(Relation relation)
 				ObjectIdGetDatum(RelationGetRelid(relation)));
 
 	conrel = heap_open(ConstraintRelationId, AccessShareLock);
-	conscan = systable_beginscan(conrel, ConstraintRelidIndexId, true,
+	conscan = systable_beginscan(conrel, ConstraintRelidTypidNameIndexId, true,
 								 NULL, 1, skey);
 
 	while (HeapTupleIsValid(htup = systable_getnext(conscan)))
@@ -4108,8 +4097,9 @@ RelationGetFKeyList(Relation relation)
 	if (relation->rd_fkeyvalid)
 		return relation->rd_fkeylist;
 
-	/* Fast path: if it doesn't have any triggers, it can't have FKs */
-	if (!relation->rd_rel->relhastriggers)
+	/* Fast path: non-partitioned tables without triggers can't have FKs */
+	if (!relation->rd_rel->relhastriggers &&
+		relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
 		return NIL;
 
 	/*
@@ -4127,7 +4117,7 @@ RelationGetFKeyList(Relation relation)
 				ObjectIdGetDatum(RelationGetRelid(relation)));
 
 	conrel = heap_open(ConstraintRelationId, AccessShareLock);
-	conscan = systable_beginscan(conrel, ConstraintRelidIndexId, true,
+	conscan = systable_beginscan(conrel, ConstraintRelidTypidNameIndexId, true,
 								 NULL, 1, &skey);
 
 	while (HeapTupleIsValid(htup = systable_getnext(conscan)))
@@ -4144,6 +4134,7 @@ RelationGetFKeyList(Relation relation)
 			continue;
 
 		info = makeNode(ForeignKeyCacheInfo);
+		info->conoid = constraint->oid;
 		info->conrelid = constraint->conrelid;
 		info->confrelid = constraint->confrelid;
 
@@ -4230,7 +4221,7 @@ RelationGetFKeyList(Relation relation)
  * so that we must recompute the index list on next request.  This handles
  * creation or deletion of an index.
  *
- * Indexes that are marked not IndexIsLive are omitted from the returned list.
+ * Indexes that are marked not indislive are omitted from the returned list.
  * Such indexes are expected to be dropped momentarily, and should not be
  * touched at all by any caller of this function.
  *
@@ -4245,11 +4236,6 @@ RelationGetFKeyList(Relation relation)
  * may list_free() the returned list after scanning it. This is necessary
  * since the caller will typically be doing syscache lookups on the relevant
  * indexes, and syscache lookup could cause SI messages to be processed!
- *
- * We also update rd_oidindex, which this module treats as effectively part
- * of the index list.  rd_oidindex is valid when rd_indexvalid isn't zero;
- * it is the pg_class OID of a unique index on OID when the relation has one,
- * and InvalidOid if there is no such index.
  *
  * In exactly the same way, we update rd_pkindex, which is the OID of the
  * relation's primary key index if any, else InvalidOid; and rd_replidindex,
@@ -4266,7 +4252,6 @@ RelationGetIndexList(Relation relation)
 	List	   *result;
 	List	   *oldlist;
 	char		replident = relation->rd_rel->relreplident;
-	Oid			oidIndex = InvalidOid;
 	Oid			pkeyIndex = InvalidOid;
 	Oid			candidateIndex = InvalidOid;
 	MemoryContext oldcxt;
@@ -4282,7 +4267,6 @@ RelationGetIndexList(Relation relation)
 	 * if we get some sort of error partway through.
 	 */
 	result = NIL;
-	oidIndex = InvalidOid;
 
 	/* Prepare to scan pg_index for entries having indrelid = this rel. */
 	ScanKeyInit(&skey,
@@ -4297,9 +4281,6 @@ RelationGetIndexList(Relation relation)
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
 	{
 		Form_pg_index index = (Form_pg_index) GETSTRUCT(htup);
-		Datum		indclassDatum;
-		oidvector  *indclass;
-		bool		isnull;
 
 		/*
 		 * Ignore any indexes that are currently being dropped.  This will
@@ -4307,39 +4288,21 @@ RelationGetIndexList(Relation relation)
 		 * HOT-safety decisions.  It's unsafe to touch such an index at all
 		 * since its catalog entries could disappear at any instant.
 		 */
-		if (!IndexIsLive(index))
+		if (!index->indislive)
 			continue;
 
 		/* Add index's OID to result list in the proper order */
 		result = insert_ordered_oid(result, index->indexrelid);
 
 		/*
-		 * indclass cannot be referenced directly through the C struct,
-		 * because it comes after the variable-width indkey field.  Must
-		 * extract the datum the hard way...
-		 */
-		indclassDatum = heap_getattr(htup,
-									 Anum_pg_index_indclass,
-									 GetPgIndexDescriptor(),
-									 &isnull);
-		Assert(!isnull);
-		indclass = (oidvector *) DatumGetPointer(indclassDatum);
-
-		/*
 		 * Invalid, non-unique, non-immediate or predicate indexes aren't
 		 * interesting for either oid indexes or replication identity indexes,
 		 * so don't check them.
 		 */
-		if (!IndexIsValid(index) || !index->indisunique ||
+		if (!index->indisvalid || !index->indisunique ||
 			!index->indimmediate ||
 			!heap_attisnull(htup, Anum_pg_index_indpred, NULL))
 			continue;
-
-		/* Check to see if is a usable btree index on OID */
-		if (index->indnatts == 1 &&
-			index->indkey.values[0] == ObjectIdAttributeNumber &&
-			indclass->values[0] == OID_BTREE_OPS_OID)
-			oidIndex = index->indexrelid;
 
 		/* remember primary key index if any */
 		if (index->indisprimary)
@@ -4358,7 +4321,6 @@ RelationGetIndexList(Relation relation)
 	oldcxt = MemoryContextSwitchTo(CacheMemoryContext);
 	oldlist = relation->rd_indexlist;
 	relation->rd_indexlist = list_copy(result);
-	relation->rd_oidindex = oidIndex;
 	relation->rd_pkindex = pkeyIndex;
 	if (replident == REPLICA_IDENTITY_DEFAULT && OidIsValid(pkeyIndex))
 		relation->rd_replidindex = pkeyIndex;
@@ -4433,7 +4395,11 @@ RelationGetStatExtList(Relation relation)
 								 NULL, 1, &skey);
 
 	while (HeapTupleIsValid(htup = systable_getnext(indscan)))
-		result = insert_ordered_oid(result, HeapTupleGetOid(htup));
+	{
+		Oid oid = ((Form_pg_statistic_ext) GETSTRUCT(htup))->oid;
+
+		result = insert_ordered_oid(result, oid);
+	}
 
 	systable_endscan(indscan);
 
@@ -4508,7 +4474,7 @@ insert_ordered_oid(List *list, Oid datum)
  * touch rd_keyattr, rd_pkattr or rd_idattr.
  */
 void
-RelationSetIndexList(Relation relation, List *indexIds, Oid oidIndex)
+RelationSetIndexList(Relation relation, List *indexIds)
 {
 	MemoryContext oldcxt;
 
@@ -4520,7 +4486,6 @@ RelationSetIndexList(Relation relation, List *indexIds, Oid oidIndex)
 	/* Okay to replace old list */
 	list_free(relation->rd_indexlist);
 	relation->rd_indexlist = indexIds;
-	relation->rd_oidindex = oidIndex;
 
 	/*
 	 * For the moment, assume the target rel hasn't got a pk or replica index.
@@ -4531,34 +4496,6 @@ RelationSetIndexList(Relation relation, List *indexIds, Oid oidIndex)
 	relation->rd_indexvalid = 2;	/* mark list as forced */
 	/* Flag relation as needing eoxact cleanup (to reset the list) */
 	EOXactListAdd(relation);
-}
-
-/*
- * RelationGetOidIndex -- get the pg_class OID of the relation's OID index
- *
- * Returns InvalidOid if there is no such index.
- */
-Oid
-RelationGetOidIndex(Relation relation)
-{
-	List	   *ilist;
-
-	/*
-	 * If relation doesn't have OIDs at all, caller is probably confused. (We
-	 * could just silently return InvalidOid, but it seems better to throw an
-	 * assertion.)
-	 */
-	Assert(relation->rd_rel->relhasoids);
-
-	if (relation->rd_indexvalid == 0)
-	{
-		/* RelationGetIndexList does the heavy lifting. */
-		ilist = RelationGetIndexList(relation);
-		list_free(ilist);
-		Assert(relation->rd_indexvalid != 0);
-	}
-
-	return relation->rd_oidindex;
 }
 
 /*
@@ -4753,6 +4690,7 @@ IsProjectionFunctionalIndex(Relation index, IndexInfo *ii)
 {
 	bool		is_projection = false;
 
+#ifdef NOT_USED
 	if (ii->ii_Expressions)
 	{
 		HeapTuple	tuple;
@@ -4798,6 +4736,8 @@ IsProjectionFunctionalIndex(Relation index, IndexInfo *ii)
 		}
 		ReleaseSysCache(tuple);
 	}
+#endif
+
 	return is_projection;
 }
 
@@ -5105,6 +5045,10 @@ RelationGetExclusionInfo(Relation indexRelation,
 	 * Search pg_constraint for the constraint associated with the index. To
 	 * make this not too painfully slow, we use the index on conrelid; that
 	 * will hold the parent relation's OID not the index's own OID.
+	 *
+	 * Note: if we wanted to rely on the constraint name matching the index's
+	 * name, we could just do a direct lookup using pg_constraint's unique
+	 * index.  For the moment it doesn't seem worth requiring that.
 	 */
 	ScanKeyInit(&skey[0],
 				Anum_pg_constraint_conrelid,
@@ -5112,7 +5056,7 @@ RelationGetExclusionInfo(Relation indexRelation,
 				ObjectIdGetDatum(indexRelation->rd_index->indrelid));
 
 	conrel = heap_open(ConstraintRelationId, AccessShareLock);
-	conscan = systable_beginscan(conrel, ConstraintRelidIndexId, true,
+	conscan = systable_beginscan(conrel, ConstraintRelidTypidNameIndexId, true,
 								 NULL, 1, skey);
 	found = false;
 
@@ -5463,8 +5407,7 @@ load_relcache_init_file(bool shared)
 		rel->rd_rel = relform;
 
 		/* initialize attribute tuple forms */
-		rel->rd_att = CreateTemplateTupleDesc(relform->relnatts,
-											  relform->relhasoids);
+		rel->rd_att = CreateTemplateTupleDesc(relform->relnatts);
 		rel->rd_att->tdrefcount = 1;	/* mark as refcounted */
 
 		rel->rd_att->tdtypeid = relform->reltype;
@@ -5668,7 +5611,6 @@ load_relcache_init_file(bool shared)
 		rel->rd_fkeylist = NIL;
 		rel->rd_fkeyvalid = false;
 		rel->rd_indexlist = NIL;
-		rel->rd_oidindex = InvalidOid;
 		rel->rd_pkindex = InvalidOid;
 		rel->rd_replidindex = InvalidOid;
 		rel->rd_indexattr = NULL;

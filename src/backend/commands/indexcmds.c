@@ -34,6 +34,7 @@
 #include "commands/comment.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "commands/event_trigger.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
 #include "mb/pg_wchar.h"
@@ -171,8 +172,8 @@ CheckIndexCompatible(Oid oldId,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
 				 errmsg("access method \"%s\" does not exist",
 						accessMethodName)));
-	accessMethodId = HeapTupleGetOid(tuple);
 	accessMethodForm = (Form_pg_am) GETSTRUCT(tuple);
+	accessMethodId = accessMethodForm->oid;
 	amRoutine = GetIndexAmRoutine(accessMethodForm->amhandler);
 	ReleaseSysCache(tuple);
 
@@ -223,7 +224,7 @@ CheckIndexCompatible(Oid oldId,
 	 */
 	if (!(heap_attisnull(tuple, Anum_pg_index_indpred, NULL) &&
 		  heap_attisnull(tuple, Anum_pg_index_indexprs, NULL) &&
-		  IndexIsValid(indexForm)))
+		  indexForm->indisvalid))
 	{
 		ReleaseSysCache(tuple);
 		return false;
@@ -368,11 +369,6 @@ DefineIndex(Oid relationId,
 	LOCKMODE	lockmode;
 	Snapshot	snapshot;
 	int			i;
-
-	if (list_intersection(stmt->indexParams, stmt->indexIncludingParams) != NIL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
-				 errmsg("included columns must not intersect with key columns")));
 
 	/*
 	 * count key attributes in index
@@ -587,8 +583,8 @@ DefineIndex(Oid relationId,
 					 errmsg("access method \"%s\" does not exist",
 							accessMethodName)));
 	}
-	accessMethodId = HeapTupleGetOid(tuple);
 	accessMethodForm = (Form_pg_am) GETSTRUCT(tuple);
+	accessMethodId = accessMethodForm->oid;
 	amRoutine = GetIndexAmRoutine(accessMethodForm->amhandler);
 
 	if (stmt->unique && !amRoutine->amcanunique)
@@ -596,7 +592,7 @@ DefineIndex(Oid relationId,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("access method \"%s\" does not support unique indexes",
 						accessMethodName)));
-	if (list_length(stmt->indexIncludingParams) > 0 && !amRoutine->amcaninclude)
+	if (stmt->indexIncludingParams != NIL && !amRoutine->amcaninclude)
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("access method \"%s\" does not support included columns",
@@ -671,7 +667,7 @@ DefineIndex(Oid relationId,
 	 * Extra checks when creating a PRIMARY KEY index.
 	 */
 	if (stmt->primary)
-		index_check_primary_key(rel, indexInfo, is_alter_table);
+		index_check_primary_key(rel, indexInfo, is_alter_table, stmt);
 
 	/*
 	 * If this table is partitioned and we're creating a unique index or a
@@ -752,14 +748,14 @@ DefineIndex(Oid relationId,
 
 
 	/*
-	 * We disallow indexes on system columns other than OID.  They would not
-	 * necessarily get updated correctly, and they don't seem useful anyway.
+	 * We disallow indexes on system columns.  They would not necessarily get
+	 * updated correctly, and they don't seem useful anyway.
 	 */
 	for (i = 0; i < indexInfo->ii_NumIndexAttrs; i++)
 	{
 		AttrNumber	attno = indexInfo->ii_IndexAttrNumbers[i];
 
-		if (attno < 0 && attno != ObjectIdAttributeNumber)
+		if (attno < 0)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("index creation on system columns is not supported")));
@@ -777,8 +773,7 @@ DefineIndex(Oid relationId,
 
 		for (i = FirstLowInvalidHeapAttributeNumber + 1; i < 0; i++)
 		{
-			if (i != ObjectIdAttributeNumber &&
-				bms_is_member(i - FirstLowInvalidHeapAttributeNumber,
+			if (bms_is_member(i - FirstLowInvalidHeapAttributeNumber,
 							  indexattrs))
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -838,8 +833,18 @@ DefineIndex(Oid relationId,
 		flags |= INDEX_CREATE_PARTITIONED;
 	if (stmt->primary)
 		flags |= INDEX_CREATE_IS_PRIMARY;
+
+	/*
+	 * If the table is partitioned, and recursion was declined but partitions
+	 * exist, mark the index as invalid.
+	 */
 	if (partitioned && stmt->relation && !stmt->relation->inh)
-		flags |= INDEX_CREATE_INVALID;
+	{
+		PartitionDesc	pd = RelationGetPartitionDesc(rel);
+
+		if (pd->nparts != 0)
+			flags |= INDEX_CREATE_INVALID;
+	}
 
 	if (stmt->deferrable)
 		constr_flags |= INDEX_CONSTR_CREATE_DEFERRABLE;
@@ -971,7 +976,7 @@ DefineIndex(Oid relationId,
 							ConstraintSetParentConstraint(cldConstrOid,
 														  createdConstraintId);
 
-						if (!IndexIsValid(cldidx->rd_index))
+						if (!cldidx->rd_index->indisvalid)
 							invalidate_parent = true;
 
 						found = true;
@@ -1002,7 +1007,7 @@ DefineIndex(Oid relationId,
 					 */
 					foreach(lc, childStmt->indexParams)
 					{
-						IndexElem *ielem = lfirst(lc);
+						IndexElem  *ielem = lfirst(lc);
 
 						/*
 						 * If the index parameter is an expression, we must
@@ -1033,7 +1038,7 @@ DefineIndex(Oid relationId,
 								indexRelationId,	/* this is our child */
 								createdConstraintId,
 								is_alter_table, check_rights, check_not_in_use,
-								false, quiet);
+								skip_build, quiet);
 				}
 
 				pfree(attmap);
@@ -1716,6 +1721,7 @@ ResolveOpClass(List *opclass, Oid attrType,
 	char	   *schemaname;
 	char	   *opcname;
 	HeapTuple	tuple;
+	Form_pg_opclass opform;
 	Oid			opClassId,
 				opInputType;
 
@@ -1800,8 +1806,9 @@ ResolveOpClass(List *opclass, Oid attrType,
 	 * Verify that the index operator class accepts this datatype.  Note we
 	 * will accept binary compatibility.
 	 */
-	opClassId = HeapTupleGetOid(tuple);
-	opInputType = ((Form_pg_opclass) GETSTRUCT(tuple))->opcintype;
+	opform = (Form_pg_opclass) GETSTRUCT(tuple);
+	opClassId = opform->oid;
+	opInputType = opform->opcintype;
 
 	if (!IsBinaryCoercible(attrType, opInputType))
 		ereport(ERROR,
@@ -1870,7 +1877,7 @@ GetDefaultOpClass(Oid type_id, Oid am_id)
 		if (opclass->opcintype == type_id)
 		{
 			nexact++;
-			result = HeapTupleGetOid(tup);
+			result = opclass->oid;
 		}
 		else if (nexact == 0 &&
 				 IsBinaryCoercible(type_id, opclass->opcintype))
@@ -1878,12 +1885,12 @@ GetDefaultOpClass(Oid type_id, Oid am_id)
 			if (IsPreferredType(tcategory, opclass->opcintype))
 			{
 				ncompatiblepreferred++;
-				result = HeapTupleGetOid(tup);
+				result = opclass->oid;
 			}
 			else if (ncompatiblepreferred == 0)
 			{
 				ncompatible++;
-				result = HeapTupleGetOid(tup);
+				result = opclass->oid;
 			}
 		}
 	}
@@ -2000,6 +2007,12 @@ makeObjectName(const char *name1, const char *name2, const char *label)
  * except that the label can't be NULL; digits will be appended to the label
  * if needed to create a name that is unique within the specified namespace.
  *
+ * If isconstraint is true, we also avoid choosing a name matching any
+ * existing constraint in the same namespace.  (This is stricter than what
+ * Postgres itself requires, but the SQL standard says that constraint names
+ * should be unique within schemas, so we follow that for autogenerated
+ * constraint names.)
+ *
  * Note: it is theoretically possible to get a collision anyway, if someone
  * else chooses the same name concurrently.  This is fairly unlikely to be
  * a problem in practice, especially if one is holding an exclusive lock on
@@ -2011,7 +2024,8 @@ makeObjectName(const char *name1, const char *name2, const char *label)
  */
 char *
 ChooseRelationName(const char *name1, const char *name2,
-				   const char *label, Oid namespaceid)
+				   const char *label, Oid namespaceid,
+				   bool isconstraint)
 {
 	int			pass = 0;
 	char	   *relname = NULL;
@@ -2025,7 +2039,11 @@ ChooseRelationName(const char *name1, const char *name2,
 		relname = makeObjectName(name1, name2, modlabel);
 
 		if (!OidIsValid(get_relname_relid(relname, namespaceid)))
-			break;
+		{
+			if (!isconstraint ||
+				!ConstraintNameExists(relname, namespaceid))
+				break;
+		}
 
 		/* found a conflict, so try a new name component */
 		pfree(relname);
@@ -2053,28 +2071,32 @@ ChooseIndexName(const char *tabname, Oid namespaceId,
 		indexname = ChooseRelationName(tabname,
 									   NULL,
 									   "pkey",
-									   namespaceId);
+									   namespaceId,
+									   true);
 	}
 	else if (exclusionOpNames != NIL)
 	{
 		indexname = ChooseRelationName(tabname,
 									   ChooseIndexNameAddition(colnames),
 									   "excl",
-									   namespaceId);
+									   namespaceId,
+									   true);
 	}
 	else if (isconstraint)
 	{
 		indexname = ChooseRelationName(tabname,
 									   ChooseIndexNameAddition(colnames),
 									   "key",
-									   namespaceId);
+									   namespaceId,
+									   true);
 	}
 	else
 	{
 		indexname = ChooseRelationName(tabname,
 									   ChooseIndexNameAddition(colnames),
 									   "idx",
-									   namespaceId);
+									   namespaceId,
+									   false);
 	}
 
 	return indexname;
@@ -2394,7 +2416,7 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
 	while ((tuple = heap_getnext(scan, ForwardScanDirection)) != NULL)
 	{
 		Form_pg_class classtuple = (Form_pg_class) GETSTRUCT(tuple);
-		Oid			relid = HeapTupleGetOid(tuple);
+		Oid			relid = classtuple->oid;
 
 		/*
 		 * Only regular tables and matviews can have indexes, so ignore any
@@ -2418,6 +2440,18 @@ ReindexMultipleTables(const char *objectName, ReindexObjectType objectKind,
 		/* Check user/system classification, and optionally skip */
 		if (objectKind == REINDEX_OBJECT_SYSTEM &&
 			!IsSystemClass(relid, classtuple))
+			continue;
+
+		/*
+		 * The table can be reindexed if the user is superuser, the table
+		 * owner, or the database/schema owner (but in the latter case, only
+		 * if it's not a shared relation).  pg_class_ownercheck includes the
+		 * superuser case, and depending on objectKind we already know that
+		 * the user has permission to run REINDEX on this database or schema
+		 * per the permission checks at the beginning of this routine.
+		 */
+		if (classtuple->relisshared &&
+			!pg_class_ownercheck(relid, GetUserId()))
 			continue;
 
 		/* Save the list of relation OIDs in private context */
@@ -2584,6 +2618,10 @@ IndexSetParentIndex(Relation partitionIdx, Oid parentOid)
 	/* done with pg_inherits */
 	systable_endscan(scan);
 	relation_close(pg_inherits, RowExclusiveLock);
+
+	/* set relhassubclass if an index partition has been added to the parent */
+	if (OidIsValid(parentOid))
+		SetRelationHasSubclass(parentOid, true);
 
 	if (fix_dependencies)
 	{

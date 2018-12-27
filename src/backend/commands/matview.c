@@ -184,9 +184,6 @@ ExecRefreshMatView(RefreshMatViewStmt *stmt, const char *queryString,
 				(errcode(ERRCODE_SYNTAX_ERROR),
 				 errmsg("CONCURRENTLY and WITH NO DATA options cannot be used together")));
 
-	/* We don't allow an oid column for a materialized view. */
-	Assert(!matviewRel->rd_rel->relhasoids);
-
 	/*
 	 * Check that everything is correct for a refresh. Problems at this point
 	 * are internal errors, so elog is sufficient.
@@ -408,7 +405,7 @@ refresh_matview_datafill(DestReceiver *dest, Query *query,
 								dest, NULL, NULL, 0);
 
 	/* call ExecutorStart to prepare the plan for execution */
-	ExecutorStart(queryDesc, EXEC_FLAG_WITHOUT_OIDS);
+	ExecutorStart(queryDesc, 0);
 
 	/* run the plan */
 	ExecutorRun(queryDesc, ForwardScanDirection, 0L, true);
@@ -484,7 +481,7 @@ transientrel_receive(TupleTableSlot *slot, DestReceiver *self)
 	 * get the heap tuple out of the tuple table slot, making sure we have a
 	 * writable copy
 	 */
-	tuple = ExecMaterializeSlot(slot);
+	tuple = ExecCopySlotHeapTuple(slot);
 
 	heap_insert(myState->transientrel,
 				tuple,
@@ -493,6 +490,9 @@ transientrel_receive(TupleTableSlot *slot, DestReceiver *self)
 				myState->bistate);
 
 	/* We know this is a newly created relation, so there are no indexes */
+
+	/* Free the copied tuple. */
+	heap_freetuple(tuple);
 
 	return true;
 }
@@ -870,7 +870,7 @@ is_usable_unique_index(Relation indexRel)
 	if (indexStruct->indisunique &&
 		indexStruct->indimmediate &&
 		indexRel->rd_rel->relam == BTREE_AM_OID &&
-		IndexIsValid(indexStruct) &&
+		indexStruct->indisvalid &&
 		RelationGetIndexPredicate(indexRel) == NIL &&
 		indexStruct->indnatts > 0)
 	{

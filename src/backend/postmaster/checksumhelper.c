@@ -669,7 +669,7 @@ BuildDatabaseList(void)
 
 		db = (ChecksumHelperDatabase *) palloc(sizeof(ChecksumHelperDatabase));
 
-		db->dboid = HeapTupleGetOid(tup);
+		db->dboid = pgdb->oid;
 		db->dbname = pstrdup(NameStr(pgdb->datname));
 
 		DatabaseList = lappend(DatabaseList, db);
@@ -730,7 +730,7 @@ BuildRelationList(bool include_shared)
 		oldctx = MemoryContextSwitchTo(ctx);
 		relentry = (ChecksumHelperRelation *) palloc(sizeof(ChecksumHelperRelation));
 
-		relentry->reloid = HeapTupleGetOid(tup);
+		relentry->reloid = pgc->oid;
 		relentry->relkind = pgc->relkind;
 
 		RelationList = lappend(RelationList, relentry);

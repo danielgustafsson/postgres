@@ -607,7 +607,7 @@ do_compile(FunctionCallInfo fcinfo,
 			var = plpgsql_build_variable("tg_name", 0,
 										 plpgsql_build_datatype(NAMEOID,
 																-1,
-																InvalidOid),
+																function->fn_input_collation),
 										 true);
 			Assert(var->dtype == PLPGSQL_DTYPE_VAR);
 			var->dtype = PLPGSQL_DTYPE_PROMISE;
@@ -657,7 +657,7 @@ do_compile(FunctionCallInfo fcinfo,
 			var = plpgsql_build_variable("tg_relname", 0,
 										 plpgsql_build_datatype(NAMEOID,
 																-1,
-																InvalidOid),
+																function->fn_input_collation),
 										 true);
 			Assert(var->dtype == PLPGSQL_DTYPE_VAR);
 			var->dtype = PLPGSQL_DTYPE_PROMISE;
@@ -667,7 +667,7 @@ do_compile(FunctionCallInfo fcinfo,
 			var = plpgsql_build_variable("tg_table_name", 0,
 										 plpgsql_build_datatype(NAMEOID,
 																-1,
-																InvalidOid),
+																function->fn_input_collation),
 										 true);
 			Assert(var->dtype == PLPGSQL_DTYPE_VAR);
 			var->dtype = PLPGSQL_DTYPE_PROMISE;
@@ -677,7 +677,7 @@ do_compile(FunctionCallInfo fcinfo,
 			var = plpgsql_build_variable("tg_table_schema", 0,
 										 plpgsql_build_datatype(NAMEOID,
 																-1,
-																InvalidOid),
+																function->fn_input_collation),
 										 true);
 			Assert(var->dtype == PLPGSQL_DTYPE_VAR);
 			var->dtype = PLPGSQL_DTYPE_PROMISE;
@@ -1896,7 +1896,9 @@ build_row_from_vars(PLpgSQL_variable **vars, int numvars)
 
 	row = palloc0(sizeof(PLpgSQL_row));
 	row->dtype = PLPGSQL_DTYPE_ROW;
-	row->rowtupdesc = CreateTemplateTupleDesc(numvars, false);
+	row->refname = "(unnamed row)";
+	row->lineno = -1;
+	row->rowtupdesc = CreateTemplateTupleDesc(numvars);
 	row->nfields = numvars;
 	row->fieldnames = palloc(numvars * sizeof(char *));
 	row->varnos = palloc(numvars * sizeof(int));
@@ -2029,7 +2031,7 @@ build_datatype(HeapTuple typeTup, int32 typmod, Oid collation)
 	typ = (PLpgSQL_type *) palloc(sizeof(PLpgSQL_type));
 
 	typ->typname = pstrdup(NameStr(typeStruct->typname));
-	typ->typoid = HeapTupleGetOid(typeTup);
+	typ->typoid = typeStruct->oid;
 	switch (typeStruct->typtype)
 	{
 		case TYPTYPE_BASE:

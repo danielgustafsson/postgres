@@ -23,7 +23,6 @@ typedef struct
 {
 	/* current results */
 	uint64		processed;		/* by Executor */
-	Oid			lastoid;
 	SPITupleTable *tuptable;	/* tuptable currently being built */
 
 	/* subtransaction in which current Executor call was started */
@@ -42,6 +41,11 @@ typedef struct
 								 * transactions */
 	bool		internal_xact;	/* SPI-managed transaction boundary, skip
 								 * cleanup */
+
+	/* saved values of API global variables for previous nesting level */
+	uint64		outer_processed;
+	SPITupleTable *outer_tuptable;
+	int			outer_result;
 } _SPI_connection;
 
 /*

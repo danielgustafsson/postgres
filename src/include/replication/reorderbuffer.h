@@ -214,7 +214,7 @@ typedef struct ReorderBufferTXN
 	 */
 	Snapshot	base_snapshot;
 	XLogRecPtr	base_snapshot_lsn;
-	dlist_node	base_snapshot_node;	/* link in txns_by_base_snapshot_lsn */
+	dlist_node	base_snapshot_node; /* link in txns_by_base_snapshot_lsn */
 
 	/*
 	 * How many ReorderBufferChange's do we have in this txn.
@@ -401,6 +401,9 @@ ReorderBufferTupleBuf *ReorderBufferGetTupleBuf(ReorderBuffer *, Size tuple_len)
 void		ReorderBufferReturnTupleBuf(ReorderBuffer *, ReorderBufferTupleBuf *tuple);
 ReorderBufferChange *ReorderBufferGetChange(ReorderBuffer *);
 void		ReorderBufferReturnChange(ReorderBuffer *, ReorderBufferChange *);
+
+Oid * ReorderBufferGetRelids(ReorderBuffer *, int nrelids);
+void ReorderBufferReturnRelids(ReorderBuffer *, Oid *relids);
 
 void		ReorderBufferQueueChange(ReorderBuffer *, TransactionId, XLogRecPtr lsn, ReorderBufferChange *);
 void ReorderBufferQueueMessage(ReorderBuffer *, TransactionId, Snapshot snapshot, XLogRecPtr lsn,

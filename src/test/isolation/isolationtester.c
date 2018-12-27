@@ -48,6 +48,8 @@ static int	step_qsort_cmp(const void *a, const void *b);
 static int	step_bsearch_cmp(const void *a, const void *b);
 
 static void printResultSet(PGresult *res);
+static void isotesterNoticeProcessor(void *arg, const char *message);
+static void blackholeNoticeProcessor(void *arg, const char *message);
 
 /* close all connections and exit */
 static void
@@ -172,6 +174,21 @@ main(int argc, char **argv)
 		}
 
 		/*
+		 * Set up notice processors for the user-defined connections, so that
+		 * messages can get printed prefixed with the session names.  The
+		 * control connection gets a "blackhole" processor instead (hides all
+		 * messages).
+		 */
+		if (i != 0)
+			PQsetNoticeProcessor(conns[i],
+								 isotesterNoticeProcessor,
+								 (void *) (testspec->sessions[i - 1]->name));
+		else
+			PQsetNoticeProcessor(conns[i],
+								 blackholeNoticeProcessor,
+								 NULL);
+
+		/*
 		 * Suppress NOTIFY messages, which otherwise pop into results at odd
 		 * places.
 		 */
@@ -184,7 +201,7 @@ main(int argc, char **argv)
 		PQclear(res);
 
 		/* Get the backend pid for lock wait checking. */
-		res = PQexec(conns[i], "SELECT pg_backend_pid()");
+		res = PQexec(conns[i], "SELECT pg_catalog.pg_backend_pid()");
 		if (PQresultStatus(res) == PGRES_TUPLES_OK)
 		{
 			if (PQntuples(res) == 1 && PQnfields(res) == 1)
@@ -594,7 +611,7 @@ run_permutation(TestSpec *testspec, int nsteps, Step **steps)
 		if (!PQsendQuery(conn, step->sql))
 		{
 			fprintf(stdout, "failed to send query for step %s: %s\n",
-					step->name, PQerrorMessage(conns[1 + step->session]));
+					step->name, PQerrorMessage(conn));
 			exit_nicely();
 		}
 
@@ -743,7 +760,7 @@ try_complete_step(Step *step, int flags)
 					PQntuples(res) != 1)
 				{
 					fprintf(stderr, "lock wait query failed: %s",
-							PQerrorMessage(conn));
+							PQerrorMessage(conns[0]));
 					exit_nicely();
 				}
 				waiting = ((PQgetvalue(res, 0, 0))[0] == 't');
@@ -766,15 +783,15 @@ try_complete_step(Step *step, int flags)
 			td += (int64) current_time.tv_usec - (int64) start_time.tv_usec;
 
 			/*
-			 * After 60 seconds, try to cancel the query.
+			 * After 180 seconds, try to cancel the query.
 			 *
 			 * If the user tries to test an invalid permutation, we don't want
 			 * to hang forever, especially when this is running in the
-			 * buildfarm.  So try to cancel it after a minute.  This will
-			 * presumably lead to this permutation failing, but remaining
-			 * permutations and tests should still be OK.
+			 * buildfarm.  This will presumably lead to this permutation
+			 * failing, but remaining permutations and tests should still be
+			 * OK.
 			 */
-			if (td > 60 * USECS_PER_SEC && !canceled)
+			if (td > 180 * USECS_PER_SEC && !canceled)
 			{
 				PGcancel   *cancel = PQgetCancel(conn);
 
@@ -791,15 +808,15 @@ try_complete_step(Step *step, int flags)
 			}
 
 			/*
-			 * After 75 seconds, just give up and die.
+			 * After 200 seconds, just give up and die.
 			 *
 			 * Since cleanup steps won't be run in this case, this may cause
 			 * later tests to fail.  That stinks, but it's better than waiting
 			 * forever for the server to respond to the cancel.
 			 */
-			if (td > 75 * USECS_PER_SEC)
+			if (td > 200 * USECS_PER_SEC)
 			{
-				fprintf(stderr, "step %s timed out after 75 seconds\n",
+				fprintf(stderr, "step %s timed out after 200 seconds\n",
 						step->name);
 				exit_nicely();
 			}
@@ -880,4 +897,18 @@ printResultSet(PGresult *res)
 			printf("%-15s", PQgetvalue(res, i, j));
 		printf("\n");
 	}
+}
+
+/* notice processor, prefixes each message with the session name */
+static void
+isotesterNoticeProcessor(void *arg, const char *message)
+{
+	fprintf(stderr, "%s: %s", (char *) arg, message);
+}
+
+/* notice processor, hides the message */
+static void
+blackholeNoticeProcessor(void *arg, const char *message)
+{
+	/* do nothing */
 }
