@@ -2024,7 +2024,7 @@ include_dir 'conf.d'
        <listitem>
         <para>
          The length of time, in milliseconds, that the process will sleep when
-         the cost limit has been exceeded. The default value is zero, which
+         the cost limit has been exceeded. The default value is <literal>-1</literal>, which
          disables the cost-based checksumming delay feature. Positive values
          enable cost-based checksumming.
         </para>
@@ -2040,7 +2040,7 @@ include_dir 'conf.d'
        <listitem>
         <para>
          The accumulated cost that will cause the checksumming process to sleep.
-         It is turned off by default.
+         The default value is <literal>200</literal>.
         </para>
        </listitem>
       </varlistentry>
@@ -7025,7 +7025,8 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
        </para>
 
        <para>
-        The value can range from <literal>0</literal> to <literal>100</literal>.
+        The value can range from <literal>0</literal> to
+        <literal>10000000000</literal>.
         When <varname>vacuum_cleanup_index_scale_factor</varname> is set to
         <literal>0</literal>, index scans are never skipped during
         <command>VACUUM</command> cleanup. The default value is <literal>0.1</literal>.

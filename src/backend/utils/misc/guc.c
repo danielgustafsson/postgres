@@ -2216,7 +2216,7 @@ static struct config_int ConfigureNamesInt[] =
 			GUC_UNIT_MS
 		},
 		&checksumhelper_cost_delay,
-		20, -1, 100,
+		-1, -1, 100,
 		NULL, NULL, NULL
 	},
 
@@ -2226,7 +2226,7 @@ static struct config_int ConfigureNamesInt[] =
 			NULL
 		},
 		&checksumhelper_cost_limit,
-		-1, -1, 10000,
+		200, -1, 10000,
 		NULL, NULL, NULL
 	},
 
@@ -3279,7 +3279,7 @@ static struct config_real ConfigureNamesReal[] =
 			NULL
 		},
 		&vacuum_cleanup_index_scale_factor,
-		0.1, 0.0, 100.0,
+		0.1, 0.0, 1e10,
 		NULL, NULL, NULL
 	},
 
