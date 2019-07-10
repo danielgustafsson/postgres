@@ -396,10 +396,10 @@ void
 ChecksumHelperLauncherMain(Datum arg)
 {
 	List	   *DatabaseList;
-	List	   *remaining = NIL;
+	HTAB	   *ProcessedDatabases = NULL;
+	List	   *FailedDatabases = NIL;
 	ListCell   *lc,
 			   *lc2;
-	List	   *CurrentDatabases = NIL;
 	bool		found_failed = false;
 
 	on_shmem_exit(launcher_exit, 0);
@@ -425,79 +425,95 @@ ChecksumHelperLauncherMain(Datum arg)
 	 */
 	ChecksumHelperShmem->process_shared_catalogs = true;
 
-	/*
-	 * Wait for all existing transactions to finish. This will make sure that
-	 * we can see all tables all databases, so we don't miss any.
-	 * Anything created after this point is known to have checksums on
-	 * all pages already, so we don't have to care about those.
-	 */
-	WaitForAllTransactionsToFinish();
+	while (true)
+	{
+		int			processed_databases;
+
+		/*
+		 * Get a list of all databases to process. This may include databases
+		 * that were created during our runtime.
+		 *
+		 * Since a database can be created as a copy of any other database
+		 * (which may not have existed in our last run), we have to repeat
+		 * this loop until no new databases show up in the list. Since we wait
+		 * for all pre-existing transactions finish, this way we can be
+		 * certain that there are no databases left without checksums.
+		 */
+		DatabaseList = BuildDatabaseList();
+
+		/*
+		 * If there are no databases at all to checksum, we can exit
+		 * immediately as there is no work to do. This can probably neer
+		 * happen, but just in case.
+		 */
+		if (DatabaseList == NIL || list_length(DatabaseList) == 0)
+			return;
+
+		processed_databases = 0;
+
+		foreach(lc, DatabaseList)
+		{
+			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
+			ChecksumHelperResult processing;
+
+			/* Skup if this database has been processed already */
+			if (hash_search(ProcessedDatabases, (void *) &db->dboid, HASH_FIND, NULL))
+				continue;
+
+			processing = ProcessDatabase(db);
+			hash_search(ProcessedDatabases, (void *) &db->dboid, HASH_ENTER, NULL);
+			processed_databases++;
+
+			if (processing == SUCCESSFUL)
+			{
+				/*
+				 * If one database has completed shared catalogs, we
+				 * don't have to process them again.
+				 */
+				if (ChecksumHelperShmem->process_shared_catalogs)
+					ChecksumHelperShmem->process_shared_catalogs = false;
+			}
+			else if (processing == FAILED)
+			{
+				/*
+				 * Put failed databases on the remaining list.
+				 */
+				FailedDatabases = lappend(FailedDatabases, db);
+			}
+			else
+				/* Abort flag set, so exit the whole process */
+				return;
+		}
+
+		elog(DEBUG1, "Completed one loop of checksum enabling, %i databases processed", processed_databases);
+
+		list_free(DatabaseList);
+
+		/*
+		 * If no databases were processed in this run of the loop, we have now
+		 * finished all databases and no concurrently created ones can exist.
+		 */
+		if (processed_databases == 0)
+			break;
+	}
 
 	/*
-	 * Create a database list.  We don't need to concern ourselves with
-	 * rebuilding this list during runtime since any database created after
-	 * this process started will be running with checksums turned on from the
-	 * start.
+	 * FailedDatabases now has all databases that failed one way or another.
+	 * This can be because they actually failed for some reason, or because the
+	 * database was dropped between us getting the database list and trying to
+	 * process it. Get a fresh list of databases to detect the second case
+	 * where the database was dropped before we had started processing it. If a
+	 * database still exists, but enabling checksums failed then we fail the
+	 * entire checksumming process and exit with an error.
 	 */
 	DatabaseList = BuildDatabaseList();
 
-	/*
-	 * If there are no databases at all to checksum, we can exit immediately
-	 * as there is no work to do.
-	 */
-	if (DatabaseList == NIL || list_length(DatabaseList) == 0)
-		return;
-
-	foreach(lc, DatabaseList)
-	{
-		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-		ChecksumHelperResult processing;
-
-		processing = ProcessDatabase(db);
-
-		if (processing == SUCCESSFUL)
-		{
-			pfree(db->dbname);
-			pfree(db);
-
-			if (ChecksumHelperShmem->process_shared_catalogs)
-
-				/*
-				 * Now that one database has completed shared catalogs, we
-				 * don't have to process them again.
-				 */
-				ChecksumHelperShmem->process_shared_catalogs = false;
-		}
-		else if (processing == FAILED)
-		{
-			/*
-			 * Put failed databases on the remaining list.
-			 */
-			remaining = lappend(remaining, db);
-		}
-		else
-			/* aborted */
-			return;
-	}
-	list_free(DatabaseList);
-
-	/*
-	 * remaining now has all databases not yet processed. This can be
-	 * because they failed for some reason, or because the database was
-	 * dropped between us getting the database list and trying to process
-	 * it. Get a fresh list of databases to detect the second case where
-	 * the database was dropped before we had started processing it. If a
-	 * database still exists, but enabling checksums failed then we fail
-	 * the entire checksumming process and exit with an error.
-	 */
-	CurrentDatabases = BuildDatabaseList();
-
-	foreach(lc, remaining)
+	foreach(lc, FailedDatabases)
 	{
 		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
 		bool found = false;
 
-		foreach(lc2, CurrentDatabases)
+		foreach(lc2, DatabaseList)
 		{
 			ChecksumHelperDatabase *db2 = (ChecksumHelperDatabase *) lfirst(lc2);
 
@@ -519,21 +535,7 @@ ChecksumHelperLauncherMain(Datum arg)
 					(errmsg("database \"%s\" has been dropped, skipping",
 							db->dbname)));
 		}
-
-		pfree(db->dbname);
-		pfree(db);
 	}
-	list_free(remaining);
-
-	/* Free the extra list of databases */
-	foreach(lc, CurrentDatabases)
-	{
-		ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-
-		pfree(db->dbname);
-		pfree(db);
-	}
-	list_free(CurrentDatabases);
 
 	if (found_failed)
 	{
@@ -544,7 +546,9 @@ ChecksumHelperLauncherMain(Datum arg)
 	}
 
 	/*
-	 * Force a checkpoint to get everything out to disk.
+	 * Force a checkpoint to get everything out to disk. XXX: this should
+	 * probably not be an IMMEDIATE checkpoint, but leave it there for now
+	 * for testing.
 	 */
 	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
 
@@ -613,6 +617,15 @@ BuildDatabaseList(void)
 	StartTransactionCommand();
 
 	rel = table_open(DatabaseRelationId, AccessShareLock);
+
+	/*
+	 * Before we do this, wait for all pending transactions to finish. This
+	 * will ensure there are no concurrently running CREATE DATABASE, which
+	 * could cause us to miss the creation of a database that was copied
+	 * without checksums.
+	 */
+	WaitForAllTransactionsToFinish();
+
 	scan = table_beginscan_catalog(rel, 0, NULL);
 
 	while (HeapTupleIsValid(tup = heap_getnext(scan, ForwardScanDirection)))
@@ -675,10 +688,11 @@ BuildRelationList(bool include_shared)
 			continue;
 
 		/*
-		 * Foreign tables have by definition no local storage that can be
-		 * checksummed, so skip.
+		 * Only include relations types that have local storage
 		 */
-		if (pgc->relkind == RELKIND_FOREIGN_TABLE)
+		if (pgc->relkind == RELKIND_VIEW ||
+			pgc->relkind == RELKIND_COMPOSITE_TYPE ||
+			pgc->relkind == RELKIND_FOREIGN_TABLE)
 			continue;
 
 		oldctx = MemoryContextSwitchTo(ctx);
