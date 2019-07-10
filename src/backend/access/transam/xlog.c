@@ -9562,13 +9562,15 @@ static void
 XlogChecksums(ChecksumType new_type)
 {
 	xl_checksum_state xlrec;
+	XLogRecPtr	recptr;
 
 	xlrec.new_checksumtype = new_type;
 
 	XLogBeginInsert();
 	XLogRegisterData((char *) &xlrec, sizeof(xl_checksum_state));
 
-	XLogInsert(RM_XLOG_ID, XLOG_CHECKSUMS);
+	recptr = XLogInsert(RM_XLOG_ID, XLOG_CHECKSUMS);
+	XLogFlush(recptr);
 }
 
 /*
