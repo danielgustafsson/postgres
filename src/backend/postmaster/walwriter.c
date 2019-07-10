@@ -255,6 +255,8 @@ WalWriterMain(void)
 			/* Normal exit from the walwriter is here */
 			proc_exit(0);		/* done */
 		}
+		if (GlobalBarrierInterruptPending)
+			ProcessGlobalBarrierIntterupt();
 
 		/*
 		 * Do what we're here for; then, if XLogBackgroundFlush() found useful

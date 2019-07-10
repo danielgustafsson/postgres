@@ -258,6 +258,10 @@ BackgroundWriterMain(void)
 			proc_exit(0);		/* done */
 		}
 
+		/* Process all pending interrupts. */
+		if (GlobalBarrierInterruptPending)
+			ProcessGlobalBarrierIntterupt();
+
 		/*
 		 * Do one cycle of dirty-buffer writing.
 		 */

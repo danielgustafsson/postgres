@@ -151,6 +151,9 @@ HandleStartupProcInterrupts(void)
 	 */
 	if (IsUnderPostmaster && !PostmasterIsAlive())
 		exit(1);
+
+	if (GlobalBarrierInterruptPending)
+		ProcessGlobalBarrierIntterupt();
 }
 
 

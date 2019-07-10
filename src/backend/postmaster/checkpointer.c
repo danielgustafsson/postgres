@@ -346,6 +346,10 @@ CheckpointerMain(void)
 		/* Clear any already-pending wakeups */
 		ResetLatch(MyLatch);
 
+		/* Process all pending interrupts. */
+		if (GlobalBarrierInterruptPending)
+			ProcessGlobalBarrierIntterupt();
+
 		/*
 		 * Process any requests or signals received recently.
 		 */
