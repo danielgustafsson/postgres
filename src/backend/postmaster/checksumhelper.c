@@ -606,7 +606,7 @@ BuildDatabaseList(void)
 {
 	List	   *DatabaseList = NIL;
 	Relation	rel;
-	HeapScanDesc scan;
+	TableScanDesc scan;
 	HeapTuple	tup;
 	MemoryContext ctx = CurrentMemoryContext;
 	MemoryContext oldctx;
@@ -654,7 +654,7 @@ BuildRelationList(bool include_shared)
 {
 	List	   *RelationList = NIL;
 	Relation	rel;
-	HeapScanDesc scan;
+	TableScanDesc scan;
 	HeapTuple	tup;
 	MemoryContext ctx = CurrentMemoryContext;
 	MemoryContext oldctx;
@@ -712,7 +712,7 @@ BuildTempTableList(void)
 {
 	List	   *RelationList = NIL;
 	Relation	rel;
-	HeapScanDesc scan;
+	TableScanDesc scan;
 	HeapTuple	tup;
 	MemoryContext ctx = CurrentMemoryContext;
 	MemoryContext oldctx;
