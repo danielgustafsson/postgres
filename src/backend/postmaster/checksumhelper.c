@@ -9,7 +9,7 @@
  * with checksums, this helper worker will ensure that all pages are
  * checksummed before verification of the checksums is turned on.
  *
- * Portions Copyright (c) 1996-2018, PostgreSQL Global Development Group
+ * Portions Copyright (c) 1996-2019, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
  *
@@ -95,7 +95,7 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	if (ChecksumHelperShmem->abort)
 	{
 		ereport(ERROR,
-				(errmsg("could not start checksumhelper: has been cancelled")));
+				(errmsg("could not start checksumhelper: has been canceled")));
 	}
 
 	ChecksumHelperShmem->cost_delay = cost_delay;

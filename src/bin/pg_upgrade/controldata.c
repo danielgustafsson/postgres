@@ -664,7 +664,7 @@ check_control_data(ControlData *oldctrl,
 	 * retrying.
 	 */
 	if (oldctrl->data_checksum_version == 2)
-		pg_fatal("transition to data checksums not completed in old cluster\n");
+		pg_fatal("checksum enabling in old cluster is in progress\n");
 
 	/*
 	 * We might eventually allow upgrades from checksum to no-checksum

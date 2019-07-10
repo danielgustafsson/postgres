@@ -87,7 +87,7 @@ is ($result, "20000", 'ensure we can safely read all data with checksums');
 $node_master->safe_psql('postgres', "SELECT pg_disable_data_checksums();");
 $result = $node_master->safe_psql('postgres',
 	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
-is($result, "off", 'ensure checksums are in progress on master');
+is($result, "off", 'ensure checksums are off on master');
 
 # Wait for checksum disable to be replayed
 $node_master->wait_for_catchup($node_standby_1, 'replay');
@@ -95,7 +95,7 @@ $node_master->wait_for_catchup($node_standby_1, 'replay');
 # Ensure that the standby has switched to off
 $result = $node_standby_1->safe_psql('postgres',
 	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
-is($result, "off", 'ensure checksums are in progress on standby_1');
+is($result, "off", 'ensure checksums are off on standby_1');
 
 $result = $node_master->safe_psql('postgres', "SELECT count(a) FROM t");
 is ($result, "20000", 'ensure we can safely read all data without checksums');

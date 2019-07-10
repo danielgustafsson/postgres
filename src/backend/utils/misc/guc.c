@@ -473,8 +473,7 @@ static struct config_enum_entry shared_memory_options[] = {
 };
 
 /*
- * data_checksum used to be a boolean, but was only set by initdb so there is
- * no need to support variants of boolean input.
+ * Options for data_checksums enum.
  */
 static const struct config_enum_entry data_checksum_options[] = {
 	{"on", DATA_CHECKSUMS_ON, true},
@@ -585,7 +584,7 @@ static int	max_identifier_length;
 static int	block_size;
 static int	segment_size;
 static int	wal_block_size;
-static int	data_checksums_tmp; /* only accessed locally! */
+static int	data_checksums_tmp;
 static bool integer_datetimes;
 static bool assert_enabled;
 static char *recovery_target_timeline_string;

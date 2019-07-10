@@ -7824,6 +7824,8 @@ StartupXLOG(void)
 	 * If we reach this point with checksums in inprogress state, we notify
 	 * the user that they need to manually restart the process to enable
 	 * checksums.
+	 * This is because we cannot launch a dynamic background worker directly
+	 * from here, it has to be launched from a regular backend.
 	 */
 	if (ControlFile->data_checksum_version == PG_DATA_CHECKSUM_INPROGRESS_VERSION)
 		ereport(WARNING,
