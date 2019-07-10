@@ -51,10 +51,21 @@ typedef enum
 
 typedef struct ChecksumHelperShmemStruct
 {
-	pg_atomic_flag launcher_started;
+	/*
+	 * Access to launcher_started and abort must be protected by
+	 * ChecksumHelperLock.
+	 */
+	bool		launcher_started;
+	bool		abort;
+
+	/*
+	 * Access to other members can be done without a lock, as while they
+	 * are in shared memory, they are never concurrently accessed. When
+	 * a worker is running, the launcher is only waiting for that worker
+	 * to finish.
+	 */
 	ChecksumHelperResult success;
 	bool		process_shared_catalogs;
-	bool		abort;
 	/* Parameter values set on start */
 	int			cost_delay;
 	int			cost_limit;
@@ -92,10 +103,20 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
 
+	LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
 	if (ChecksumHelperShmem->abort)
 	{
+		LWLockRelease(ChecksumHelperLock);
 		ereport(ERROR,
 				(errmsg("could not start checksumhelper: has been canceled")));
+	}
+
+	if (ChecksumHelperShmem->launcher_started)
+	{
+		/* Failed to set means somebody else started */
+		LWLockRelease(ChecksumHelperLock);
+		ereport(ERROR,
+				(errmsg("could not start checksumhelper: already running")));
 	}
 
 	ChecksumHelperShmem->cost_delay = cost_delay;
@@ -112,16 +133,14 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	bgw.bgw_notify_pid = MyProcPid;
 	bgw.bgw_main_arg = (Datum) 0;
 
-	if (!pg_atomic_test_set_flag(&ChecksumHelperShmem->launcher_started))
-	{
-		/* Failed to set means somebody else started */
-		ereport(ERROR,
-				(errmsg("could not start checksumhelper: already running")));
-	}
+	ChecksumHelperShmem->launcher_started = true;
+	LWLockRelease(ChecksumHelperLock);
 
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
 	{
-		pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
+		LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
+		ChecksumHelperShmem->launcher_started = false;
+		LWLockRelease(ChecksumHelperLock);
 		ereport(ERROR,
 				(errmsg("failed to start checksum helper launcher")));
 	}
@@ -138,14 +157,10 @@ void
 ShutdownChecksumHelperIfRunning(void)
 {
 	/* If the launcher isn't started, there is nothing to shut down */
-	if (pg_atomic_unlocked_test_flag(&ChecksumHelperShmem->launcher_started))
-		return;
-
-	/*
-	 * We don't need an atomic variable for aborting, setting it multiple
-	 * times will not change the handling.
-	 */
-	ChecksumHelperShmem->abort = true;
+	LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
+	if (ChecksumHelperShmem->launcher_started)
+		ChecksumHelperShmem->abort = true;
+	LWLockRelease(ChecksumHelperLock);
 }
 
 /*
@@ -200,6 +215,8 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 		/*
 		 * This is the only place where we check if we are asked to abort, the
 		 * abortion will bubble up from here.
+		 * It's safe to check this without a lock, because if we miss it being
+		 * set, we will try again soon.
 		 */
 		if (ChecksumHelperShmem->abort)
 			return false;
@@ -345,14 +362,18 @@ ProcessDatabase(ChecksumHelperDatabase * db)
 static void
 launcher_exit(int code, Datum arg)
 {
+	LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
 	ChecksumHelperShmem->abort = false;
-	pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
+	ChecksumHelperShmem->launcher_started = false;
+	LWLockRelease(ChecksumHelperLock);
 }
 
 static void
 launcher_cancel_handler(SIGNAL_ARGS)
 {
+	LWLockAcquire(ChecksumHelperLock, LW_EXCLUSIVE);
 	ChecksumHelperShmem->abort = true;
+	LWLockRelease(ChecksumHelperLock);
 }
 
 static void
@@ -602,7 +623,6 @@ ChecksumHelperShmemInit(void)
 	if (!found)
 	{
 		MemSet(ChecksumHelperShmem, 0, ChecksumHelperShmemSize());
-		pg_atomic_init_flag(&ChecksumHelperShmem->launcher_started);
 	}
 }
 
