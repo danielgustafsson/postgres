@@ -473,7 +473,7 @@ ChecksumHelperLauncherMain(Datum arg)
 
 		/*
 		 * If there are no databases at all to checksum, we can exit
-		 * immediately as there is no work to do. This can probably neer
+		 * immediately as there is no work to do. This can probably never
 		 * happen, but just in case.
 		 */
 		if (DatabaseList == NIL || list_length(DatabaseList) == 0)
@@ -484,17 +484,29 @@ ChecksumHelperLauncherMain(Datum arg)
 		foreach(lc, DatabaseList)
 		{
 			ChecksumHelperDatabase *db = (ChecksumHelperDatabase *) lfirst(lc);
-			ChecksumHelperResult processing;
+			ChecksumHelperResult result;
+			Oid *oid;
 
 			/* Skup if this database has been processed already */
 			if (hash_search(ProcessedDatabases, (void *) &db->dboid, HASH_FIND, NULL))
+			{
+				pfree(db->dbname);
+				pfree(db);
 				continue;
+			}
 
-			processing = ProcessDatabase(db);
-			hash_search(ProcessedDatabases, (void *) &db->dboid, HASH_ENTER, NULL);
+			result = ProcessDatabase(db);
+
+			/* Make a copy of the oid so we can free the rest of the structure */
+			oid = palloc(sizeof(Oid));
+			*oid = db->dboid;
+			pfree(db->dbname);
+			pfree(db);
+
+			hash_search(ProcessedDatabases, (void *) oid, HASH_ENTER, NULL);
 			processed_databases++;
 
-			if (processing == SUCCESSFUL)
+			if (result == SUCCESSFUL)
 			{
 				/*
 				 * If one database has completed shared catalogs, we
@@ -503,7 +515,7 @@ ChecksumHelperLauncherMain(Datum arg)
 				if (ChecksumHelperShmem->process_shared_catalogs)
 					ChecksumHelperShmem->process_shared_catalogs = false;
 			}
-			else if (processing == FAILED)
+			else if (result == FAILED)
 			{
 				/*
 				 * Put failed databases on the remaining list.
