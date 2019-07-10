@@ -4854,6 +4854,7 @@ SetDataChecksumsInProgress(void)
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_INPROGRESS_VERSION;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+	WaitForGlobalBarrier(EmitGlobalBarrier(GLOBBAR_CHECKSUM));
 }
 
 void
@@ -4872,6 +4873,7 @@ SetDataChecksumsOn(void)
 	ControlFile->data_checksum_version = PG_DATA_CHECKSUM_VERSION;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+	WaitForGlobalBarrier(EmitGlobalBarrier(GLOBBAR_CHECKSUM));
 
 	XlogChecksums(PG_DATA_CHECKSUM_VERSION);
 }
@@ -4884,6 +4886,7 @@ SetDataChecksumsOff(void)
 	ControlFile->data_checksum_version = 0;
 	UpdateControlFile();
 	LWLockRelease(ControlFileLock);
+	WaitForGlobalBarrier(EmitGlobalBarrier(GLOBBAR_CHECKSUM));
 
 	XlogChecksums(0);
 }
