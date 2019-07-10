@@ -86,7 +86,7 @@ static void launcher_cancel_handler(SIGNAL_ARGS);
 /*
  * Main entry point for checksumhelper launcher process.
  */
-bool
+void
 StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 {
 	BackgroundWorker bgw;
@@ -122,10 +122,9 @@ StartChecksumHelperLauncher(int cost_delay, int cost_limit)
 	if (!RegisterDynamicBackgroundWorker(&bgw, &bgw_handle))
 	{
 		pg_atomic_clear_flag(&ChecksumHelperShmem->launcher_started);
-		return false;
+		ereport(ERROR,
+				(errmsg("failed to start checksum helper launcher")));
 	}
-
-	return true;
 }
 
 /*

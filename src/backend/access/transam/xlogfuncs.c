@@ -829,9 +829,7 @@ enable_data_checksums(PG_FUNCTION_ARGS)
 				(errmsg("data checksums already enabled")));
 
 	SetDataChecksumsInProgress();
-	if (!StartChecksumHelperLauncher(cost_delay, cost_limit))
-		ereport(ERROR,
-				(errmsg("failed to start checksum helper process")));
+	StartChecksumHelperLauncher(cost_delay, cost_limit);
 
 	PG_RETURN_VOID();
 }
