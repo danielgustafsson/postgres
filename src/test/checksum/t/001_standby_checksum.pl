@@ -50,10 +50,13 @@ is($result, "inprogress", 'ensure checksums are in progress on master');
 # Wait for checksum enable to be replayed
 $node_master->wait_for_catchup($node_standby_1, 'replay');
 
-# Ensure that the standby has switched to inprogress
+# Ensure that the standby has switched to inprogress or on
+# Normally it would be "inprogress", but it is theoretically possible for the master
+# to complete the checksum enabling *and* have the standby replay that record before
+# we reach the check below.
 $result = $node_standby_1->safe_psql('postgres',
 	"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';");
-is($result, "inprogress", 'ensure checksums are in progress on standby_1');
+cmp_ok($result, '~~', ["inprogress", "on"], 'ensure checksums are on or in progress on standby_1');
 
 # Insert some more data which should be checksummed on INSERT
 $node_master->safe_psql('postgres',
