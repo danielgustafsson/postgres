@@ -400,6 +400,7 @@ ChecksumHelperLauncherMain(Datum arg)
 	List	   *FailedDatabases = NIL;
 	ListCell   *lc,
 			   *lc2;
+	HASHCTL     hash_ctl;
 	bool		found_failed = false;
 
 	on_shmem_exit(launcher_exit, 0);
@@ -413,6 +414,14 @@ ChecksumHelperLauncherMain(Datum arg)
 	BackgroundWorkerUnblockSignals();
 
 	init_ps_display(pgstat_get_backend_desc(B_CHECKSUMHELPER_LAUNCHER), "", "", "");
+
+	memset(&hash_ctl, 0, sizeof(hash_ctl));
+	hash_ctl.keysize = sizeof(Oid);
+	hash_ctl.entrysize = sizeof(ChecksumHelperResult);
+	ProcessedDatabases = hash_create("Processed databases",
+									 64,
+									 &hash_ctl,
+									 HASH_ELEM);
 
 	/*
 	 * Initialize a connection to shared catalogs only.
