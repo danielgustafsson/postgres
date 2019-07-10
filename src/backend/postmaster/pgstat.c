@@ -3765,6 +3765,9 @@ pgstat_get_wait_ipc(WaitEventIPC w)
 		case WAIT_EVENT_EXECUTE_GATHER:
 			event_name = "ExecuteGather";
 			break;
+		case WAIT_EVENT_GLOBAL_BARRIER:
+			event_name = "GlobalBarrier";
+			break;
 		case WAIT_EVENT_HASH_BATCH_ALLOCATING:
 			event_name = "Hash/Batch/Allocating";
 			break;

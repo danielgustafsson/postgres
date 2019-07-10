@@ -21,6 +21,7 @@
 #include "access/twophase.h"
 #include "commands/async.h"
 #include "miscadmin.h"
+#include "pgstat.h"
 #include "replication/walsender.h"
 #include "storage/latch.h"
 #include "storage/ipc.h"
@@ -368,6 +369,7 @@ EmitGlobalBarrier(GlobalBarrierKind kind)
 void
 WaitForGlobalBarrier(uint64 generation)
 {
+	pgstat_report_wait_start(WAIT_EVENT_GLOBAL_BARRIER);
 	for (int i = 0; i < (MaxBackends + max_prepared_xacts); i++)
 	{
 		PGPROC *proc = &ProcGlobal->allProcs[i];
@@ -389,6 +391,7 @@ WaitForGlobalBarrier(uint64 generation)
 			oldval = pg_atomic_read_u64(&proc->barrierGen);
 		}
 	}
+	pgstat_report_wait_end();
 }
 
 /*
