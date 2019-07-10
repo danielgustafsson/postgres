@@ -4312,6 +4312,7 @@ pgstat_get_backend_desc(BackendType backendType)
 			break;
 		case B_CHECKSUMHELPER_WORKER:
 			backendDesc = "checksumhelper worker";
+			break;
 	}
 
 	return backendDesc;
