@@ -10645,7 +10645,7 @@
   proargtypes => '',
   prosrc => 'disable_data_checksums' },
 
-{ oid => '3998',
+{ oid => '4035',
   descr => 'enable data checksums',
   proname => 'pg_enable_data_checksums', provolatile => 'v', prorettype => 'void',
   proparallel => 'r',
