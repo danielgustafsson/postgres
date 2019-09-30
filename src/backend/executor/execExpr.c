@@ -361,7 +361,7 @@ ExecBuildProjectionInfo(List *targetList,
 
 	projInfo->pi_exprContext = econtext;
 	/* We embed ExprState into ProjectionInfo instead of doing extra palloc */
-	projInfo->pi_state.tag.type = T_ExprState;
+	projInfo->pi_state.tag = T_ExprState;
 	state = &projInfo->pi_state;
 	state->expr = (Expr *) targetList;
 	state->parent = parent;
@@ -2395,6 +2395,7 @@ ExecComputeSlotInfo(ExprState *state, ExprEvalStep *op)
 		{
 			isfixed = true;
 			tts_ops = parent->innerops;
+			desc = ExecGetResultType(is);
 		}
 		else if (is)
 		{
@@ -2414,6 +2415,7 @@ ExecComputeSlotInfo(ExprState *state, ExprEvalStep *op)
 		{
 			isfixed = true;
 			tts_ops = parent->outerops;
+			desc = ExecGetResultType(os);
 		}
 		else if (os)
 		{

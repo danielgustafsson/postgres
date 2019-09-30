@@ -726,6 +726,10 @@ doputenv(const char *var, const char *val)
 static void
 initialize_environment(void)
 {
+	/*
+	 * Set default application_name.  (The test_function may choose to
+	 * override this, but if it doesn't, we have something useful in place.)
+	 */
 	putenv("PGAPPNAME=pg_regress");
 
 	if (nolocale)
@@ -856,6 +860,14 @@ initialize_environment(void)
 		}
 		if (user != NULL)
 			doputenv("PGUSER", user);
+
+		/*
+		 * However, we *don't* honor PGDATABASE, since we certainly don't wish
+		 * to connect to whatever database the user might like as default.
+		 * (Most tests override PGDATABASE anyway, but there are some ECPG
+		 * test cases that don't.)
+		 */
+		unsetenv("PGDATABASE");
 
 		/*
 		 * Report what we're connecting to

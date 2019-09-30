@@ -24,12 +24,12 @@
 
 #include "access/clog.h"
 #include "access/commit_ts.h"
+#include "access/heaptoast.h"
 #include "access/multixact.h"
 #include "access/rewriteheap.h"
 #include "access/subtrans.h"
 #include "access/timeline.h"
 #include "access/transam.h"
-#include "access/tuptoaster.h"
 #include "access/twophase.h"
 #include "access/xact.h"
 #include "access/xlog_internal.h"
@@ -769,7 +769,7 @@ typedef enum
 } XLogSource;
 
 /* human-readable names for XLogSources, for debugging output */
-static const char *xlogSourceNames[] = {"any", "archive", "pg_wal", "stream"};
+static const char *const xlogSourceNames[] = {"any", "archive", "pg_wal", "stream"};
 
 /*
  * openLogFile is -1 or a kernel FD for an open log file segment.
@@ -886,8 +886,7 @@ static int	XLogFileRead(XLogSegNo segno, int emode, TimeLineID tli,
 						 int source, bool notfoundOk);
 static int	XLogFileReadAnyTLI(XLogSegNo segno, int emode, int source);
 static int	XLogPageRead(XLogReaderState *xlogreader, XLogRecPtr targetPagePtr,
-						 int reqLen, XLogRecPtr targetRecPtr, char *readBuf,
-						 TimeLineID *readTLI);
+						 int reqLen, XLogRecPtr targetRecPtr, char *readBuf);
 static bool WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 										bool fetching_ckpt, XLogRecPtr tliRecPtr);
 static int	emode_for_corrupt_record(int emode, XLogRecPtr RecPtr);
@@ -1196,7 +1195,8 @@ XLogInsertRecord(XLogRecData *rdata,
 			appendBinaryStringInfo(&recordBuf, rdata->data, rdata->len);
 
 		if (!debug_reader)
-			debug_reader = XLogReaderAllocate(wal_segment_size, NULL, NULL);
+			debug_reader = XLogReaderAllocate(wal_segment_size, NULL,
+											  NULL, NULL);
 
 		if (!debug_reader)
 		{
@@ -4297,7 +4297,7 @@ ReadRecord(XLogReaderState *xlogreader, XLogRecPtr RecPtr, int emode,
 			XLByteToSeg(xlogreader->latestPagePtr, segno, wal_segment_size);
 			offset = XLogSegmentOffset(xlogreader->latestPagePtr,
 									   wal_segment_size);
-			XLogFileName(fname, xlogreader->readPageTLI, segno,
+			XLogFileName(fname, xlogreader->seg.ws_tli, segno,
 						 wal_segment_size);
 			ereport(emode_for_corrupt_record(emode,
 											 RecPtr ? RecPtr : EndRecPtr),
@@ -5696,6 +5696,13 @@ recoveryStopsBefore(XLogReaderState *record)
 	TimestampTz recordXtime = 0;
 	TransactionId recordXid;
 
+	/*
+	 * Ignore recovery target settings when not in archive recovery (meaning
+	 * we are in crash recovery).
+	 */
+	if (!ArchiveRecoveryRequested)
+		return false;
+
 	/* Check if we should stop as soon as reaching consistency */
 	if (recoveryTarget == RECOVERY_TARGET_IMMEDIATE && reachedConsistency)
 	{
@@ -5836,6 +5843,13 @@ recoveryStopsAfter(XLogReaderState *record)
 	uint8		xact_info;
 	uint8		rmid;
 	TimestampTz recordXtime;
+
+	/*
+	 * Ignore recovery target settings when not in archive recovery (meaning
+	 * we are in crash recovery).
+	 */
+	if (!ArchiveRecoveryRequested)
+		return false;
 
 	info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
 	rmid = XLogRecGetRmid(record);
@@ -6431,7 +6445,8 @@ StartupXLOG(void)
 
 	/* Set up XLOG reader facility */
 	MemSet(&private, 0, sizeof(XLogPageReadPrivate));
-	xlogreader = XLogReaderAllocate(wal_segment_size, &XLogPageRead, &private);
+	xlogreader = XLogReaderAllocate(wal_segment_size, NULL,
+									&XLogPageRead, &private);
 	if (!xlogreader)
 		ereport(ERROR,
 				(errcode(ERRCODE_OUT_OF_MEMORY),
@@ -7433,7 +7448,7 @@ StartupXLOG(void)
 	 * and we were reading the old WAL from a segment belonging to a higher
 	 * timeline.
 	 */
-	EndOfLogTLI = xlogreader->readPageTLI;
+	EndOfLogTLI = xlogreader->seg.ws_tli;
 
 	/*
 	 * Complain if we did not roll forward far enough to render the backup
@@ -11416,7 +11431,7 @@ read_backup_label(XLogRecPtr *checkPointLoc, bool *backupEndRequired,
 			ereport(FATAL,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 					 errmsg("invalid data in file \"%s\"", BACKUP_LABEL_FILE),
-					 errdetail("Timeline ID parsed is %u, but expected %u",
+					 errdetail("Timeline ID parsed is %u, but expected %u.",
 							   tli_from_file, tli_from_walseg)));
 
 		ereport(DEBUG1,
@@ -11642,7 +11657,7 @@ CancelBackup(void)
  */
 static int
 XLogPageRead(XLogReaderState *xlogreader, XLogRecPtr targetPagePtr, int reqLen,
-			 XLogRecPtr targetRecPtr, char *readBuf, TimeLineID *readTLI)
+			 XLogRecPtr targetRecPtr, char *readBuf)
 {
 	XLogPageReadPrivate *private =
 	(XLogPageReadPrivate *) xlogreader->private_data;
@@ -11759,7 +11774,7 @@ retry:
 	Assert(targetPageOff == readOff);
 	Assert(reqLen <= readLen);
 
-	*readTLI = curFileTLI;
+	xlogreader->seg.ws_tli = curFileTLI;
 
 	/*
 	 * Check the page header immediately, so that we can retry immediately if
