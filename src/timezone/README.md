@@ -79,15 +79,15 @@ fixed that.)
 includes relying on configure's results rather than hand-hacked
 #defines (see private.h in particular).
 
-* Similarly, avoid relying on <stdint.h> features that may not exist on old
+* Similarly, avoid relying on stdint.h features that may not exist on old
 systems.  In particular this means using Postgres' definitions of the int32
 and int64 typedefs, not int_fast32_t/int_fast64_t.  Likewise we use
 PG_INT32_MIN/MAX not INT32_MIN/MAX.  (Once we desupport all PG versions
-that don't require C99, it'd be practical to rely on <stdint.h> and remove
+that don't require C99, it'd be practical to rely on stdint.h and remove
 this set of diffs; but that day is not yet.)
 
 * Since Postgres is typically built on a system that has its own copy
-of the <time.h> functions, we must avoid conflicting with those.  This
+of the time.h functions, we must avoid conflicting with those.  This
 mandates renaming typedef time_t to pg_time_t, and similarly for most
 other exposed names.
 

@@ -40,7 +40,7 @@ Core PostgreSQL includes built-in Gin support for one-dimensional arrays
 Synopsis
 --------
 
-=# create index txt_idx on aa using gin(a);
+	=# create index txt_idx on aa using gin(a);
 
 Features
 --------
@@ -120,19 +120,21 @@ be, in which case a null bitmap is present as usual.  (As usual for index
 tuples, the size of the null bitmap is fixed at INDEX_MAX_KEYS.)
 
 * If the key datum is null (ie, IndexTupleHasNulls() is true), then
-just after the nominal index data (ie, at offset IndexInfoFindDataOffset
-or IndexInfoFindDataOffset + sizeof(int2)) there is a byte indicating
-the "category" of the null entry.  These are the possible categories:
+  just after the nominal index data (ie, at offset IndexInfoFindDataOffset
+  or IndexInfoFindDataOffset + sizeof(int2)) there is a byte indicating
+  the "category" of the null entry.  These are the possible categories:
+
 	1 = ordinary null key value extracted from an indexable item
 	2 = placeholder for zero-key indexable item
 	3 = placeholder for null indexable item
-Placeholder null entries are inserted into the index because otherwise
-there would be no index entry at all for an empty or null indexable item,
-which would mean that full index scans couldn't be done and various corner
-cases would give wrong answers.  The different categories of null entries
-are treated as distinct keys by the btree, but heap itempointers for the
-same category of null entry are merged into one index entry just as happens
-with ordinary key entries.
+
+  Placeholder null entries are inserted into the index because otherwise
+  there would be no index entry at all for an empty or null indexable item,
+  which would mean that full index scans couldn't be done and various corner
+  cases would give wrong answers.  The different categories of null entries
+  are treated as distinct keys by the btree, but heap itempointers for the
+  same category of null entry are merged into one index entry just as happens
+  with ordinary key entries.
 
 * In a key entry at the btree leaf level, at the next SHORTALIGN boundary,
 there is a list of item pointers, in compressed format (see Posting List
@@ -325,11 +327,11 @@ getting them on the next page.
 The picture below shows tree state after finding the leaf page.  Lower case
 letters depicts tree pages.  'S' depicts shared lock on the page.
 
-               a
-           /   |   \
-       b       c       d
-     / | \     | \     | \
-   eS  f   g   h   i   j   k
+                a
+            /   |   \
+        b       c       d
+      / | \     | \     | \
+    eS  f   g   h   i   j   k
 
 ### Steping right
 
@@ -346,11 +348,11 @@ concurrently and doesn't delete right sibling accordingly.
 
 The picture below shows two pages locked at once during stepping right.
 
-               a
-           /   |   \
-       b       c       d
-     / | \     | \     | \
-   eS  fS  g   h   i   j   k
+                a
+            /   |   \
+        b       c       d
+      / | \     | \     | \
+    eS  fS  g   h   i   j   k
 
 ### Insert
 
@@ -365,11 +367,11 @@ The picture below shows leaf page locked in exclusive mode and ready for
 insertion.  'P' and 'E' depict pin and exclusive lock correspondingly.
 
 
-               aP
-           /   |   \
-       b       cP      d
-     / | \     | \     | \
-   e   f   g   hE  i   j   k
+                aP
+            /   |   \
+        b       cP      d
+      / | \     | \     | \
+    e   f   g   hE  i   j   k
 
 
 If insert causes a page split, the parent is locked in exclusive mode before
@@ -379,11 +381,11 @@ parent and child pages at once starting from child.
 The picture below shows tree state after leaf page split.  'q' is new page
 produced by split.  Parent 'c' is about to have downlink inserted.
 
-                  aP
-            /     |   \
-       b          cE      d
-     / | \      / | \     | \
-   e   f   g  hE  q   i   j   k
+                   aP
+             /     |   \
+        b          cE      d
+      / | \      / | \     | \
+    e   f   g  hE  q   i   j   k
 
 
 ### Page deletion
@@ -404,11 +406,11 @@ we locked it.
 The picture below shows tree state after page deletion algorithm traversed to
 leftmost leaf of the tree.
 
-               aE
-           /   |   \
-       bE      c       d
-     / | \     | \     | \
-   eE  f   g   h   i   j   k
+                aE
+            /   |   \
+        bE      c       d
+      / | \     | \     | \
+    eE  f   g   h   i   j   k
 
 Deletion algorithm keeps exclusive locks on left siblings of pages comprising
 currently investigated path.  Thus, if current page is to be removed, all
@@ -436,21 +438,21 @@ The picture below shows tree state after page deletion algorithm further
 traversed the tree.  Currently investigated path is 'a-c-h'.  Left siblings 'b'
 and 'g' of 'c' and 'h' correspondingly are also exclusively locked.
 
-               aE
-           /   |   \
-       bE      cE      d
-     / | \     | \     | \
-   e   f   gE  hE  i   j   k
+                aE
+            /   |   \
+        bE      cE      d
+      / | \     | \     | \
+    e   f   gE  hE  i   j   k
 
 The next picture shows tree state after page 'h' was deleted.  It's marked with
 'deleted' flag and newest xid, which might visit it.  Downlink from 'c' to 'h'
 is also deleted.
 
-               aE
-           /   |   \
-       bE      cE      d
-     / | \       \     | \
-   e   f   gE  hD  iE  j   k
+                aE
+            /   |   \
+        bE      cE      d
+      / | \       \     | \
+    e   f   gE  hD  iE  j   k
 
 However, it's still possible that concurrent reader has seen downlink from 'c'
 to 'h' before we deleted it.  In that case this reader will step right from 'h'
@@ -463,11 +465,11 @@ The next picture shows tree state after 'i' and 'c' was deleted.  Internal page
 investigation is 'a-d-j'.  Pages 'b' and 'g' are locked as self siblings of 'd'
 and 'j'.
 
-               aE
-           /       \
-       bE      cD      dE
-     / | \             | \
-   e   f   gE  hD  iD  jE  k
+                aE
+            /       \
+        bE      cD      dE
+      / | \             | \
+    e   f   gE  hD  iD  jE  k
 
 During the replay of page deletion at standby, the page's left sibling, the
 target page, and its parent, are locked in that order.  This order guarantees

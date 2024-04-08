@@ -5,14 +5,14 @@ tznames
 
 This directory contains files with timezone sets for PostgreSQL.  The problem
 is that time zone abbreviations are not unique throughout the world and you
-might find out that a time zone abbreviation in the `Default' set collides
+might find out that a time zone abbreviation in the 'Default' set collides
 with the one you wanted to use.  This can be fixed by selecting a timezone
 set that defines the abbreviation the way you want it.  There might already
 be a file here that serves your needs.  If not, you can create your own.
 
 In order to use one of these files, you need to set
 
-   timezone_abbreviations = 'xyz'
+    timezone_abbreviations = 'xyz'
 
 in any of the usual ways for setting a parameter, where xyz is the filename
 that contains the desired time zone abbreviations.
@@ -22,9 +22,9 @@ location supplied here, please report this to <pgsql-hackers@lists.postgresql.or
 Your set of time zone abbreviations can then be included in future releases.
 For the time being you can always add your own set.
 
-Typically a custom abbreviation set is made by including the `Default' set
+Typically a custom abbreviation set is made by including the 'Default' set
 and then adding or overriding abbreviations as necessary.  For examples,
-see the `Australia' and `India' files.
+see the 'Australia' and 'India' files.
 
 The files named Africa.txt, etc, are not intended to be used directly as
 time zone abbreviation files. They contain reference definitions of time zone

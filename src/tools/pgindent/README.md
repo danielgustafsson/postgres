@@ -9,7 +9,7 @@ http://adpgtech.blogspot.com/2015/05/running-pgindent-on-non-core-code-or.html
 
 
 PREREQUISITES:
-
+--------------
 1) Install pg_bsd_indent in your PATH.  Its source code is in the
    sibling directory src/tools/pg_bsd_indent; see the directions
    in that directory's README file.
@@ -21,12 +21,15 @@ PREREQUISITES:
    To install, follow the usual install process for a Perl module
    ("man perlmodinstall" explains it).  Or, if you have cpan installed,
    this should work:
+
    cpan SHANCOCK/Perl-Tidy-20230309.tar.gz
+
    Or if you have cpanm installed, you can just use:
+
    cpanm https://cpan.metacpan.org/authors/id/S/SH/SHANCOCK/Perl-Tidy-20230309.tar.gz
 
 DOING THE INDENT RUN:
-
+---------------------
 1) Change directory to the top of the source tree.
 
 2) Download the latest typedef file from the buildfarm:
@@ -58,7 +61,7 @@ DOING THE INDENT RUN:
 	cd ../../..
 
 VALIDATION:
-
+-----------
 1) Check for any newly-created files using "git status"; there shouldn't
    be any.  (pgindent leaves *.BAK files behind if it has trouble, while
    perltidy leaves *.LOG files behind.)

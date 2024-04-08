@@ -72,7 +72,7 @@ University of California, Berkeley
 What follows is the README file as maintained by FreeBSD indent.
 
 ----------
-
+```
   $FreeBSD: head/usr.bin/indent/README 105244 2002-10-16 13:58:39Z charnier $
 
 This is the C indenter, it originally came from the University of Illinois
@@ -171,4 +171,4 @@ regards..	oz
 cc: ccvaxa!willcox
     sun.com!jar
     uunet!rsalz
-
+```

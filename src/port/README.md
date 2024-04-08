@@ -14,7 +14,7 @@ libraries.  This is done by removing -lpgport from the link line:
         # Need to recompile any libpgport object files
         LIBS := $(filter-out -lpgport, $(LIBS))
 
-and adding infrastructure to recompile the object files:
+  and adding infrastructure to recompile the object files:
 
         OBJS= execute.o typename.o descriptor.o data.o error.o prepare.o memory.o \
                 connect.o misc.o path.o exec.o \
