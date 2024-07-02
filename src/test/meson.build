@@ -7,6 +7,7 @@ subdir('authentication')
 subdir('recovery')
 subdir('subscription')
 subdir('modules')
+subdir('checksum')
 
 if ssl.found()
   subdir('ssl')

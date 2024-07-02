@@ -36,6 +36,7 @@
 
 #include "access/xloginsert.h"
 #include "access/xlogrecord.h"
+#include "miscadmin.h"
 #include "storage/bufmgr.h"
 #include "storage/bufpage.h"
 #include "storage/bulk_write.h"
@@ -253,6 +254,7 @@ smgr_bulk_flush(BulkWriteState *bulkstate)
 		}
 		else
 			smgrwrite(bulkstate->smgr, bulkstate->forknum, blkno, page, true);
+
 		pfree(page);
 	}
 

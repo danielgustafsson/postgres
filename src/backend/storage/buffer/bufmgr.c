@@ -1544,7 +1544,9 @@ WaitReadBuffers(ReadBuffersOperation *operation)
 				bufBlock = BufHdrGetBlock(bufHdr);
 			}
 
-			/* check for garbage data */
+			/*
+			 * Check for garbage data.
+			 */
 			if (!PageIsVerifiedExtended((Page) bufBlock, io_first_block + j,
 										PIV_LOG_WARNING | PIV_REPORT_STAT))
 			{

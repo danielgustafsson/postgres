@@ -395,6 +395,7 @@ CheckPointStmt
 CheckpointStatsData
 CheckpointerRequest
 CheckpointerShmemStruct
+ChecksumType
 Chromosome
 CkptSortItem
 CkptTsStatus
@@ -580,6 +581,10 @@ DataPageDeleteStack
 DataTypesUsageChecks
 DataTypesUsageVersionCheck
 DatabaseInfo
+DataChecksumsWorkerDatabase
+DataChecksumsWorkerResult
+DataChecksumsWorkerResultEntry
+DataChecksumsWorkerShmemStruct
 DateADT
 DateTimeErrorExtra
 Datum

@@ -8340,6 +8340,7 @@ log_heap_visible(Relation rel, Buffer heap_buffer, Buffer vm_buffer,
 	XLogRegisterBuffer(0, vm_buffer, 0);
 
 	flags = REGBUF_STANDARD;
+
 	if (!XLogHintBitIsNeeded())
 		flags |= REGBUF_NO_IMAGE;
 	XLogRegisterBuffer(1, heap_buffer, flags);
