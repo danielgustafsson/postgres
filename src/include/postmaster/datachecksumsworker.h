@@ -20,7 +20,9 @@ extern void DataChecksumsWorkerShmemInit(void);
 
 /* Start the background processes for enabling or disabling checksums */
 void		StartDataChecksumsWorkerLauncher(bool enable_checksums,
-											 int cost_delay, int cost_limit);
+											 int cost_delay,
+											 int cost_limit,
+											 bool fast);
 
 /* Background worker entrypoints */
 void		DataChecksumsWorkerLauncherMain(Datum arg);

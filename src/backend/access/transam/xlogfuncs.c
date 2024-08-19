@@ -759,22 +759,7 @@ disable_data_checksums(PG_FUNCTION_ARGS)
 	if (!superuser())
 		ereport(ERROR, errmsg("must be superuser"));
 
-	StartDataChecksumsWorkerLauncher(false, 0, 0);
-	PG_RETURN_VOID();
-}
-
-/*
- * Enables data checksums for the cluster, if applicable. Starts a background
- * worker launcher which in turn launches background workers which computes
- * data checksums for all pages.
- */
-Datum
-enable_data_checksums(PG_FUNCTION_ARGS)
-{
-	if (!superuser())
-		ereport(ERROR, errmsg("must be superuser"));
-
-	StartDataChecksumsWorkerLauncher(true, 0, 100);
+	StartDataChecksumsWorkerLauncher(false, 0, 0, false);
 	PG_RETURN_VOID();
 }
 
@@ -784,10 +769,11 @@ enable_data_checksums(PG_FUNCTION_ARGS)
  * which updates data checksums on existing data.
  */
 Datum
-enable_data_checksums_p(PG_FUNCTION_ARGS)
+enable_data_checksums(PG_FUNCTION_ARGS)
 {
 	int			cost_delay = PG_GETARG_INT32(0);
 	int			cost_limit = PG_GETARG_INT32(1);
+	bool		fast = PG_GETARG_BOOL(2);
 
 	if (!superuser())
 		ereport(ERROR, errmsg("must be superuser"));
@@ -798,7 +784,7 @@ enable_data_checksums_p(PG_FUNCTION_ARGS)
 	if (cost_limit <= 0)
 		ereport(ERROR, errmsg("cost limit must be greater than zero"));
 
-	StartDataChecksumsWorkerLauncher(true, cost_delay, cost_limit);
+	StartDataChecksumsWorkerLauncher(true, cost_delay, cost_limit, fast);
 
 	PG_RETURN_VOID();
 }

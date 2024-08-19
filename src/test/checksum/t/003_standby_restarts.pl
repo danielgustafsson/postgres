@@ -9,6 +9,13 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
+# pg_enable_checksums take three params: cost_delay, cost_limit and fast. For
+# testing we always want to override the default value for 'fast' with True
+# which will cause immediate checkpoints. 0 and 100 are the defaults for
+# cost_delay and cost_limit which are fine to use for testing so let's keep
+# them.
+my $enable_params = '0, 100, true';
+
 # Initialize primary node
 my $node_primary = PostgreSQL::Test::Cluster->new('primary');
 $node_primary->init(allows_streaming => 1);
@@ -44,7 +51,7 @@ $result = $node_standby_1->safe_psql('postgres',
 is($result, "off", 'ensure checksums are turned off on standby_1');
 
 # Enable checksums for the cluster
-$node_primary->safe_psql('postgres', "SELECT pg_enable_data_checksums();");
+$node_primary->safe_psql('postgres', "SELECT pg_enable_data_checksums($enable_params);");
 
 # Ensure that the primary switches to "inprogress-on"
 $result = $node_primary->poll_query_until(

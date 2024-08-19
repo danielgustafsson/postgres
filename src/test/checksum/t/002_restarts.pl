@@ -10,6 +10,13 @@ use PostgreSQL::Test::Cluster;
 use PostgreSQL::Test::Utils;
 use Test::More;
 
+# pg_enable_checksums take three params: cost_delay, cost_limit and fast. For
+# testing we always want to override the default value for 'fast' with True
+# which will cause immediate checkpoints. 0 and 100 are the defaults for
+# cost_delay and cost_limit which are fine to use for testing so let's keep
+# them.
+my $enable_params = '0, 100, true';
+
 # Initialize node with checksums disabled.
 my $node = PostgreSQL::Test::Cluster->new('main');
 $node->init;
@@ -39,7 +46,7 @@ $result = $node->safe_psql('postgres',
 	"SELECT relpersistence FROM pg_catalog.pg_class WHERE relname = 'tt';");
 is($result, 't', 'ensure we can see the temporary table');
 
-$node->safe_psql('postgres', "SELECT pg_enable_data_checksums();");
+$node->safe_psql('postgres', "SELECT pg_enable_data_checksums($enable_params);");
 
 $result = $node->poll_query_until(
 	'postgres',
@@ -56,7 +63,7 @@ $result = $node->safe_psql('postgres',
 );
 is($result, 'inprogress-on', "ensure checksums aren't enabled yet");
 
-$node->safe_psql('postgres', "SELECT pg_enable_data_checksums();");
+$node->safe_psql('postgres', "SELECT pg_enable_data_checksums($enable_params);");
 
 $result = $node->poll_query_until(
 	'postgres',

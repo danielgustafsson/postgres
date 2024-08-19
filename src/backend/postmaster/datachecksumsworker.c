@@ -219,6 +219,7 @@ typedef struct DataChecksumsWorkerShmemStruct
 											 * enabled, else false */
 	int			launch_cost_delay;
 	int			launch_cost_limit;
+	bool		launch_fast;
 
 	/*
 	 * Is a launcher process is currently running?
@@ -243,6 +244,7 @@ typedef struct DataChecksumsWorkerShmemStruct
 									 * else false */
 	int			cost_delay;
 	int			cost_limit;
+	bool		immediate_checkpoint;
 
 	/*
 	 * Signaling between the launcher and the worker process.
@@ -302,7 +304,7 @@ static List *BuildDatabaseList(void);
 static List *BuildRelationList(bool temp_relations, bool include_shared);
 static void FreeDatabaseList(List *dblist);
 static DataChecksumsWorkerResult ProcessDatabase(DataChecksumsWorkerDatabase *db);
-static bool ProcessAllDatabases(bool *already_connected);
+static bool ProcessAllDatabases(bool *already_connected, bool immediate_checkpoint);
 static bool ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrategy strategy);
 static void launcher_cancel_handler(SIGNAL_ARGS);
 static void WaitForAllTransactionsToFinish(void);
@@ -315,7 +317,10 @@ static void WaitForAllTransactionsToFinish(void);
  * well as disabling.
  */
 void
-StartDataChecksumsWorkerLauncher(bool enable_checksums, int cost_delay, int cost_limit)
+StartDataChecksumsWorkerLauncher(bool enable_checksums,
+								 int cost_delay,
+								 int cost_limit,
+								 bool fast)
 {
 	BackgroundWorker bgw;
 	BackgroundWorkerHandle *bgw_handle;
@@ -331,6 +336,7 @@ StartDataChecksumsWorkerLauncher(bool enable_checksums, int cost_delay, int cost
 	DataChecksumsWorkerShmem->launch_enable_checksums = enable_checksums;
 	DataChecksumsWorkerShmem->launch_cost_delay = cost_delay;
 	DataChecksumsWorkerShmem->launch_cost_limit = cost_limit;
+	DataChecksumsWorkerShmem->launch_fast = fast;
 
 	/* is the launcher already running? */
 	launcher_running = DataChecksumsWorkerShmem->launcher_running;
@@ -759,6 +765,7 @@ DataChecksumsWorkerLauncherMain(Datum arg)
 	DataChecksumsWorkerShmem->enabling_checksums = enabling_checksums;
 	DataChecksumsWorkerShmem->cost_delay = DataChecksumsWorkerShmem->launch_cost_delay;
 	DataChecksumsWorkerShmem->cost_limit = DataChecksumsWorkerShmem->launch_cost_limit;
+	DataChecksumsWorkerShmem->immediate_checkpoint = DataChecksumsWorkerShmem->launch_fast;
 	LWLockRelease(DataChecksumsWorkerLock);
 
 	/*
@@ -791,7 +798,8 @@ again:
 
 		SetDataChecksumsOnInProgress();
 
-		status = ProcessAllDatabases(&connected);
+		status = ProcessAllDatabases(&connected,
+									 DataChecksumsWorkerShmem->immediate_checkpoint);
 		if (!status)
 		{
 			/*
@@ -806,7 +814,7 @@ again:
 			}
 			LWLockRelease(DataChecksumsWorkerLock);
 			ereport(ERROR,
-					(errmsg("unable to enable checksums in cluster")));
+					(errmsg("unable to enable data checksums in cluster")));
 		}
 
 		SetDataChecksumsOn();
@@ -846,15 +854,20 @@ done:
  * This will repeatedly generate a list of databases to process for enabling
  * checksums. Until no new databases are found, this will loop around computing
  * a new list and comparing it to the already seen ones.
+ *
+ * If immediate_checkpoint is set to true then a CHECKPOINT_IMMEDIATE will be
+ * issued. This is useful for testing but should be avoided in production use
+ * as it may affect cluster performance drastically.
  */
 static bool
-ProcessAllDatabases(bool *already_connected)
+ProcessAllDatabases(bool *already_connected, bool immediate_checkpoint)
 {
 	List	   *DatabaseList;
 	HTAB	   *ProcessedDatabases = NULL;
 	ListCell   *lc;
 	HASHCTL		hash_ctl;
 	bool		found_failed = false;
+	int			flags;
 
 	/* Initialize a hash tracking all processed databases */
 	memset(&hash_ctl, 0, sizeof(hash_ctl));
@@ -1018,16 +1031,18 @@ ProcessAllDatabases(bool *already_connected)
 		SetDataChecksumsOff();
 		ereport(ERROR,
 				(errmsg("checksums failed to get enabled in all databases, aborting"),
-				 errhint("The server log might have more information on the error.")));
+				 errhint("The server log might have more information on the cause of the error.")));
 	}
 
 	/*
-	 * Force a checkpoint to get everything out to disk. TODO: we probably
-	 * don't want to use a CHECKPOINT_IMMEDIATE here but it's very convenient
-	 * for testing until the patch is fully baked, as it may otherwise make
-	 * tests take a lot longer.
+	 * Force a checkpoint to get everything out to disk. The use of immediate
+	 * checkpoints is for running tests, as they would otherwise not execute
+	 * in such a way that they can reliably be placed under timeout control.
 	 */
-	RequestCheckpoint(CHECKPOINT_FORCE | CHECKPOINT_WAIT | CHECKPOINT_IMMEDIATE);
+	flags = CHECKPOINT_FORCE | CHECKPOINT_WAIT;
+	if (immediate_checkpoint)
+		flags = flags | CHECKPOINT_IMMEDIATE;
+	RequestCheckpoint(flags);
 
 	return true;
 }
@@ -1070,6 +1085,7 @@ DataChecksumsWorkerShmemInit(void)
 	 */
 	DataChecksumsWorkerShmem->launch_enable_checksums = false;
 	DataChecksumsWorkerShmem->launcher_running = false;
+	DataChecksumsWorkerShmem->launch_fast = false;
 }
 
 /*

@@ -606,6 +606,7 @@ static int	segment_size;
 static int	shared_memory_size_mb;
 static int	shared_memory_size_in_huge_pages;
 static int	wal_block_size;
+static int	num_os_semaphores;
 static int data_checksums;
 static bool integer_datetimes;
 
