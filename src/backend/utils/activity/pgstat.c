@@ -353,6 +353,22 @@ static const PgStat_KindInfo pgstat_kind_builtin_infos[PGSTAT_KIND_BUILTIN_SIZE]
 		.reset_timestamp_cb = pgstat_subscription_reset_timestamp_cb,
 	},
 
+#if 0
+	[PGSTAT_KIND_CHECKSUMS] = {
+		.name = "datachecksums",
+
+		.fixed_amount = false,
+		.accessed_across_databases = true,
+
+		.shared_size = sizeof(PgStatShared_DataChecksums),
+		.shared_data_off = offsetof(PgStatShared_DataChecksums, stats),
+		.shared_data_len = sizeof(((PgStatShared_DataChecksums *) 0)->stats),
+		.pending_size = sizeof(PgStat_DataChecksumsEntry),
+
+		.flush_pending_cb = pgstat_datachecksums_flush_cb,
+		.reset_timestamp_cb = pgstat_datachecksums_reset_timestamp_cb,
+	},
+#endif
 
 	/* stats for fixed-numbered (mostly 1) objects */
 

@@ -407,7 +407,13 @@ typedef struct PgStatShared_ReplSlot
 	PgStatShared_Common header;
 	PgStat_StatReplSlotEntry stats;
 } PgStatShared_ReplSlot;
-
+#if 0
+typedef struct PgStatShared_DataChecksums
+{
+	PgStatShared_Common header;
+	PgStat_StatDataChecksumsEntry stats;
+} PgStatShared_DataChecksums;
+#endif
 
 /*
  * Central shared memory entry for the cumulative stats system.

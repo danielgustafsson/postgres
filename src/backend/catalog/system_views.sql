@@ -1321,6 +1321,26 @@ CREATE VIEW pg_stat_progress_copy AS
     FROM pg_stat_get_progress_info('COPY') AS S
         LEFT JOIN pg_database D ON S.datid = D.oid;
 
+CREATE VIEW pg_stat_progress_datachecksums AS
+	SELECT
+		S.pid AS pid, S.datid AS datid, D.datname AS datname,
+		CASE S.param1 WHEN 0 THEN 'enabling'
+                      WHEN 1 THEN 'disabling'
+					  WHEN 2 THEN 'waiting'
+					  WHEN 3 THEN 'waiting on backends'
+					  WHEN 4 THEN 'waiting on temporary tables'
+					  WHEN 5 THEN 'done'
+					  END AS phase,
+		S.param2 AS databases_total,
+		S.param3 AS relations_total,
+		S.param4 AS databases_processed,
+		S.param5 AS relations_processed,
+		S.param6 AS databases_current,
+		S.param7 AS relation_current,
+		S.param8 AS relation_current_blocks
+	FROM pg_stat_get_progress_info('DATACHECKSUMS') AS S
+		LEFT JOIN pg_database D ON S.datid = D.oid;
+
 CREATE VIEW pg_user_mappings AS
     SELECT
         U.oid       AS umid,

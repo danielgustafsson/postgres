@@ -48,6 +48,8 @@
 #define PGSTAT_KIND_FUNCTION	3	/* per-function statistics */
 #define PGSTAT_KIND_REPLSLOT	4	/* per-slot statistics */
 #define PGSTAT_KIND_SUBSCRIPTION	5	/* per-subscription statistics */
+//#define PGSTAT_KIND_DATACHECKSUMS	6	/* database-wide statistics for data
+//										   checksums enabled/disabled */
 
 /* stats for fixed-numbered objects */
 #define PGSTAT_KIND_ARCHIVER	6
@@ -407,6 +409,13 @@ typedef struct PgStat_StatReplSlotEntry
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatReplSlotEntry;
 
+/*
+typedef struct PgStat_DataChecksumsEntry
+	TimeStampTz start_time;
+	PgStat_Counter rel_done;
+} PgStatDataChecksumsEntry;
+*/
+
 typedef struct PgStat_SLRUStats
 {
 	PgStat_Counter blocks_zeroed;
@@ -486,6 +495,18 @@ typedef struct PgStat_PendingWalStats
 	instr_time	wal_sync_time;
 } PgStat_PendingWalStats;
 
+
+/*
+typedef struct PgStat_DataChecksumStats
+{
+	char	relation[NAMEDATALEN];
+} PgStat_DataChecksumStats;
+
+typedef struct PgStat_PendingDataChecksumStats
+{
+	PgStat_Counter
+}
+*/
 
 /*
  * Functions in pgstat.c
@@ -750,7 +771,11 @@ extern void pgstat_execute_transactional_drops(int ndrops, struct xl_xact_stats_
 extern void pgstat_report_wal(bool force);
 extern PgStat_WalStats *pgstat_fetch_stat_wal(void);
 
-
+/*
+ * Functions in pgstat_checksums.c
+ *
+extern PgStat_DataChecksumStats *pgstat_fetch_checksum_stats(void);
+ */
 /*
  * Variables in pgstat.c
  */

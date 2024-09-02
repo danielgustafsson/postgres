@@ -246,6 +246,8 @@ pg_stat_get_progress_info(PG_FUNCTION_ARGS)
 		cmdtype = PROGRESS_COMMAND_BASEBACKUP;
 	else if (pg_strcasecmp(cmd, "COPY") == 0)
 		cmdtype = PROGRESS_COMMAND_COPY;
+	else if (pg_strcasecmp(cmd, "DATACHECKSUMS") == 0)
+		cmdtype = PROGRESS_COMMAND_DATACHECKSUMS;
 	else
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
@@ -1455,6 +1457,34 @@ pg_stat_get_io(PG_FUNCTION_ARGS)
 
 	return (Datum) 0;
 }
+
+#if 0
+/*
+ * Returns statistics and progress of data checksum operations.
+ */
+Datum
+pg_stat_get_checksums(PG_FUNCTION_ARGS)
+{
+#define PG_STAT_GET_CHECKSUMS_COLS 2
+	TupleDesc	tupdesc;
+	Datum		values[PG_STAT_GET_CHECKSUMS_COLS] = {0};
+	bool		nulls[PG_STAT_GET_CHECKSUMS_COLS] = {0};
+	PgStat_DataChecksumStats *checksum_stats;
+
+	tupdesc = CreateTemplateTupleDesc(PG_STAT_GET_CHECKSUMS_COLS);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 1, "relation", TEXTOID, -1, 0);
+	TupleDescInitEntry(tupdesc, (AttrNumber) 2, "status", BOOLOID, -1, 0);
+
+	BlessTupleDesc(tupdesc);
+
+	checksum_stats = pgstat_fetch_checksum_stats();
+
+	nulls[0] = true;
+	nulls[1] = true;
+
+	PG_RETURN_DATUM(HeapTupleGetDatum(heap_form_tuple(tupdesc, values, nulls)));
+}
+#endif
 
 /*
  * Returns statistics of WAL activity

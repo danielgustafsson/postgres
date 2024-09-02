@@ -169,8 +169,10 @@
 #include "catalog/indexing.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_database.h"
+#include "commands/progress.h"
 #include "commands/vacuum.h"
 #include "common/relpath.h"
+//#include "funcapi.h"
 #include "miscadmin.h"
 #include "pgstat.h"
 #include "postmaster/bgworker.h"
@@ -403,6 +405,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 	if (!relns)
 		return false;
 
+	pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_CUR_REL_TOTAL_BLOCKS,
+								 numblocks);
+
 	/*
 	 * We are looping over the blocks which existed at the time of process
 	 * start, which is safe since new blocks are created with checksums set
@@ -422,6 +427,9 @@ ProcessSingleRelationFork(Relation reln, ForkNumber forkNum, BufferAccessStrateg
 					 relns, RelationGetRelationName(reln),
 					 forkNames[forkNum], blknum, numblocks);
 			pgstat_report_activity(STATE_RUNNING, activity);
+
+			pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_CUR_REL_PROCESSED_BLOCKS,
+										 blknum);
 		}
 
 		/* Need to get an exclusive lock before we can flag as dirty */
@@ -479,9 +487,7 @@ ProcessSingleRelationByOid(Oid relationId, BufferAccessStrategy strategy)
 
 	StartTransactionCommand();
 
-	elog(DEBUG2,
-		 "adding data checksums to relation with OID %u",
-		 relationId);
+	pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_CUR_REL, relationId);
 
 	rel = try_relation_open(relationId, AccessShareLock);
 	if (rel == NULL)
@@ -749,6 +755,10 @@ DataChecksumsWorkerLauncherMain(Datum arg)
 	MyBackendType = B_DATACHECKSUMSWORKER_LAUNCHER;
 	init_ps_display(NULL);
 
+	/* Initialize backend status information */
+	pgstat_beinit();
+	pgstat_bestart();
+
 	LWLockAcquire(DataChecksumsWorkerLock, LW_EXCLUSIVE);
 
 	if (DataChecksumsWorkerShmem->launcher_running)
@@ -796,6 +806,19 @@ again:
 		}
 		RESUME_INTERRUPTS();
 
+		/*
+		 * Initialize progress and indicate that we are waiting on the other
+		 * backends to clear the procsignalbarrier.
+		 */
+		elog(LOG, "XXX: registering progress command");
+		pgstat_progress_start_command(PROGRESS_COMMAND_DATACHECKSUMS,
+									  InvalidOid);
+		pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_PHASE,
+									 PROGRESS_DATACHECKSUMS_PHASE_WAITING);
+
+		/*
+		 * Set the state to inprogress-on and wait on the procsignal barrier.
+		 */
 		SetDataChecksumsOnInProgress();
 
 		status = ProcessAllDatabases(&connected,
@@ -841,6 +864,9 @@ done:
 		LWLockRelease(DataChecksumsWorkerLock);
 		goto again;
 	}
+
+	/* Shut down progress reporting as we are done */
+	pgstat_progress_end_command();
 
 	launcher_running = false;
 	DataChecksumsWorkerShmem->launcher_running = false;
@@ -901,6 +927,15 @@ ProcessAllDatabases(bool *already_connected, bool immediate_checkpoint)
 	 */
 	DatabaseList = BuildDatabaseList();
 
+	/*
+	 * Update progress reporting with the total number of databases we need
+	 * to process. This number should not be changed during processing, the
+	 * columns for processed databases is instead increased such that it can
+	 * be compared against the total.
+	 */
+	pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_TOTAL_DB,
+								 list_length(DatabaseList));
+
 	while (true)
 	{
 		int			processed_databases = 0;
@@ -912,10 +947,18 @@ ProcessAllDatabases(bool *already_connected, bool immediate_checkpoint)
 			DataChecksumsWorkerResultEntry *entry;
 			bool		found;
 
-			elog(DEBUG1,
-				 "starting processing of database %s with oid %u",
-				 db->dbname, db->dboid);
+			/*
+			 * Indicate which database is being processed set the number of
+			 * relations to -1 to clear field from previous values. -1 will
+			 * translate to NULL in the progress view.
+			 */
+			pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_CUR_DB, db->dboid);
+			pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_TOTAL_REL, -1);
 
+			/*
+			 * Check if this database has been processed already, and if so
+			 * whether it should be retried or skipped.
+			 */
 			entry = (DataChecksumsWorkerResultEntry *) hash_search(ProcessedDatabases, &db->dboid,
 																   HASH_FIND, NULL);
 
@@ -1030,7 +1073,7 @@ ProcessAllDatabases(bool *already_connected, bool immediate_checkpoint)
 		/* Disable checksums on cluster, because we failed */
 		SetDataChecksumsOff();
 		ereport(ERROR,
-				(errmsg("checksums failed to get enabled in all databases, aborting"),
+				(errmsg("data checksums failed to get enabled in all databases, aborting"),
 				 errhint("The server log might have more information on the cause of the error.")));
 	}
 
@@ -1254,9 +1297,7 @@ DataChecksumsWorkerMain(Datum arg)
 	MyBackendType = B_DATACHECKSUMSWORKER_WORKER;
 	init_ps_display(NULL);
 
-	ereport(DEBUG1,
-			(errmsg("starting data checksum processing in database with OID %u",
-					dboid)));
+	pgstat_progress_start_command(PROGRESS_COMMAND_DATACHECKSUMS, dboid);
 
 	BackgroundWorkerInitializeConnectionByOid(dboid, InvalidOid,
 											  BGWORKER_BYPASS_ALLOWCONN);
@@ -1287,6 +1328,8 @@ DataChecksumsWorkerMain(Datum arg)
 
 	RelationList = BuildRelationList(false,
 									 DataChecksumsWorkerShmem->process_shared_catalogs);
+	pgstat_progress_update_param(PROGRESS_DATACHECKSUMS_TOTAL_REL,
+								 list_length(RelationList));
 	foreach(lc, RelationList)
 	{
 		Oid			reloid = lfirst_oid(lc);
@@ -1320,6 +1363,11 @@ DataChecksumsWorkerMain(Datum arg)
 		ListCell   *lc;
 		int			numleft;
 		char		activity[64];
+		const int index[] = {
+			PROGRESS_DATACHECKSUMS_PHASE,
+			PROGRESS_DATACHECKSUMS_TOTAL_REL
+		};
+		int64 vals[2];
 
 		CurrentTempTables = BuildRelationList(true, false);
 		numleft = 0;
@@ -1333,11 +1381,17 @@ DataChecksumsWorkerMain(Datum arg)
 		if (numleft == 0)
 			break;
 
-		/* At least one temp table is left to wait for */
+		/*
+		 * At least one temp table is left to wait for, indicate in pgstat
+		 * activity and progress reporting.
+		 */
 		snprintf(activity,
 				 sizeof(activity),
 				 "Waiting for %d temp tables to be removed", numleft);
 		pgstat_report_activity(STATE_RUNNING, activity);
+		vals[0] = PROGRESS_DATACHECKSUMS_PHASE_WAITING;
+		vals[1] = numleft;
+		pgstat_progress_update_multi_param(2, index, vals);
 
 		/* Retry every 5 seconds */
 		ResetLatch(MyLatch);
@@ -1363,7 +1417,6 @@ DataChecksumsWorkerMain(Datum arg)
 	list_free(InitialTempTableList);
 
 	DataChecksumsWorkerShmem->success = DATACHECKSUMSWORKER_SUCCESSFUL;
-	ereport(DEBUG1,
-			(errmsg("data checksum processing completed in database with OID %u",
-					dboid)));
+
+	pgstat_progress_end_command();
 }
