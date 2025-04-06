@@ -50,6 +50,7 @@
 #include "storage/procsignal.h"
 #include "storage/spin.h"
 #include "storage/standby.h"
+#include "utils/memutils.h"
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 
@@ -547,6 +548,13 @@ InitProcess(void)
 	PGSemaphoreReset(MyProc->sem);
 
 	/*
+	 * The before shmem exit callback frees the DSA memory occupied by the
+	 * latest memory context statistics that could be published by this
+	 * backend if requested.
+	 */
+	before_shmem_exit(AtProcExit_memstats_dsa_free, 0);
+
+	/*
 	 * Arrange to clean up at backend exit.
 	 */
 	on_shmem_exit(ProcKill, 0);
@@ -719,6 +727,13 @@ InitAuxiliaryProcess(void)
 	 * necessary anymore, but seems like a good idea for cleanliness.)
 	 */
 	PGSemaphoreReset(MyProc->sem);
+
+	/*
+	 * The before shmem exit callback frees the DSA memory occupied by the
+	 * latest memory context statistics that could be published by this
+	 * process if requested.
+	 */
+	before_shmem_exit(AtProcExit_memstats_dsa_free, 0);
 
 	/*
 	 * Arrange to clean up at process exit.

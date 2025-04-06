@@ -23,6 +23,11 @@
 
 #include "mb/pg_wchar.h"
 #include "miscadmin.h"
+#include "nodes/pg_list.h"
+#include "storage/lwlock.h"
+#include "storage/ipc.h"
+#include "utils/dsa.h"
+#include "utils/hsearch.h"
 #include "utils/memdebug.h"
 #include "utils/memutils.h"
 #include "utils/memutils_internal.h"
@@ -135,6 +140,17 @@ static const MemoryContextMethods mcxt_methods[] = {
 };
 
 #undef BOGUS_MCTX
+/*
+ * This is passed to MemoryContextStatsInternal to determine whether
+ * to print context statistics or not and where to print them logs or
+ * stderr.
+ */
+typedef enum PrintDestination
+{
+	PRINT_STATS_TO_STDERR = 0,
+	PRINT_STATS_TO_LOGS,
+	PRINT_STATS_NONE
+}			PrintDestination;
 
 /*
  * CurrentMemoryContext
@@ -162,10 +178,23 @@ static void MemoryContextCallResetCallbacks(MemoryContext context);
 static void MemoryContextStatsInternal(MemoryContext context, int level,
 									   int max_level, int max_children,
 									   MemoryContextCounters *totals,
-									   bool print_to_stderr);
+									   PrintDestination print_location,
+									   int *num_contexts);
 static void MemoryContextStatsPrint(MemoryContext context, void *passthru,
 									const char *stats_string,
 									bool print_to_stderr);
+static void PublishMemoryContext(MemoryContextEntry *memctx_infos,
+								 int curr_id, MemoryContext context,
+								 List *path,
+								 MemoryContextCounters stat,
+								 int num_contexts, dsa_area *area);
+static void compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
+										   int *stats_count,
+										   bool get_summary);
+static List *compute_context_path(MemoryContext c, HTAB *context_id_lookup,
+								  int max_level);
+static void dsa_free_previous_stats(dsa_area *area, int total_stats,
+									dsa_pointer prev_dsa_pointer);
 
 /*
  * You should not do memory allocations within a critical section, because
@@ -831,11 +860,19 @@ MemoryContextStatsDetail(MemoryContext context,
 						 bool print_to_stderr)
 {
 	MemoryContextCounters grand_totals;
+	int			num_contexts;
+	PrintDestination print_location;
 
 	memset(&grand_totals, 0, sizeof(grand_totals));
 
+	if (print_to_stderr)
+		print_location = PRINT_STATS_TO_STDERR;
+	else
+		print_location = PRINT_STATS_TO_LOGS;
+
+	/* num_contexts report number of contexts aggregated in the output */
 	MemoryContextStatsInternal(context, 0, max_level, max_children,
-							   &grand_totals, print_to_stderr);
+							   &grand_totals, print_location, &num_contexts);
 
 	if (print_to_stderr)
 		fprintf(stderr,
@@ -870,13 +907,14 @@ MemoryContextStatsDetail(MemoryContext context,
  *		One recursion level for MemoryContextStats
  *
  * Print stats for this context if possible, but in any case accumulate counts
- * into *totals (if not NULL).
+ * into *totals (if not NULL). The callers should make sure that print_location
+ * is set to PRINT_STATS_STDERR or PRINT_STATS_TO_LOGS or PRINT_STATS_NONE.
  */
 static void
 MemoryContextStatsInternal(MemoryContext context, int level,
 						   int max_level, int max_children,
 						   MemoryContextCounters *totals,
-						   bool print_to_stderr)
+						   PrintDestination print_location, int *num_contexts)
 {
 	MemoryContext child;
 	int			ichild;
@@ -884,10 +922,39 @@ MemoryContextStatsInternal(MemoryContext context, int level,
 	Assert(MemoryContextIsValid(context));
 
 	/* Examine the context itself */
-	context->methods->stats(context,
-							MemoryContextStatsPrint,
-							&level,
-							totals, print_to_stderr);
+	switch (print_location)
+	{
+		case PRINT_STATS_TO_STDERR:
+			context->methods->stats(context,
+									MemoryContextStatsPrint,
+									&level,
+									totals, true);
+			break;
+
+		case PRINT_STATS_TO_LOGS:
+			context->methods->stats(context,
+									MemoryContextStatsPrint,
+									&level,
+									totals, false);
+			break;
+
+		case PRINT_STATS_NONE:
+
+			/*
+			 * Do not print the statistics if print_location is
+			 * PRINT_STATS_NONE, only compute totals. This is used in
+			 * reporting of memory context statistics via a sql function. Last
+			 * parameter is not relevant.
+			 */
+			context->methods->stats(context,
+									NULL,
+									NULL,
+									totals, false);
+			break;
+	}
+
+	/* Increment the context count for each of the recursive call */
+	*num_contexts = *num_contexts + 1;
 
 	/*
 	 * Examine children.
@@ -907,7 +974,7 @@ MemoryContextStatsInternal(MemoryContext context, int level,
 			MemoryContextStatsInternal(child, level + 1,
 									   max_level, max_children,
 									   totals,
-									   print_to_stderr);
+									   print_location, num_contexts);
 		}
 	}
 
@@ -926,7 +993,13 @@ MemoryContextStatsInternal(MemoryContext context, int level,
 			child = MemoryContextTraverseNext(child, context);
 		}
 
-		if (print_to_stderr)
+		/*
+		 * Add the count of children contexts which are traversed in the
+		 * non-recursive manner.
+		 */
+		*num_contexts = *num_contexts + ichild;
+
+		if (print_location == PRINT_STATS_TO_STDERR)
 		{
 			for (int i = 0; i <= level; i++)
 				fprintf(stderr, "  ");
@@ -939,7 +1012,7 @@ MemoryContextStatsInternal(MemoryContext context, int level,
 					local_totals.freechunks,
 					local_totals.totalspace - local_totals.freespace);
 		}
-		else
+		else if (print_location == PRINT_STATS_TO_LOGS)
 			ereport(LOG_SERVER_ONLY,
 					(errhidestmt(true),
 					 errhidecontext(true),
@@ -1277,6 +1350,22 @@ HandleLogMemoryContextInterrupt(void)
 }
 
 /*
+ * HandleGetMemoryContextInterrupt
+ *		Handle receipt of an interrupt indicating a request to publish memory
+ *		contexts statistics.
+ *
+ * All the actual work is deferred to ProcessGetMemoryContextInterrupt() as
+ * this cannot be performed in a signal handler.
+ */
+void
+HandleGetMemoryContextInterrupt(void)
+{
+	InterruptPending = true;
+	PublishMemoryContextPending = true;
+	/* latch will be set by procsignal_sigusr1_handler */
+}
+
+/*
  * ProcessLogMemoryContextInterrupt
  * 		Perform logging of memory contexts of this backend process.
  *
@@ -1311,6 +1400,508 @@ ProcessLogMemoryContextInterrupt(void)
 	 * details about individual siblings beyond 100 will not be large.
 	 */
 	MemoryContextStatsDetail(TopMemoryContext, 100, 100, false);
+}
+
+/*
+ * ProcessGetMemoryContextInterrupt
+ *		Generate information about memory contexts used by the process.
+ *
+ * Performs a breadth first search on the memory context tree, thus parents
+ * statistics are reported before their children in the monitoring function
+ * output.
+ *
+ * Statistics for all the processes are shared via the same dynamic shared
+ * area.  Statistics written by each process are tracked independently in
+ * per-process DSA pointers. These pointers are stored in static shared memory.
+ *
+ * We calculate maximum number of context's statistics that can be displayed
+ * using a pre-determined limit for memory available per process for this
+ * utility maximum size of statistics for each context.  The remaining context
+ * statistics if any are captured as a cumulative total at the end of
+ * individual context's statistics.
+ *
+ * If get_summary is true, we capture the level 1 and level 2 contexts
+ * statistics.  For that we traverse the memory context tree recursively in
+ * depth first search manner to cover all the children of a parent context, to
+ * be able to display a cumulative total of memory consumption by a parent at
+ * level 2 and all its children.
+ */
+void
+ProcessGetMemoryContextInterrupt(void)
+{
+	List	   *contexts;
+	HASHCTL		ctl;
+	HTAB	   *context_id_lookup;
+	int			context_id = 0;
+	MemoryContextEntry *meminfo;
+	bool		get_summary = false;
+	dsa_area   *area = NULL;
+	int			max_stats;
+	int			idx = MyProcNumber;
+	int			stats_count = 0;
+	MemoryContextCounters stat;
+	int			num_individual_stats = 0;
+
+	PublishMemoryContextPending = false;
+
+	/*
+	 * The hash table is used for constructing "path" column of the view,
+	 * similar to its local backend counterpart.
+	 */
+	ctl.keysize = sizeof(MemoryContext);
+	ctl.entrysize = sizeof(MemoryContextId);
+	ctl.hcxt = CurrentMemoryContext;
+
+	context_id_lookup = hash_create("pg_get_remote_backend_memory_contexts",
+									256,
+									&ctl,
+									HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	/* List of contexts to process in the next round - start at the top. */
+	contexts = list_make1(TopMemoryContext);
+
+	/* Compute the number of stats that can fit in the defined limit */
+	max_stats = (MAX_SEGMENTS_PER_BACKEND * DSA_DEFAULT_INIT_SEGMENT_SIZE)
+		/ (MAX_MEMORY_CONTEXT_STATS_SIZE);
+	LWLockAcquire(&memCtxState[idx].lw_lock, LW_EXCLUSIVE);
+	get_summary = memCtxState[idx].get_summary;
+	LWLockRelease(&memCtxState[idx].lw_lock);
+
+	/*
+	 * Traverse the memory context tree to find total number of contexts. If
+	 * summary is requested report the total number of contexts at level 1 and
+	 * 2 from the top. Also, populate the hash table of context ids.
+	 */
+	compute_contexts_count_and_ids(contexts, context_id_lookup, &stats_count,
+								   get_summary);
+
+	/*
+	 * Allocate memory in this process's DSA for storing statistics of the the
+	 * memory contexts upto max_stats, for contexts that don't fit within a
+	 * limit, a cumulative total is written as the last record in the DSA
+	 * segment.
+	 */
+	stats_count = Min(stats_count, max_stats);
+
+	LWLockAcquire(&memCtxArea->lw_lock, LW_EXCLUSIVE);
+
+	/*
+	 * Create a DSA and send handle to the the client process after storing
+	 * the context statistics. If number of contexts exceed a predefined
+	 * limit(8MB), a cumulative total is stored for such contexts.
+	 */
+	if (memCtxArea->memstats_dsa_handle == DSA_HANDLE_INVALID)
+	{
+		MemoryContext oldcontext = CurrentMemoryContext;
+		dsa_handle	handle;
+
+		MemoryContextSwitchTo(TopMemoryContext);
+
+		area = dsa_create(memCtxArea->lw_lock.tranche);
+
+		handle = dsa_get_handle(area);
+		MemoryContextSwitchTo(oldcontext);
+
+		dsa_pin_mapping(area);
+
+		/*
+		 * Pin the DSA area, this is to make sure the area remains attachable
+		 * even if current backend exits. This is done so that the statistics
+		 * are published even if the process exits while a client is waiting.
+		 */
+		dsa_pin(area);
+
+		/* Set the handle in shared memory */
+		memCtxArea->memstats_dsa_handle = handle;
+	}
+
+	/*
+	 * If DSA exists, created by another process publishing statistics, or by
+	 * the previous execution of this function by this process, attach to it.
+	 */
+	else if (area == NULL)
+	{
+		MemoryContext oldcontext = CurrentMemoryContext;
+
+		MemoryContextSwitchTo(TopMemoryContext);
+		area = dsa_attach(memCtxArea->memstats_dsa_handle);
+		MemoryContextSwitchTo(oldcontext);
+		dsa_pin_mapping(area);
+	}
+	LWLockRelease(&memCtxArea->lw_lock);
+
+	/*
+	 * Hold the process lock to protect writes to process specific memory. Two
+	 * processes publishing statistics do not block each other.
+	 */
+	LWLockAcquire(&memCtxState[idx].lw_lock, LW_EXCLUSIVE);
+	memCtxState[idx].proc_id = MyProcPid;
+
+	if (DsaPointerIsValid(memCtxState[idx].memstats_dsa_pointer))
+	{
+		/*
+		 * Free any previous allocations, free the name, ident and path
+		 * pointers before freeing the pointer that contains them.
+		 */
+		dsa_free_previous_stats(area, memCtxState[idx].total_stats,
+								memCtxState[idx].memstats_dsa_pointer);
+
+		dsa_free(area, memCtxState[idx].memstats_dsa_pointer);
+		memCtxState[idx].memstats_dsa_pointer = InvalidDsaPointer;
+	}
+	memCtxState[idx].memstats_dsa_pointer =
+		dsa_allocate0(area, stats_count * sizeof(MemoryContextEntry));
+
+	meminfo = (MemoryContextEntry *)
+		dsa_get_address(area, memCtxState[idx].memstats_dsa_pointer);
+
+	if (get_summary)
+	{
+		int			ctx_id = 0;
+		List	   *path = NIL;
+
+		/* Copy TopMemoryContext statistics to DSA */
+		memset(&stat, 0, sizeof(stat));
+		(*TopMemoryContext->methods->stats) (TopMemoryContext, NULL, NULL,
+											 &stat, true);
+		path = lcons_int(1, path);
+		PublishMemoryContext(meminfo, ctx_id, TopMemoryContext, path, stat,
+							 1, area);
+		ctx_id = ctx_id + 1;
+
+		/*
+		 * Copy statistics for each of TopMemoryContexts children.	This
+		 * includes statistics of all of their children upto level 100.
+		 */
+		for (MemoryContext c = TopMemoryContext->firstchild; c != NULL;
+			 c = c->nextchild)
+		{
+			MemoryContextCounters grand_totals;
+			int			num_contexts = 0;
+			int			level = 0;
+
+			path = NIL;
+			memset(&grand_totals, 0, sizeof(grand_totals));
+
+			MemoryContextStatsInternal(c, level, 100, 100, &grand_totals,
+									   PRINT_STATS_NONE, &num_contexts);
+
+			path = compute_context_path(c, context_id_lookup, 100);
+
+			PublishMemoryContext(meminfo, ctx_id, c, path,
+								 grand_totals, num_contexts, area);
+			ctx_id = ctx_id + 1;
+		}
+		memCtxState[idx].total_stats = ctx_id;
+		goto cleanup;
+	}
+
+	foreach_ptr(MemoryContextData, cur, contexts)
+	{
+		List	   *path = NIL;
+		char	   *name;
+
+		/*
+		 * Figure out the transient context_id of this context and each of its
+		 * ancestors, to compute a path for this context.
+		 */
+		path = compute_context_path(cur, context_id_lookup, 100);
+
+		if (context_id <= (max_stats - 2))
+		{
+			/* Examine the context stats */
+			memset(&stat, 0, sizeof(stat));
+			(*cur->methods->stats) (cur, NULL, NULL, &stat, true);
+			/* Copy statistics to DSA memory */
+			PublishMemoryContext(meminfo, context_id, cur, path, stat, 1, area);
+		}
+		else
+		{
+			/* Examine the context stats */
+			memset(&stat, 0, sizeof(stat));
+			(*cur->methods->stats) (cur, NULL, NULL, &stat, true);
+
+			meminfo[max_stats - 1].totalspace += stat.totalspace;
+			meminfo[max_stats - 1].nblocks += stat.nblocks;
+			meminfo[max_stats - 1].freespace += stat.freespace;
+			meminfo[max_stats - 1].freechunks += stat.freechunks;
+		}
+
+		/*
+		 * DSA max limit per process is reached, write aggregate of the
+		 * remaining statistics.
+		 */
+		if (context_id == (max_stats - 2) && context_id < (stats_count - 1))
+		{
+			num_individual_stats = context_id + 1;
+			meminfo[max_stats - 1].name = dsa_allocate0(area, 17);
+			name = dsa_get_address(area, meminfo[max_stats - 1].name);
+			strncpy(name, "Remaining Totals", 16);
+			meminfo[max_stats - 1].ident = InvalidDsaPointer;
+			meminfo[max_stats - 1].path = InvalidDsaPointer;
+			meminfo[max_stats - 1].type = NULL;
+		}
+		context_id++;
+	}
+	/* Statistics are not aggregated, i.e individual statistics reported */
+	if (context_id < (max_stats - 2))
+	{
+		memCtxState[idx].total_stats = context_id;
+	}
+	/* Report number of aggregated memory contexts */
+	else
+	{
+		meminfo[max_stats - 1].num_agg_stats = context_id -
+			num_individual_stats;
+
+		/*
+		 * Total stats equals num_individual_stats + 1 record for cumulative
+		 * statistics.
+		 */
+		memCtxState[idx].total_stats = num_individual_stats + 1;
+	}
+
+cleanup:
+
+	/*
+	 * Signal all the waiting client backends after copying all the statistics
+	 */
+	memCtxState[idx].stats_timestamp = GetCurrentTimestamp();
+	LWLockRelease(&memCtxState[idx].lw_lock);
+	ConditionVariableBroadcast(&memCtxState[idx].memctx_cv);
+	hash_destroy(context_id_lookup);
+	dsa_detach(area);
+}
+
+/*
+ * compute_context_path
+ *
+ * Append the transient context_id of this context and each of its ancestors
+ * to a list, in order to compute a path.
+ */
+static List *
+compute_context_path(MemoryContext c, HTAB *context_id_lookup, int max_level)
+{
+	bool		found;
+	List	   *path = NIL;
+	List	   *tmp = NIL;
+
+	for (MemoryContext cur_context = c; cur_context != NULL; cur_context = cur_context->parent)
+	{
+		MemoryContextId *cur_entry;
+
+		cur_entry = hash_search(context_id_lookup, &cur_context, HASH_FIND, &found);
+
+		if (!found)
+			elog(ERROR, "hash table corrupted, can't construct path value");
+
+		path = lcons_int(cur_entry->context_id, path);
+	}
+
+	if (list_length(path) > max_level)
+	{
+		tmp = list_copy_head(path, max_level);
+		list_free(path);
+		path = tmp;
+	}
+
+	return path;
+}
+
+/*
+ * Return the number of contexts allocated currently by the backend
+ * Assign context ids to each of the contexts.
+ */
+static void
+compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
+							   int *stats_count, bool get_summary)
+{
+	foreach_ptr(MemoryContextData, cur, contexts)
+	{
+		MemoryContextId *entry;
+		bool		found;
+
+		entry = (MemoryContextId *) hash_search(context_id_lookup, &cur,
+												HASH_ENTER, &found);
+		Assert(!found);
+
+		/* context id starts with 1 */
+		entry->context_id = (++(*stats_count));
+
+		/* Append the children of the current context to the main list. */
+		for (MemoryContext c = cur->firstchild; c != NULL; c = c->nextchild)
+		{
+			if (get_summary)
+			{
+				entry = (MemoryContextId *) hash_search(context_id_lookup, &c,
+														HASH_ENTER, &found);
+				Assert(!found);
+
+				entry->context_id = (++(*stats_count));
+			}
+
+			contexts = lappend(contexts, c);
+		}
+
+		/*
+		 * In summary only the first two level (from top) contexts are
+		 * displayed
+		 */
+		if (get_summary)
+			break;
+	}
+}
+
+/*
+ * PublishMemoryContext
+ *
+ * Copy the memory context statistics of a single context to a DSA memory
+ */
+static void
+PublishMemoryContext(MemoryContextEntry *memctx_info, int curr_id,
+					 MemoryContext context, List *path,
+					 MemoryContextCounters stat, int num_contexts,
+					 dsa_area *area)
+{
+	const char *ident = context->ident;
+	const char *name = context->name;
+	int		   *path_list;
+
+	/*
+	 * To be consistent with logging output, we label dynahash contexts with
+	 * just the hash table name as with MemoryContextStatsPrint().
+	 */
+	if (context->ident && strncmp(context->name, "dynahash", 8) == 0)
+	{
+		name = context->ident;
+		ident = NULL;
+	}
+
+	if (name != NULL)
+	{
+		int			namelen = strlen(name);
+		char	   *nameptr;
+
+		if (strlen(name) >= MEMORY_CONTEXT_IDENT_SHMEM_SIZE)
+			namelen = pg_mbcliplen(name, namelen,
+								   MEMORY_CONTEXT_IDENT_SHMEM_SIZE - 1);
+
+		memctx_info[curr_id].name = dsa_allocate0(area, namelen + 1);
+		nameptr = (char *) dsa_get_address(area, memctx_info[curr_id].name);
+		strlcpy(nameptr, name, namelen + 1);
+	}
+	else
+		memctx_info[curr_id].name = InvalidDsaPointer;
+
+	/* Trim and copy the identifier if it is not set to NULL */
+	if (ident != NULL)
+	{
+		int			idlen = strlen(context->ident);
+		char	   *identptr;
+
+		/*
+		 * Some identifiers such as SQL query string can be very long,
+		 * truncate oversize identifiers.
+		 */
+		if (idlen >= MEMORY_CONTEXT_IDENT_SHMEM_SIZE)
+			idlen = pg_mbcliplen(ident, idlen,
+								 MEMORY_CONTEXT_IDENT_SHMEM_SIZE - 1);
+
+		memctx_info[curr_id].ident = dsa_allocate0(area, idlen + 1);
+		identptr = (char *) dsa_get_address(area, memctx_info[curr_id].ident);
+		strlcpy(identptr, ident, idlen + 1);
+	}
+	else
+		memctx_info[curr_id].ident = InvalidDsaPointer;
+
+	/* Allocate DSA memory for storing path information */
+	if (path == NIL)
+		memctx_info[curr_id].path = InvalidDsaPointer;
+	else
+	{
+		memctx_info[curr_id].path_length = list_length(path);
+		memctx_info[curr_id].path = dsa_allocate0(area,
+												  memctx_info[curr_id].path_length * sizeof(int));
+		path_list = (int *) dsa_get_address(area, memctx_info[curr_id].path);
+		foreach_int(i, path)
+			path_list[foreach_current_index(i)] = i;
+	}
+	memctx_info[curr_id].type = ContextTypeToString(context->type, true);
+	memctx_info[curr_id].totalspace = stat.totalspace;
+	memctx_info[curr_id].nblocks = stat.nblocks;
+	memctx_info[curr_id].freespace = stat.freespace;
+	memctx_info[curr_id].freechunks = stat.freechunks;
+	memctx_info[curr_id].num_agg_stats = num_contexts;
+}
+
+/*
+ * dsa_free_previous_stats
+ *
+ * Worker for freeing resources from a MemoryContextEntry.  Callers are
+ * responsible for ensuring that the DSA pointer is valid.
+ */
+static void
+dsa_free_previous_stats(dsa_area *area, int total_stats,
+						dsa_pointer prev_dsa_pointer)
+{
+	MemoryContextEntry *meminfo;
+
+	meminfo = (MemoryContextEntry *) dsa_get_address(area, prev_dsa_pointer);
+	Assert(meminfo != NULL);
+	for (int i = 0; i < total_stats; i++)
+	{
+		if (DsaPointerIsValid(meminfo[i].name))
+			dsa_free(area, meminfo[i].name);
+
+		if (DsaPointerIsValid(meminfo[i].ident))
+			dsa_free(area, meminfo[i].ident);
+
+		if (DsaPointerIsValid(meminfo[i].path))
+			dsa_free(area, meminfo[i].path);
+	}
+}
+
+/*
+ * Free the memory context statistics stored by this process
+ * in DSA area.
+ */
+void
+AtProcExit_memstats_dsa_free(int code, Datum arg)
+{
+	int			idx = MyProcNumber;
+	dsm_segment *dsm_seg = NULL;
+	dsa_area   *area = NULL;
+
+	if (memCtxArea->memstats_dsa_handle == DSA_HANDLE_INVALID)
+		return;
+
+	dsm_seg = dsm_find_mapping(memCtxArea->memstats_dsa_handle);
+
+	LWLockAcquire(&memCtxState[idx].lw_lock, LW_EXCLUSIVE);
+
+	if (!DsaPointerIsValid(memCtxState[idx].memstats_dsa_pointer))
+	{
+		LWLockRelease(&memCtxState[idx].lw_lock);
+		return;
+	}
+
+	/* If the dsm mapping could not be found, attach to the area */
+	if (dsm_seg != NULL)
+		return;
+	area = dsa_attach(memCtxArea->memstats_dsa_handle);
+
+	/*
+	 * Free the memory context statistics, free the name, ident and path
+	 * pointers before freeing the pointer that contains these pointers and
+	 * integer statistics.
+	 */
+	dsa_free_previous_stats(area, memCtxState[idx].total_stats,
+							memCtxState[idx].memstats_dsa_pointer);
+	dsa_free(area, memCtxState[idx].memstats_dsa_pointer);
+	memCtxState[idx].memstats_dsa_pointer = InvalidDsaPointer;
+
+	dsa_detach(area);
+	LWLockRelease(&memCtxState[idx].lw_lock);
 }
 
 void *
