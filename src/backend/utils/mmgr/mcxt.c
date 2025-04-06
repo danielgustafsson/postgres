@@ -1826,7 +1826,7 @@ PublishMemoryContext(MemoryContextEntry *memctx_info, int curr_id,
 		foreach_int(i, path)
 			path_list[foreach_current_index(i)] = i;
 	}
-	memctx_info[curr_id].type = ContextTypeToString(context->type, true);
+	memctx_info[curr_id].type = ContextTypeToString(context->type);
 	memctx_info[curr_id].totalspace = stat.totalspace;
 	memctx_info[curr_id].nblocks = stat.nblocks;
 	memctx_info[curr_id].freespace = stat.freespace;

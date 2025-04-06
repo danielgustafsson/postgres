@@ -139,7 +139,7 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 	else
 		nulls[1] = true;
 
-	type = ContextTypeToString(context->type, true);
+	type = ContextTypeToString(context->type);
 
 	values[2] = CStringGetTextDatum(type);
 	values[3] = Int32GetDatum(list_length(path));	/* level */
@@ -158,11 +158,10 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
  * ContextTypeToString
  *		Returns a textual representation of a context type
  *
- * This should cover the same types as MemoryContextIsValid. If missing_ok is
- * false then execution will error out on invalid context types.
+ * This should cover the same types as MemoryContextIsValid.
  */
 const char *
-ContextTypeToString(NodeTag type, bool missing_ok)
+ContextTypeToString(NodeTag type)
 {
 	const char *context_type;
 
@@ -181,12 +180,7 @@ ContextTypeToString(NodeTag type, bool missing_ok)
 			context_type = "Bump";
 			break;
 		default:
-			if (missing_ok)
-				context_type = "???";
-			else
-				ereport(ERROR,
-						errcode(ERRCODE_UNDEFINED_OBJECT),
-						errmsg("invalid memory context type specified"));
+			context_type = "???";
 			break;
 	}
 	return (context_type);
@@ -372,15 +366,6 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	int			max_retries = PG_GETARG_INT32(2);
 
 	/*
-	 * Only superusers or users with pg_read_all_stats privileges can view the
-	 * memory context statistics of another process.
-	 */
-	if (!has_privs_of_role(GetUserId(), ROLE_PG_READ_ALL_STATS))
-		ereport(ERROR,
-				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				errmsg("permission denied to extract memory context statistics"));
-
-	/*
 	 * See if the process with given pid is a backend or an auxiliary process
 	 * and remember the type for when we requery the process later.
 	 */
@@ -470,7 +455,7 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 													memCtxState[procNumber].stats_timestamp);
 
 			if (DsaPointerIsValid(memCtxState[procNumber].memstats_dsa_pointer)
-				&& msecs > 0)
+				&& msecs >= 0)
 				break;
 		}
 		LWLockRelease(&memCtxState[procNumber].lw_lock);
@@ -613,49 +598,26 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	PG_RETURN_NULL();
 }
 
-/*
- * Init shared memory for reporting memory context information.
- */
-void
-MemCtxBackendShmemInit(void)
+Size
+MemoryContextReportingShmemSize(void)
 {
-	bool		found;
-	Size		TotalProcs;
+	Size		sz = 0;
+	Size		TotalProcs = 0;
 
-	TotalProcs = add_size(MaxBackends, NUM_AUXILIARY_PROCS);
-	TotalProcs = add_size(TotalProcs, max_prepared_xacts);
+	TotalProcs = add_size(TotalProcs, NUM_AUXILIARY_PROCS);
+	TotalProcs = add_size(TotalProcs, MaxBackends);
 
-	memCtxState = (MemoryContextBackendState *)
-		ShmemInitStruct("MemoryContextBackendState",
-						mul_size(TotalProcs, sizeof(MemoryContextBackendState)),
-						&found);
+	sz = add_size(sz, sizeof(MemoryContextState));
+	sz = mul_size(sz, sizeof(MemoryContextBackendState));
 
-	if (!IsUnderPostmaster)
-	{
-		Assert(!found);
-
-		for (int i = 0; i < TotalProcs; i++)
-		{
-			ConditionVariableInit(&memCtxState[i].memctx_cv);
-
-			LWLockInitialize(&memCtxState[i].lw_lock, LWLockNewTrancheId());
-			LWLockRegisterTranche(memCtxState[i].lw_lock.tranche,
-								  "mem_context_backend_stats_reporting");
-
-			memCtxState[i].memstats_dsa_pointer = InvalidDsaPointer;
-		}
-	}
-	else
-	{
-		Assert(found);
-	}
+	return sz;
 }
 
 /*
  * Initialize shared memory for displaying memory context statistics
  */
 void
-MemCtxShmemInit(void)
+MemoryContextReportingShmemInit(void)
 {
 	bool		found;
 
@@ -665,15 +627,31 @@ MemCtxShmemInit(void)
 	if (!IsUnderPostmaster)
 	{
 		Assert(!found);
-
-		LWLockInitialize(&memCtxArea->lw_lock,
-						 LWLockNewTrancheId());
+		LWLockInitialize(&memCtxArea->lw_lock, LWLockNewTrancheId());
 		LWLockRegisterTranche(memCtxArea->lw_lock.tranche,
 							  "mem_context_stats_reporting");
 		memCtxArea->memstats_dsa_handle = DSA_HANDLE_INVALID;
 	}
 	else
-	{
 		Assert(found);
+
+	memCtxState = (MemoryContextBackendState *)
+		ShmemInitStruct("MemoryContextBackendState",
+						((MaxBackends + NUM_AUXILIARY_PROCS) * sizeof(MemoryContextBackendState)),
+						&found);
+
+	if (!IsUnderPostmaster)
+	{
+		Assert(!found);
+		for (int i = 0; i < (MaxBackends + NUM_AUXILIARY_PROCS); i++)
+		{
+			ConditionVariableInit(&memCtxState[i].memctx_cv);
+			LWLockInitialize(&memCtxState[i].lw_lock, LWLockNewTrancheId());
+			LWLockRegisterTranche(memCtxState[i].lw_lock.tranche,
+								  "mem_context_backend_stats_reporting");
+			memCtxState[i].memstats_dsa_pointer = InvalidDsaPointer;
+		}
 	}
+	else
+		Assert(found);
 }

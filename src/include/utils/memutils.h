@@ -393,10 +393,10 @@ typedef struct MemoryContextId
 extern PGDLLIMPORT MemoryContextBackendState *memCtxState;
 extern PGDLLIMPORT MemoryContextState *memCtxArea;
 extern void ProcessGetMemoryContextInterrupt(void);
-extern const char *ContextTypeToString(NodeTag type, bool missing_ok);
+extern const char *ContextTypeToString(NodeTag type);
 extern void HandleGetMemoryContextInterrupt(void);
-extern void MemCtxShmemInit(void);
-extern void MemCtxBackendShmemInit(void);
+extern Size MemoryContextReportingShmemSize(void);
+extern void MemoryContextReportingShmemInit(void);
 extern void AtProcExit_memstats_dsa_free(int code, Datum arg);
 
 #endif							/* MEMUTILS_H */
