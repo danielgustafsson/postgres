@@ -33,8 +33,8 @@
  * ----------
  */
 #define MEMORY_CONTEXT_IDENT_DISPLAY_SIZE	1024
-struct MemoryContextBackendState *memCtxState = NULL;
-struct MemoryContextState *memCtxArea = NULL;
+struct MemoryContextBackendState *memCxtState = NULL;
+struct MemoryContextState *memCxtArea = NULL;
 
 /*
  * int_list_to_array
@@ -183,7 +183,7 @@ ContextTypeToString(NodeTag type)
 			context_type = "???";
 			break;
 	}
-	return (context_type);
+	return context_type;
 }
 
 /*
@@ -357,14 +357,13 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	int			pid = PG_GETARG_INT32(0);
 	bool		summary = PG_GETARG_BOOL(1);
 	double		timeout = PG_GETARG_FLOAT8(2);
-	double		timer = 0;
 	PGPROC	   *proc;
 	ProcNumber	procNumber = INVALID_PROC_NUMBER;
 	bool		proc_is_aux = false;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	dsa_area   *area;
-	MemoryContextStatsEntry *memctx_info;
-	TimestampTz curr_timestamp;
+	MemoryContextStatsEntry *memcxt_info;
+	TimestampTz start_timestamp;
 
 	/*
 	 * See if the process with given pid is a backend or an auxiliary process
@@ -397,11 +396,11 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 
 	procNumber = GetNumberFromPGProc(proc);
 
-	LWLockAcquire(&memCtxState[procNumber].lw_lock, LW_EXCLUSIVE);
-	memCtxState[procNumber].summary = summary;
-	LWLockRelease(&memCtxState[procNumber].lw_lock);
+	LWLockAcquire(&memCxtState[procNumber].lw_lock, LW_EXCLUSIVE);
+	memCxtState[procNumber].summary = summary;
+	LWLockRelease(&memCxtState[procNumber].lw_lock);
 
-	curr_timestamp = GetCurrentTimestamp();
+	start_timestamp = GetCurrentTimestamp();
 
 	/*
 	 * Send a signal to a PostgreSQL process, informing it we want it to
@@ -415,8 +414,8 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * A valid DSA pointer isn't proof that statistics are available, it can
-	 * be valid due to previously published stats. Check if the stats are
+	 * Even if the proc has published statistics, the may not be due to the
+	 * current request, but previously published stats.  Check if the stats are
 	 * updated by comparing the timestamp, if the stats are newer than our
 	 * previously recorded timestamp from before sending the procsignal, they
 	 * must by definition be updated. Wait for the timeout specified by the
@@ -436,7 +435,7 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 		 * information for, Otherwise loop back and wait for the server
 		 * process to finish publishing statistics.
 		 */
-		LWLockAcquire(&memCtxState[procNumber].lw_lock, LW_EXCLUSIVE);
+		LWLockAcquire(&memCxtState[procNumber].lw_lock, LW_EXCLUSIVE);
 
 		/*
 		 * Note in procnumber.h file says that a procNumber can be re-used for
@@ -445,21 +444,21 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 		 * in the slot identified by the procNumber, the pid of the requested
 		 * process and the proc_id might not match.
 		 */
-		if (memCtxState[procNumber].proc_id == pid)
+		if (memCxtState[procNumber].proc_id == pid)
 		{
 			/*
 			 * Break if the latest stats have been read, indicated by
 			 * statistics timestamp being newer than the current request
 			 * timestamp.
 			 */
-			msecs = TimestampDifferenceMilliseconds(curr_timestamp,
-													memCtxState[procNumber].stats_timestamp);
+			msecs = TimestampDifferenceMilliseconds(start_timestamp,
+													memCxtState[procNumber].stats_timestamp);
 
-			if (DsaPointerIsValid(memCtxState[procNumber].memstats_dsa_pointer)
-				&& msecs >= 0)
+			if (DsaPointerIsValid(memCxtState[procNumber].memstats_dsa_pointer)
+				&& msecs > 0)
 				break;
 		}
-		LWLockRelease(&memCtxState[procNumber].lw_lock);
+		LWLockRelease(&memCxtState[procNumber].lw_lock);
 
 		/*
 		 * Recheck the state of the backend before sleeping on the condition
@@ -483,12 +482,14 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 			PG_RETURN_NULL();
 		}
 
-		if (ConditionVariableTimedSleep(&memCtxState[procNumber].memctx_cv,
-										MEMSTATS_WAIT_TIMEOUT,
-										WAIT_EVENT_MEM_CTX_PUBLISH))
-		{
-			timer += MEMSTATS_WAIT_TIMEOUT;
+		msecs = TimestampDifferenceMilliseconds(start_timestamp, GetCurrentTimestamp());
 
+		/*
+		 * If we haven't already exceeded the timeout value, sleep for the
+		 * remainder of the timeout on the condition variable.
+		 */
+		if (msecs > 0 && msecs < (timeout * 1000))
+		{
 			/*
 			 * Wait for the timeout as defined by the user. If no updated
 			 * statistics are available within the allowed time then display
@@ -497,17 +498,30 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 			 * is defined in milliseconds since thats what the condition
 			 * variable sleep uses.
 			 */
-			if ((timer * 1000) >= timeout)
+			if (ConditionVariableTimedSleep(&memCxtState[procNumber].memcxt_cv,
+											((timeout * 1000) - msecs), WAIT_EVENT_MEM_CXT_PUBLISH))
 			{
-				LWLockAcquire(&memCtxState[procNumber].lw_lock, LW_EXCLUSIVE);
+				LWLockAcquire(&memCxtState[procNumber].lw_lock, LW_EXCLUSIVE);
 				/* Displaying previously published statistics if available */
-				if (DsaPointerIsValid(memCtxState[procNumber].memstats_dsa_pointer))
+				if (DsaPointerIsValid(memCxtState[procNumber].memstats_dsa_pointer))
 					break;
 				else
 				{
-					LWLockRelease(&memCtxState[procNumber].lw_lock);
+					LWLockRelease(&memCxtState[procNumber].lw_lock);
 					PG_RETURN_NULL();
 				}
+			}
+		}
+		else
+		{
+			LWLockAcquire(&memCxtState[procNumber].lw_lock, LW_EXCLUSIVE);
+			/* Displaying previously published statistics if available */
+			if (DsaPointerIsValid(memCxtState[procNumber].memstats_dsa_pointer))
+				break;
+			else
+			{
+				LWLockRelease(&memCxtState[procNumber].lw_lock);
+				PG_RETURN_NULL();
 			}
 		}
 	}
@@ -517,17 +531,17 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	 * updated statistics or previously published statistics (identified by
 	 * the timestamp.
 	 */
-	Assert(memCtxArea->memstats_dsa_handle != DSA_HANDLE_INVALID);
-	area = dsa_attach(memCtxArea->memstats_dsa_handle);
+	Assert(memCxtArea->memstats_dsa_handle != DSA_HANDLE_INVALID);
+	area = dsa_attach(memCxtArea->memstats_dsa_handle);
 
 	/*
 	 * Backend has finished publishing the stats, project them.
 	 */
-	memctx_info = (MemoryContextStatsEntry *)
-		dsa_get_address(area, memCtxState[procNumber].memstats_dsa_pointer);
+	memcxt_info = (MemoryContextStatsEntry *)
+		dsa_get_address(area, memCxtState[procNumber].memstats_dsa_pointer);
 
 #define PG_GET_PROCESS_MEMORY_CONTEXTS_COLS	12
-	for (int i = 0; i < memCtxState[procNumber].total_stats; i++)
+	for (int i = 0; i < memCxtState[procNumber].total_stats; i++)
 	{
 		ArrayType  *path_array;
 		int			path_length;
@@ -541,32 +555,29 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 		memset(values, 0, sizeof(values));
 		memset(nulls, 0, sizeof(nulls));
 
-		if (DsaPointerIsValid(memctx_info[i].name))
+		if (DsaPointerIsValid(memcxt_info[i].name))
 		{
-			name = (char *) dsa_get_address(area, memctx_info[i].name);
+			name = (char *) dsa_get_address(area, memcxt_info[i].name);
 			values[0] = CStringGetTextDatum(name);
 		}
 		else
 			nulls[0] = true;
 
-		if (DsaPointerIsValid(memctx_info[i].ident))
+		if (DsaPointerIsValid(memcxt_info[i].ident))
 		{
-			ident = (char *) dsa_get_address(area, memctx_info[i].ident);
+			ident = (char *) dsa_get_address(area, memcxt_info[i].ident);
 			values[1] = CStringGetTextDatum(ident);
 		}
 		else
 			nulls[1] = true;
 
-		if (memctx_info[i].type != NULL)
-			values[2] = CStringGetTextDatum(memctx_info[i].type);
-		else
-			nulls[2] = true;
+		values[2] = CStringGetTextDatum(ContextTypeToString(memcxt_info[i].type));
 
-		path_length = memctx_info[i].path_length;
+		path_length = memcxt_info[i].path_length;
 		path_datum = (Datum *) palloc(path_length * sizeof(Datum));
-		if (DsaPointerIsValid(memctx_info[i].path))
+		if (DsaPointerIsValid(memcxt_info[i].path))
 		{
-			path_int = (int *) dsa_get_address(area, memctx_info[i].path);
+			path_int = (int *) dsa_get_address(area, memcxt_info[i].path);
 			for (int j = 0; j < path_length; j++)
 				path_datum[j] = Int32GetDatum(path_int[j]);
 			path_array = construct_array_builtin(path_datum, path_length, INT4OID);
@@ -575,20 +586,20 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 		else
 			nulls[3] = true;
 
-		values[4] = Int32GetDatum(memctx_info[i].levels);
-		values[5] = Int64GetDatum(memctx_info[i].totalspace);
-		values[6] = Int64GetDatum(memctx_info[i].nblocks);
-		values[7] = Int64GetDatum(memctx_info[i].freespace);
-		values[8] = Int64GetDatum(memctx_info[i].freechunks);
-		values[9] = Int64GetDatum(memctx_info[i].totalspace -
-								  memctx_info[i].freespace);
-		values[10] = Int32GetDatum(memctx_info[i].num_agg_stats);
-		values[11] = TimestampTzGetDatum(memCtxState[procNumber].stats_timestamp);
+		values[4] = Int32GetDatum(memcxt_info[i].levels);
+		values[5] = Int64GetDatum(memcxt_info[i].totalspace);
+		values[6] = Int64GetDatum(memcxt_info[i].nblocks);
+		values[7] = Int64GetDatum(memcxt_info[i].freespace);
+		values[8] = Int64GetDatum(memcxt_info[i].freechunks);
+		values[9] = Int64GetDatum(memcxt_info[i].totalspace -
+								  memcxt_info[i].freespace);
+		values[10] = Int32GetDatum(memcxt_info[i].num_agg_stats);
+		values[11] = TimestampTzGetDatum(memCxtState[procNumber].stats_timestamp);
 
 		tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc,
 							 values, nulls);
 	}
-	LWLockRelease(&memCtxState[procNumber].lw_lock);
+	LWLockRelease(&memCxtState[procNumber].lw_lock);
 
 	ConditionVariableCancelSleep();
 	dsa_detach(area);
@@ -604,9 +615,9 @@ MemoryContextReportingShmemSize(void)
 
 	TotalProcs = add_size(TotalProcs, NUM_AUXILIARY_PROCS);
 	TotalProcs = add_size(TotalProcs, MaxBackends);
+	sz = add_size(sz, mul_size(TotalProcs, sizeof(MemoryContextBackendState)));
 
 	sz = add_size(sz, sizeof(MemoryContextState));
-	sz = mul_size(sz, sizeof(MemoryContextBackendState));
 
 	return sz;
 }
@@ -619,37 +630,27 @@ MemoryContextReportingShmemInit(void)
 {
 	bool		found;
 
-	memCtxArea = (MemoryContextState *)
+	memCxtArea = (MemoryContextState *)
 		ShmemInitStruct("MemoryContextState", sizeof(MemoryContextState), &found);
 
-	if (!IsUnderPostmaster)
-	{
-		Assert(!found);
-		LWLockInitialize(&memCtxArea->lw_lock, LWLockNewTrancheId());
-		LWLockRegisterTranche(memCtxArea->lw_lock.tranche,
-							  "mem_context_stats_reporting");
-		memCtxArea->memstats_dsa_handle = DSA_HANDLE_INVALID;
-	}
-	else
-		Assert(found);
+	if (found)
+		return;
 
-	memCtxState = (MemoryContextBackendState *)
+	LWLockInitialize(&memCxtArea->lw_lock, LWTRANCHE_MEMORY_CONTEXT_REPORTING_STATE);
+	memCxtArea->memstats_dsa_handle = DSA_HANDLE_INVALID;
+
+	memCxtState = (MemoryContextBackendState *)
 		ShmemInitStruct("MemoryContextBackendState",
 						((MaxBackends + NUM_AUXILIARY_PROCS) * sizeof(MemoryContextBackendState)),
 						&found);
 
-	if (!IsUnderPostmaster)
+	if (found)
+		return;
+
+	for (int i = 0; i < (MaxBackends + NUM_AUXILIARY_PROCS); i++)
 	{
-		Assert(!found);
-		for (int i = 0; i < (MaxBackends + NUM_AUXILIARY_PROCS); i++)
-		{
-			ConditionVariableInit(&memCtxState[i].memctx_cv);
-			LWLockInitialize(&memCtxState[i].lw_lock, LWLockNewTrancheId());
-			LWLockRegisterTranche(memCtxState[i].lw_lock.tranche,
-								  "mem_context_backend_stats_reporting");
-			memCtxState[i].memstats_dsa_pointer = InvalidDsaPointer;
-		}
+		ConditionVariableInit(&memCxtState[i].memcxt_cv);
+		LWLockInitialize(&memCxtState[i].lw_lock, LWTRANCHE_MEMORY_CONTEXT_REPORTING_PROC);
+		memCxtState[i].memstats_dsa_pointer = InvalidDsaPointer;
 	}
-	else
-		Assert(found);
 }

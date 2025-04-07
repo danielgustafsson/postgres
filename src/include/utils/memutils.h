@@ -344,7 +344,7 @@ typedef struct MemoryContextStatsEntry
 	dsa_pointer name;
 	dsa_pointer ident;
 	dsa_pointer path;
-	const char *type;
+	NodeTag		type;
 	int			path_length;
 	int			levels;
 	int64		totalspace;
@@ -372,7 +372,7 @@ typedef struct MemoryContextState
  */
 typedef struct MemoryContextBackendState
 {
-	ConditionVariable memctx_cv;
+	ConditionVariable memcxt_cv;
 	LWLock		lw_lock;
 	int			proc_id;
 	int			total_stats;
@@ -391,8 +391,8 @@ typedef struct MemoryContextId
 	int			context_id;
 } MemoryContextId;
 
-extern PGDLLIMPORT MemoryContextBackendState *memCtxState;
-extern PGDLLIMPORT MemoryContextState *memCtxArea;
+extern PGDLLIMPORT MemoryContextBackendState *memCxtState;
+extern PGDLLIMPORT MemoryContextState *memCxtArea;
 extern void ProcessGetMemoryContextInterrupt(void);
 extern const char *ContextTypeToString(NodeTag type);
 extern void HandleGetMemoryContextInterrupt(void);
