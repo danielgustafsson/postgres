@@ -184,7 +184,7 @@ static void MemoryContextStatsInternal(MemoryContext context, int level,
 static void MemoryContextStatsPrint(MemoryContext context, void *passthru,
 									const char *stats_string,
 									bool print_to_stderr);
-static void PublishMemoryContext(MemoryContextStatsEntry *memcxt_infos,
+static void PublishMemoryContext(MemoryContextReportingStatsEntry *memcxt_infos,
 								 int curr_id, MemoryContext context,
 								 List *path,
 								 MemoryContextCounters stat,
@@ -1435,7 +1435,7 @@ ProcessGetMemoryContextInterrupt(void)
 	HASHCTL		ctl;
 	HTAB	   *context_id_lookup;
 	int			context_id = 0;
-	MemoryContextStatsEntry *meminfo;
+	MemoryContextReportingStatsEntry *meminfo;
 	bool		summary = false;
 	int			max_stats;
 	int			idx = MyProcNumber;
@@ -1451,7 +1451,7 @@ ProcessGetMemoryContextInterrupt(void)
 	 * similar to its local backend counterpart.
 	 */
 	ctl.keysize = sizeof(MemoryContext);
-	ctl.entrysize = sizeof(MemoryContextId);
+	ctl.entrysize = sizeof(MemoryContextReportingId);
 	ctl.hcxt = CurrentMemoryContext;
 
 	context_id_lookup = hash_create("pg_get_remote_backend_memory_contexts",
@@ -1463,8 +1463,8 @@ ProcessGetMemoryContextInterrupt(void)
 	contexts = list_make1(TopMemoryContext);
 
 	/* Compute the number of stats that can fit in the defined limit */
-	max_stats = (MAX_SEGMENTS_PER_BACKEND * DSA_DEFAULT_INIT_SEGMENT_SIZE)
-		/ (MAX_MEMORY_CONTEXT_STATS_SIZE);
+	max_stats =
+		MEMORY_CONTEXT_REPORT_MAX_PER_BACKEND / MAX_MEMORY_CONTEXT_STATS_SIZE;
 	LWLockAcquire(&memCxtState[idx].lw_lock, LW_EXCLUSIVE);
 	summary = memCxtState[idx].summary;
 	LWLockRelease(&memCxtState[idx].lw_lock);
@@ -1548,9 +1548,9 @@ ProcessGetMemoryContextInterrupt(void)
 									memCxtState[idx].memstats_dsa_pointer);
 	}
 	memCxtState[idx].memstats_dsa_pointer =
-		dsa_allocate0(area, stats_num * sizeof(MemoryContextStatsEntry));
+		dsa_allocate0(area, stats_num * sizeof(MemoryContextReportingStatsEntry));
 
-	meminfo = (MemoryContextStatsEntry *)
+	meminfo = (MemoryContextReportingStatsEntry *)
 		dsa_get_address(area, memCxtState[idx].memstats_dsa_pointer);
 
 	if (summary)
@@ -1618,8 +1618,8 @@ ProcessGetMemoryContextInterrupt(void)
 		path = compute_context_path(cur, context_id_lookup);
 
 		/* Examine the context stats */
-		(*cur->methods->stats) (cur, NULL, NULL, &stat, true);
 		memset(&stat, 0, sizeof(stat));
+		(*cur->methods->stats) (cur, NULL, NULL, &stat, true);
 
 		/* Account for saving one statistics slot for cumulative reporting */
 		if (context_id < (max_stats - 1) || stats_count <= max_stats)
@@ -1713,7 +1713,7 @@ compute_context_path(MemoryContext c, HTAB *context_id_lookup)
 
 	for (cur_context = c; cur_context != NULL; cur_context = cur_context->parent)
 	{
-		MemoryContextId *cur_entry;
+		MemoryContextReportingId *cur_entry;
 
 		cur_entry = hash_search(context_id_lookup, &cur_context, HASH_FIND, &found);
 
@@ -1736,10 +1736,10 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 {
 	foreach_ptr(MemoryContextData, cur, contexts)
 	{
-		MemoryContextId *entry;
+		MemoryContextReportingId *entry;
 		bool		found;
 
-		entry = (MemoryContextId *) hash_search(context_id_lookup, &cur,
+		entry = (MemoryContextReportingId *) hash_search(context_id_lookup, &cur,
 												HASH_ENTER, &found);
 		Assert(!found);
 
@@ -1751,7 +1751,7 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 		{
 			if (summary)
 			{
-				entry = (MemoryContextId *) hash_search(context_id_lookup, &c,
+				entry = (MemoryContextReportingId *) hash_search(context_id_lookup, &c,
 														HASH_ENTER, &found);
 				Assert(!found);
 
@@ -1776,7 +1776,7 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
  * Copy the memory context statistics of a single context to a DSA memory
  */
 static void
-PublishMemoryContext(MemoryContextStatsEntry *memcxt_info, int curr_id,
+PublishMemoryContext(MemoryContextReportingStatsEntry *memcxt_info, int curr_id,
 					 MemoryContext context, List *path,
 					 MemoryContextCounters stat, int num_contexts,
 					 dsa_area *area, int max_levels)
@@ -1862,16 +1862,16 @@ PublishMemoryContext(MemoryContextStatsEntry *memcxt_info, int curr_id,
 /*
  * free_memorycontextstate_dsa
  *
- * Worker for freeing resources from a MemoryContextStatsEntry.  Callers are
+ * Worker for freeing resources from a MemoryContextReportingStatsEntry.  Callers are
  * responsible for ensuring that the DSA pointer is valid.
  */
 static void
 free_memorycontextstate_dsa(dsa_area *area, int total_stats,
 							dsa_pointer prev_dsa_pointer)
 {
-	MemoryContextStatsEntry *meminfo;
+	MemoryContextReportingStatsEntry *meminfo;
 
-	meminfo = (MemoryContextStatsEntry *) dsa_get_address(area, prev_dsa_pointer);
+	meminfo = (MemoryContextReportingStatsEntry *) dsa_get_address(area, prev_dsa_pointer);
 	Assert(meminfo != NULL);
 	for (int i = 0; i < total_stats; i++)
 	{

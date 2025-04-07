@@ -57,16 +57,17 @@
 
 /* Max length of context name and ident */
 #define MEMORY_CONTEXT_IDENT_SHMEM_SIZE 64
-/* Maximum size (in Mb) of DSA area per process */
-#define MAX_SEGMENTS_PER_BACKEND 1
+/* Maximum size (in bytes) of DSA area per process */
+#define MEMORY_CONTEXT_REPORT_MAX_PER_BACKEND  ((size_t) (1 * 1024 * 1024))
+
 /*
  * Maximum size per context. Actual size may be lower as this assumes the worst
  * case of deepest path and longest identifiers (name and ident, thus the
  * multiplication by 2). The path depth is limited to 100 like for memory
  * context logging.
  */
-#define MAX_MEMORY_CONTEXT_STATS_SIZE sizeof(MemoryContextStatsEntry) + \
-	(100 * sizeof(int)) + (2 * MEMORY_CONTEXT_IDENT_SHMEM_SIZE)
+#define MAX_MEMORY_CONTEXT_STATS_SIZE (sizeof(MemoryContextReportingStatsEntry) + \
+	(100 * sizeof(int)) + (2 * MEMORY_CONTEXT_IDENT_SHMEM_SIZE))
 
 /*
  * Standard top-level memory contexts.
@@ -339,7 +340,7 @@ pg_memory_is_all_zeros(const void *ptr, size_t len)
 }
 
 /* Dynamic shared memory state for statistics per context */
-typedef struct MemoryContextStatsEntry
+typedef struct MemoryContextReportingStatsEntry
 {
 	dsa_pointer name;
 	dsa_pointer ident;
@@ -352,7 +353,7 @@ typedef struct MemoryContextStatsEntry
 	int64		freespace;
 	int64		freechunks;
 	int			num_agg_stats;
-} MemoryContextStatsEntry;
+} MemoryContextReportingStatsEntry;
 
 /*
  * Static shared memory state representing the DSA area created for memory
@@ -360,17 +361,17 @@ typedef struct MemoryContextStatsEntry
  * the processes, each having its specific DSA allocations for sharing memory
  * statistics, tracked by per backend static shared memory state.
  */
-typedef struct MemoryContextState
+typedef struct MemoryContextReportingSharedState
 {
 	dsa_handle	memstats_dsa_handle;
 	LWLock		lw_lock;
-} MemoryContextState;
+} MemoryContextReportingSharedState;
 
 /*
  * Per backend static shared memory state for memory context statistics
  * reporting.
  */
-typedef struct MemoryContextBackendState
+typedef struct MemoryContextReportingBackendState
 {
 	ConditionVariable memcxt_cv;
 	LWLock		lw_lock;
@@ -379,20 +380,20 @@ typedef struct MemoryContextBackendState
 	bool		summary;
 	dsa_pointer memstats_dsa_pointer;
 	TimestampTz stats_timestamp;
-} MemoryContextBackendState;
+} MemoryContextReportingBackendState;
 
 
 /*
  * Used for storage of transient identifiers for pg_get_backend_memory_contexts
  */
-typedef struct MemoryContextId
+typedef struct MemoryContextReportingId
 {
 	MemoryContext context;
 	int			context_id;
-} MemoryContextId;
+} MemoryContextReportingId;
 
-extern PGDLLIMPORT MemoryContextBackendState *memCxtState;
-extern PGDLLIMPORT MemoryContextState *memCxtArea;
+extern PGDLLIMPORT MemoryContextReportingBackendState *memCxtState;
+extern PGDLLIMPORT MemoryContextReportingSharedState *memCxtArea;
 extern void ProcessGetMemoryContextInterrupt(void);
 extern const char *ContextTypeToString(NodeTag type);
 extern void HandleGetMemoryContextInterrupt(void);

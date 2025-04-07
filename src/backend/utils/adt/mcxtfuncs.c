@@ -34,8 +34,8 @@
  * ----------
  */
 #define MEMORY_CONTEXT_IDENT_DISPLAY_SIZE	1024
-struct MemoryContextBackendState *memCxtState = NULL;
-struct MemoryContextState *memCxtArea = NULL;
+struct MemoryContextReportingBackendState *memCxtState = NULL;
+struct MemoryContextReportingSharedState *memCxtArea = NULL;
 
 /*
  * int_list_to_array
@@ -86,7 +86,7 @@ PutMemoryContextsStatsTupleStore(Tuplestorestate *tupstore,
 	 */
 	for (MemoryContext cur = context; cur != NULL; cur = cur->parent)
 	{
-		MemoryContextId *entry;
+		MemoryContextReportingId *entry;
 		bool		found;
 
 		entry = hash_search(context_id_lookup, &cur, HASH_FIND, &found);
@@ -201,7 +201,7 @@ pg_get_backend_memory_contexts(PG_FUNCTION_ARGS)
 	HTAB	   *context_id_lookup;
 
 	ctl.keysize = sizeof(MemoryContext);
-	ctl.entrysize = sizeof(MemoryContextId);
+	ctl.entrysize = sizeof(MemoryContextReportingId);
 	ctl.hcxt = CurrentMemoryContext;
 
 	context_id_lookup = hash_create("pg_get_backend_memory_contexts",
@@ -228,7 +228,7 @@ pg_get_backend_memory_contexts(PG_FUNCTION_ARGS)
 
 	foreach_ptr(MemoryContextData, cur, contexts)
 	{
-		MemoryContextId *entry;
+		MemoryContextReportingId *entry;
 		bool		found;
 
 		/*
@@ -236,7 +236,7 @@ pg_get_backend_memory_contexts(PG_FUNCTION_ARGS)
 		 * PutMemoryContextsStatsTupleStore needs this to populate the "path"
 		 * column with the parent context_ids.
 		 */
-		entry = (MemoryContextId *) hash_search(context_id_lookup, &cur,
+		entry = (MemoryContextReportingId *) hash_search(context_id_lookup, &cur,
 												HASH_ENTER, &found);
 		entry->context_id = context_id++;
 		Assert(!found);
@@ -363,7 +363,7 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	bool		proc_is_aux = false;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	dsa_area   *area;
-	MemoryContextStatsEntry *memcxt_info;
+	MemoryContextReportingStatsEntry *memcxt_info;
 	TimestampTz start_timestamp;
 
 	/*
@@ -546,7 +546,7 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	/*
 	 * Backend has finished publishing the stats, project them.
 	 */
-	memcxt_info = (MemoryContextStatsEntry *)
+	memcxt_info = (MemoryContextReportingStatsEntry *)
 		dsa_get_address(area, memCxtState[procNumber].memstats_dsa_pointer);
 
 #define PG_GET_PROCESS_MEMORY_CONTEXTS_COLS	12
@@ -623,9 +623,9 @@ MemoryContextReportingShmemSize(void)
 
 	TotalProcs = add_size(TotalProcs, NUM_AUXILIARY_PROCS);
 	TotalProcs = add_size(TotalProcs, MaxBackends);
-	sz = add_size(sz, mul_size(TotalProcs, sizeof(MemoryContextBackendState)));
+	sz = add_size(sz, mul_size(TotalProcs, sizeof(MemoryContextReportingBackendState)));
 
-	sz = add_size(sz, sizeof(MemoryContextState));
+	sz = add_size(sz, sizeof(MemoryContextReportingSharedState));
 
 	return sz;
 }
@@ -638,8 +638,9 @@ MemoryContextReportingShmemInit(void)
 {
 	bool		found;
 
-	memCxtArea = (MemoryContextState *)
-		ShmemInitStruct("MemoryContextState", sizeof(MemoryContextState), &found);
+	memCxtArea = (MemoryContextReportingSharedState *)
+		ShmemInitStruct("MemoryContextReportingSharedState",
+						sizeof(MemoryContextReportingSharedState), &found);
 
 	if (found)
 		return;
@@ -647,9 +648,9 @@ MemoryContextReportingShmemInit(void)
 	LWLockInitialize(&memCxtArea->lw_lock, LWTRANCHE_MEMORY_CONTEXT_REPORTING_STATE);
 	memCxtArea->memstats_dsa_handle = DSA_HANDLE_INVALID;
 
-	memCxtState = (MemoryContextBackendState *)
-		ShmemInitStruct("MemoryContextBackendState",
-						((MaxBackends + NUM_AUXILIARY_PROCS) * sizeof(MemoryContextBackendState)),
+	memCxtState = (MemoryContextReportingBackendState *)
+		ShmemInitStruct("MemoryContextReportingBackendState",
+						((MaxBackends + NUM_AUXILIARY_PROCS) * sizeof(MemoryContextReportingBackendState)),
 						&found);
 
 	if (found)
