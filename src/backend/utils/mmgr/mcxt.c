@@ -196,7 +196,7 @@ static void compute_contexts_count_and_ids(List *contexts, HTAB *context_id_look
 static List *compute_context_path(MemoryContext c, HTAB *context_id_lookup);
 static void free_memorycontextstate_dsa(dsa_area *area, int total_stats,
 										dsa_pointer prev_dsa_pointer);
-static void signal_memorycontext_reporting(void);
+static void end_memorycontext_reporting(void);
 
 /*
  * You should not do memory allocations within a critical section, because
@@ -1599,8 +1599,7 @@ ProcessGetMemoryContextInterrupt(void)
 		}
 		memCxtState[idx].total_stats = cxt_id;
 
-		LWLockRelease(&memCxtState[idx].lw_lock);
-		signal_memorycontext_reporting();
+		end_memorycontext_reporting();
 
 		/* Notify waiting backends and return */
 		hash_destroy(context_id_lookup);
@@ -1683,19 +1682,20 @@ ProcessGetMemoryContextInterrupt(void)
 	}
 
 	/* Notify waiting backends and return */
-	LWLockRelease(&memCxtState[idx].lw_lock);
-	signal_memorycontext_reporting();
+	end_memorycontext_reporting();
 
 	hash_destroy(context_id_lookup);
 }
 
 /*
- * Signal all the waiting client backends after copying all the statistics.
+ * Update timestamp and signal all the waiting client backends after copying
+ * all the statistics.
  */
 static void
-signal_memorycontext_reporting(void)
+end_memorycontext_reporting(void)
 {
 	memCxtState[MyProcNumber].stats_timestamp = GetCurrentTimestamp();
+	LWLockRelease(&memCxtState[MyProcNumber].lw_lock);
 	ConditionVariableBroadcast(&memCxtState[MyProcNumber].memcxt_cv);
 }
 
