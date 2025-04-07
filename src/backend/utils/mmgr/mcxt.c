@@ -1588,18 +1588,23 @@ ProcessGetMemoryContextInterrupt(void)
 
 			path = compute_context_path(c, context_id_lookup);
 
+			/*
+			 * Register the stats entry first, that way the cleanup handler
+			 * can reach it in case of allocation failures of one or more
+			 * members.
+			 */
+			memCxtState[idx].total_stats = cxt_id++;
 			PublishMemoryContext(meminfo, cxt_id, c, path,
 								 grand_totals, num_contexts, area, 100);
-			cxt_id = cxt_id + 1;
 		}
 		memCxtState[idx].total_stats = cxt_id;
 
+		LWLockRelease(&memCxtState[idx].lw_lock);
 		signal_memorycontext_reporting();
 
 		/* Notify waiting backends and return */
 		hash_destroy(context_id_lookup);
 		dsa_detach(area);
-		LWLockRelease(&memCxtState[idx].lw_lock);
 
 		return;
 	}
@@ -1679,11 +1684,11 @@ ProcessGetMemoryContextInterrupt(void)
 	}
 
 	/* Notify waiting backends and return */
+	LWLockRelease(&memCxtState[idx].lw_lock);
 	signal_memorycontext_reporting();
 
 	hash_destroy(context_id_lookup);
 	dsa_detach(area);
-	LWLockRelease(&memCxtState[idx].lw_lock);
 }
 
 /*
