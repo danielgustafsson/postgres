@@ -104,14 +104,14 @@ select * from pg_timezone_abbrevs where abbrev = 'LMT';
 
 DO $$
 DECLARE
-    launcher_pid int;
+    bg_writer_pid int;
     r RECORD;
 BEGIN
-        SELECT pid from pg_stat_activity where backend_type='autovacuum launcher'
-	 INTO launcher_pid;
+        SELECT pid from pg_stat_activity where backend_type='background writer'
+	 INTO bg_writer_pid;
 
         select type, name, ident
-        from pg_get_process_memory_contexts(launcher_pid, false, 20)
+        from pg_get_process_memory_contexts(bg_writer_pid, false, 20)
 	 where path = '{1}' into r;
 	RAISE NOTICE '%', r;
         select type, name, ident
