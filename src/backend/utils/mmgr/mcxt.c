@@ -190,7 +190,7 @@ static void PublishMemoryContext(MemoryContextEntry *memctx_infos,
 								 int num_contexts, dsa_area *area);
 static void compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 										   int *stats_count,
-										   bool get_summary);
+										   bool summary);
 static List *compute_context_path(MemoryContext c, HTAB *context_id_lookup,
 								  int max_level);
 static void dsa_free_previous_stats(dsa_area *area, int total_stats,
@@ -1420,7 +1420,7 @@ ProcessLogMemoryContextInterrupt(void)
  * statistics if any are captured as a cumulative total at the end of
  * individual context's statistics.
  *
- * If get_summary is true, we capture the level 1 and level 2 contexts
+ * If summary is true, we capture the level 1 and level 2 contexts
  * statistics.  For that we traverse the memory context tree recursively in
  * depth first search manner to cover all the children of a parent context, to
  * be able to display a cumulative total of memory consumption by a parent at
@@ -1434,7 +1434,7 @@ ProcessGetMemoryContextInterrupt(void)
 	HTAB	   *context_id_lookup;
 	int			context_id = 0;
 	MemoryContextEntry *meminfo;
-	bool		get_summary = false;
+	bool		summary = false;
 	dsa_area   *area = NULL;
 	int			max_stats;
 	int			idx = MyProcNumber;
@@ -1464,7 +1464,7 @@ ProcessGetMemoryContextInterrupt(void)
 	max_stats = (MAX_SEGMENTS_PER_BACKEND * DSA_DEFAULT_INIT_SEGMENT_SIZE)
 		/ (MAX_MEMORY_CONTEXT_STATS_SIZE);
 	LWLockAcquire(&memCtxState[idx].lw_lock, LW_EXCLUSIVE);
-	get_summary = memCtxState[idx].get_summary;
+	summary = memCtxState[idx].summary;
 	LWLockRelease(&memCtxState[idx].lw_lock);
 
 	/*
@@ -1473,7 +1473,7 @@ ProcessGetMemoryContextInterrupt(void)
 	 * 2 from the top. Also, populate the hash table of context ids.
 	 */
 	compute_contexts_count_and_ids(contexts, context_id_lookup, &stats_count,
-								   get_summary);
+								   summary);
 
 	/*
 	 * Allocate memory in this process's DSA for storing statistics of the the
@@ -1555,7 +1555,7 @@ ProcessGetMemoryContextInterrupt(void)
 	meminfo = (MemoryContextEntry *)
 		dsa_get_address(area, memCtxState[idx].memstats_dsa_pointer);
 
-	if (get_summary)
+	if (summary)
 	{
 		int			ctx_id = 0;
 		List	   *path = NIL;
@@ -1722,7 +1722,7 @@ compute_context_path(MemoryContext c, HTAB *context_id_lookup, int max_level)
  */
 static void
 compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
-							   int *stats_count, bool get_summary)
+							   int *stats_count, bool summary)
 {
 	foreach_ptr(MemoryContextData, cur, contexts)
 	{
@@ -1739,7 +1739,7 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 		/* Append the children of the current context to the main list. */
 		for (MemoryContext c = cur->firstchild; c != NULL; c = c->nextchild)
 		{
-			if (get_summary)
+			if (summary)
 			{
 				entry = (MemoryContextId *) hash_search(context_id_lookup, &c,
 														HASH_ENTER, &found);
@@ -1752,10 +1752,10 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 		}
 
 		/*
-		 * In summary only the first two level (from top) contexts are
-		 * displayed
+		 * In summary mode only the first two level (from top) contexts are
+		 * displayed.
 		 */
-		if (get_summary)
+		if (summary)
 			break;
 	}
 }

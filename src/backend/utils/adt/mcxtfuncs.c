@@ -355,7 +355,7 @@ Datum
 pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 {
 	int			pid = PG_GETARG_INT32(0);
-	bool		get_summary = PG_GETARG_BOOL(1);
+	bool		summary = PG_GETARG_BOOL(1);
 	double		timeout = PG_GETARG_FLOAT8(2);
 	double		timer = 0;
 	PGPROC	   *proc;
@@ -398,7 +398,7 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	procNumber = GetNumberFromPGProc(proc);
 
 	LWLockAcquire(&memCtxState[procNumber].lw_lock, LW_EXCLUSIVE);
-	memCtxState[procNumber].get_summary = get_summary;
+	memCtxState[procNumber].summary = summary;
 	LWLockRelease(&memCtxState[procNumber].lw_lock);
 
 	curr_timestamp = GetCurrentTimestamp();
@@ -415,12 +415,13 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * A valid DSA pointer isn't proof that statistics are available, it can be
-	 * valid due to previously published stats. Check if the stats are updated
-	 * by comparing the timestamp, if the stats are newer than our previously
-	 * recorded timestamp from before sending the procsignal, they must by
-	 * definition be updated. Wait for the timeout specified by the user,
-	 * following which display old statistics if available or return NULL.
+	 * A valid DSA pointer isn't proof that statistics are available, it can
+	 * be valid due to previously published stats. Check if the stats are
+	 * updated by comparing the timestamp, if the stats are newer than our
+	 * previously recorded timestamp from before sending the procsignal, they
+	 * must by definition be updated. Wait for the timeout specified by the
+	 * user, following which display old statistics if available or return
+	 * NULL.
 	 */
 	while (1)
 	{
@@ -491,10 +492,10 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 			/*
 			 * Wait for the timeout as defined by the user. If no updated
 			 * statistics are available within the allowed time then display
-			 * previously published statistics if there are any. If no previous
-			 * statistics are available then return NULL.  The timer is defined
-			 * in milliseconds since thats what the condition variable sleep
-			 * uses.
+			 * previously published statistics if there are any. If no
+			 * previous statistics are available then return NULL.  The timer
+			 * is defined in milliseconds since thats what the condition
+			 * variable sleep uses.
 			 */
 			if ((timer * 1000) >= timeout)
 			{

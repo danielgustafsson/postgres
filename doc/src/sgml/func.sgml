@@ -28852,8 +28852,8 @@ LOG:  Grand total: 1651920 bytes in 201 blocks; 622360 free (88 chunks); 1029560
 <programlisting>
 postgres=# SELECT * FROM pg_get_process_memory_contexts(
   (SELECT pid FROM pg_stat_activity
-    WHERE backend_type = 'checkpointer')
-  , false, 5) LIMIT 1;
+    WHERE backend_type = 'checkpointer'),
+  false, 0.5) LIMIT 1;
 -[ RECORD 1 ]----+------------------------------
 name             | TopMemoryContext
 ident            |

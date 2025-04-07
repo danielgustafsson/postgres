@@ -375,7 +375,7 @@ typedef struct MemoryContextBackendState
 	LWLock		lw_lock;
 	int			proc_id;
 	int			total_stats;
-	bool		get_summary;
+	bool		summary;
 	dsa_pointer memstats_dsa_pointer;
 	TimestampTz stats_timestamp;
 } MemoryContextBackendState;
