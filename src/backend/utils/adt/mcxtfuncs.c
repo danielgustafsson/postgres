@@ -237,7 +237,7 @@ pg_get_backend_memory_contexts(PG_FUNCTION_ARGS)
 		 * column with the parent context_ids.
 		 */
 		entry = (MemoryContextReportingId *) hash_search(context_id_lookup, &cur,
-												HASH_ENTER, &found);
+														 HASH_ENTER, &found);
 		entry->context_id = context_id++;
 		Assert(!found);
 
@@ -415,8 +415,8 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 
 	/*
 	 * Even if the proc has published statistics, the may not be due to the
-	 * current request, but previously published stats.  Check if the stats are
-	 * updated by comparing the timestamp, if the stats are newer than our
+	 * current request, but previously published stats.  Check if the stats
+	 * are updated by comparing the timestamp, if the stats are newer than our
 	 * previously recorded timestamp from before sending the procsignal, they
 	 * must by definition be updated. Wait for the timeout specified by the
 	 * user, following which display old statistics if available or return
@@ -536,12 +536,13 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	if (area == NULL)
 	{
 		MemoryContext oldcontext = CurrentMemoryContext;
- 
+
 		MemoryContextSwitchTo(TopMemoryContext);
 		area = dsa_attach(memCxtArea->memstats_dsa_handle);
 		MemoryContextSwitchTo(oldcontext);
 		dsa_pin_mapping(area);
 	}
+
 	/*
 	 * Backend has finished publishing the stats, project them.
 	 */

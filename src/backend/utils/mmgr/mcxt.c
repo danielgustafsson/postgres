@@ -1518,7 +1518,8 @@ ProcessGetMemoryContextInterrupt(void)
 	}
 
 	/*
-	 * If DSA exists, created by another process publishing statistics, attach to it.
+	 * If DSA exists, created by another process publishing statistics, attach
+	 * to it.
 	 */
 	else if (area == NULL)
 	{
@@ -1740,7 +1741,7 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 		bool		found;
 
 		entry = (MemoryContextReportingId *) hash_search(context_id_lookup, &cur,
-												HASH_ENTER, &found);
+														 HASH_ENTER, &found);
 		Assert(!found);
 
 		/* context id starts with 1 */
@@ -1752,7 +1753,7 @@ compute_contexts_count_and_ids(List *contexts, HTAB *context_id_lookup,
 			if (summary)
 			{
 				entry = (MemoryContextReportingId *) hash_search(context_id_lookup, &c,
-														HASH_ENTER, &found);
+																 HASH_ENTER, &found);
 				Assert(!found);
 
 				entry->context_id = ++(*stats_count);
