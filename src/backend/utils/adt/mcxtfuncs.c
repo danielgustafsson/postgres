@@ -26,6 +26,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
+#include "utils/memutils.h"
 #include "utils/wait_event_types.h"
 
 /* ----------
@@ -532,8 +533,16 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	 * the timestamp.
 	 */
 	Assert(memCxtArea->memstats_dsa_handle != DSA_HANDLE_INVALID);
-	area = dsa_attach(memCxtArea->memstats_dsa_handle);
-
+	/* Attach to the dsa area if we have not already done so */
+	if (area == NULL)
+	{
+		MemoryContext oldcontext = CurrentMemoryContext;
+ 
+		MemoryContextSwitchTo(TopMemoryContext);
+		area = dsa_attach(memCtxArea->memstats_dsa_handle);
+		MemoryContextSwitchTo(oldcontext);
+		dsa_pin_mapping(area);
+	}
 	/*
 	 * Backend has finished publishing the stats, project them.
 	 */
@@ -602,7 +611,6 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	LWLockRelease(&memCxtState[procNumber].lw_lock);
 
 	ConditionVariableCancelSleep();
-	dsa_detach(area);
 
 	PG_RETURN_NULL();
 }

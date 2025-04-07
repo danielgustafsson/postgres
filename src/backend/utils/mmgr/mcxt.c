@@ -172,6 +172,7 @@ MemoryContext CurTransactionContext = NULL;
 
 /* This is a transient link to the active portal's memory context: */
 MemoryContext PortalContext = NULL;
+dsa_area   *area = NULL;
 
 static void MemoryContextDeleteOnly(MemoryContext context);
 static void MemoryContextCallResetCallbacks(MemoryContext context);
@@ -1436,7 +1437,6 @@ ProcessGetMemoryContextInterrupt(void)
 	int			context_id = 0;
 	MemoryContextStatsEntry *meminfo;
 	bool		summary = false;
-	dsa_area   *area = NULL;
 	int			max_stats;
 	int			idx = MyProcNumber;
 	int			stats_count = 0;
@@ -1518,8 +1518,7 @@ ProcessGetMemoryContextInterrupt(void)
 	}
 
 	/*
-	 * If DSA exists, created by another process publishing statistics, or by
-	 * the previous execution of this function by this process, attach to it.
+	 * If DSA exists, created by another process publishing statistics, attach to it.
 	 */
 	else if (area == NULL)
 	{
@@ -1604,7 +1603,6 @@ ProcessGetMemoryContextInterrupt(void)
 
 		/* Notify waiting backends and return */
 		hash_destroy(context_id_lookup);
-		dsa_detach(area);
 
 		return;
 	}
@@ -1688,7 +1686,6 @@ ProcessGetMemoryContextInterrupt(void)
 	signal_memorycontext_reporting();
 
 	hash_destroy(context_id_lookup);
-	dsa_detach(area);
 }
 
 /*
@@ -1900,13 +1897,9 @@ void
 AtProcExit_memstats_dsa_free(int code, Datum arg)
 {
 	int			idx = MyProcNumber;
-	dsm_segment *dsm_seg = NULL;
-	dsa_area   *area = NULL;
 
 	if (memCxtArea->memstats_dsa_handle == DSA_HANDLE_INVALID)
 		return;
-
-	dsm_seg = dsm_find_mapping(memCxtArea->memstats_dsa_handle);
 
 	LWLockAcquire(&memCxtState[idx].lw_lock, LW_EXCLUSIVE);
 
@@ -1916,10 +1909,9 @@ AtProcExit_memstats_dsa_free(int code, Datum arg)
 		return;
 	}
 
-	/* If the dsm mapping could not be found, attach to the area */
-	if (dsm_seg != NULL)
-		return;
-	area = dsa_attach(memCxtArea->memstats_dsa_handle);
+	/* If the dsa mapping could not be found, attach to the area */
+	if (area == NULL)
+		area = dsa_attach(memCtxArea->memstats_dsa_handle);
 
 	/*
 	 * Free the memory context statistics, free the name, ident and path

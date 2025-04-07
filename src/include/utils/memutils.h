@@ -399,5 +399,5 @@ extern void HandleGetMemoryContextInterrupt(void);
 extern Size MemoryContextReportingShmemSize(void);
 extern void MemoryContextReportingShmemInit(void);
 extern void AtProcExit_memstats_dsa_free(int code, Datum arg);
-
+extern dsa_area *area;
 #endif							/* MEMUTILS_H */
