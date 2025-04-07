@@ -667,9 +667,9 @@ REVOKE EXECUTE ON FUNCTION pg_get_backend_memory_contexts() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION pg_get_backend_memory_contexts() TO pg_read_all_stats;
 
 REVOKE EXECUTE ON FUNCTION
-	pg_get_process_memory_contexts(integer, boolean, integer) FROM PUBLIC;
+	pg_get_process_memory_contexts(integer, boolean, float) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION
-	pg_get_process_memory_contexts(integer, boolean, integer) TO pg_read_all_stats;
+	pg_get_process_memory_contexts(integer, boolean, float) TO pg_read_all_stats;
 
 -- Statistics views
 

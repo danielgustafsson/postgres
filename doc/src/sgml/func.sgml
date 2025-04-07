@@ -28655,7 +28655,7 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
         <indexterm>
          <primary>pg_get_process_memory_contexts</primary>
         </indexterm>
-        <function>pg_get_process_memory_contexts</function> ( <parameter>pid</parameter> <type>integer</type>, <parameter>summary</parameter> <type>boolean</type>, <parameter>retries</parameter> <type>integer</type> )
+        <function>pg_get_process_memory_contexts</function> ( <parameter>pid</parameter> <type>integer</type>, <parameter>summary</parameter> <type>boolean</type>, <parameter>timeout</parameter> <type>float</type> )
         <returnvalue>setof record</returnvalue>
         ( <parameter>name</parameter> <type>text</type>,
         <parameter>ident</parameter> <type>text</type>,
@@ -28691,14 +28691,9 @@ acl      | {postgres=arwdDxtm/postgres,foo=r/postgres}
        </para>
        <para>
         Busy processes can delay reporting memory context statistics,
-        <parameter>retries</parameter> sets the number of times the client will
-        retry to get updated statistics.  The sleep per try is
-        <literal>0.5</literal> seconds.  This parameter can be increased if the
-        user anticipates a delay in the response from the reporting process.
-        Conversely, if users are frequently and periodically querying the
-        process for statistics, or if there are concurrent requests for
-        statistics of the same process, lowering the parameter might help
-        achieve a faster response.
+        <parameter>timeout</parameter> specifies the number of seconds
+        to wait for updated statistics. <parameter>timeout</parameter> can be
+        specified in fractions of a second.
        </para>
        <para>
         After receiving memory context statistics from the target process, it

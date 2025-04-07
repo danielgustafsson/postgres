@@ -345,25 +345,26 @@ pg_log_backend_memory_contexts(PG_FUNCTION_ARGS)
  * information is available and display.
  *
  * If the publishing backend does not respond before the condition variable
- * times out, which is set to MEMSTATS_WAIT_TIMEOUT, retry for max_retries
- * number of times, which is defined by user, before giving up and
+ * times out, which is set to MEMSTATS_WAIT_TIMEOUT, retry given that there is
+ * time left within the timeout specified by the user, before giving up and
  * returning previously published statistics, if any. If no previous statistics
  * exist, return NULL.
  */
+#define MEMSTATS_WAIT_TIMEOUT 100
 Datum
 pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 {
 	int			pid = PG_GETARG_INT32(0);
 	bool		get_summary = PG_GETARG_BOOL(1);
+	double		timeout = PG_GETARG_FLOAT8(2);
+	double		timer = 0;
 	PGPROC	   *proc;
 	ProcNumber	procNumber = INVALID_PROC_NUMBER;
 	bool		proc_is_aux = false;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	dsa_area   *area;
 	MemoryContextEntry *memctx_info;
-	int			num_retries = 0;
 	TimestampTz curr_timestamp;
-	int			max_retries = PG_GETARG_INT32(2);
 
 	/*
 	 * See if the process with given pid is a backend or an auxiliary process
@@ -414,13 +415,12 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	}
 
 	/*
-	 * A valid DSA pointer isn't proof that statistics are available, it can
-	 * be valid due to previously published stats. Check if the stats are
-	 * updated by comparing the timestamp, if the stats are newer than our
-	 * previously recorded timestamp from before sending the procsignal, they
-	 * must by definition be updated. Wait for max_retries *
-	 * MEMSTATS_WAIT_TIMEOUT, following which display old statistics if
-	 * available or return NULL.
+	 * A valid DSA pointer isn't proof that statistics are available, it can be
+	 * valid due to previously published stats. Check if the stats are updated
+	 * by comparing the timestamp, if the stats are newer than our previously
+	 * recorded timestamp from before sending the procsignal, they must by
+	 * definition be updated. Wait for the timeout specified by the user,
+	 * following which display old statistics if available or return NULL.
 	 */
 	while (1)
 	{
@@ -482,20 +482,21 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 			PG_RETURN_NULL();
 		}
 
-#define MEMSTATS_WAIT_TIMEOUT 500
-
 		if (ConditionVariableTimedSleep(&memCtxState[procNumber].memctx_cv,
 										MEMSTATS_WAIT_TIMEOUT,
 										WAIT_EVENT_MEM_CTX_PUBLISH))
 		{
+			timer += MEMSTATS_WAIT_TIMEOUT;
+
 			/*
-			 * Wait for max_retries, as defined by the user. If no updated
-			 * statistics are available within the wait time defined by
-			 * max_retries then display previously published statistics if
-			 * there are any. If no previous statistics are available then
-			 * return NULL.
+			 * Wait for the timeout as defined by the user. If no updated
+			 * statistics are available within the allowed time then display
+			 * previously published statistics if there are any. If no previous
+			 * statistics are available then return NULL.  The timer is defined
+			 * in milliseconds since thats what the condition variable sleep
+			 * uses.
 			 */
-			if (num_retries > max_retries)
+			if ((timer * 1000) >= timeout)
 			{
 				LWLockAcquire(&memCtxState[procNumber].lw_lock, LW_EXCLUSIVE);
 				/* Displaying previously published statistics if available */
@@ -507,10 +508,6 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 					PG_RETURN_NULL();
 				}
 			}
-			ereport(DEBUG1,
-					errmsg("timed out waiting for process with PID %d to publish stats, retrying",
-						   pid));
-			num_retries = num_retries + 1;
 		}
 	}
 
