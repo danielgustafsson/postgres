@@ -362,7 +362,6 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 	ProcNumber	procNumber = INVALID_PROC_NUMBER;
 	bool		proc_is_aux = false;
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	dsa_area   *area;
 	MemoryContextReportingStatsEntry *memcxt_info;
 	TimestampTz start_timestamp;
 
@@ -539,7 +538,7 @@ pg_get_process_memory_contexts(PG_FUNCTION_ARGS)
 		MemoryContext oldcontext = CurrentMemoryContext;
  
 		MemoryContextSwitchTo(TopMemoryContext);
-		area = dsa_attach(memCtxArea->memstats_dsa_handle);
+		area = dsa_attach(memCxtArea->memstats_dsa_handle);
 		MemoryContextSwitchTo(oldcontext);
 		dsa_pin_mapping(area);
 	}

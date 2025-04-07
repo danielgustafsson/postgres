@@ -1911,7 +1911,7 @@ AtProcExit_memstats_dsa_free(int code, Datum arg)
 
 	/* If the dsa mapping could not be found, attach to the area */
 	if (area == NULL)
-		area = dsa_attach(memCtxArea->memstats_dsa_handle);
+		area = dsa_attach(memCxtArea->memstats_dsa_handle);
 
 	/*
 	 * Free the memory context statistics, free the name, ident and path
