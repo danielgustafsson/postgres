@@ -673,7 +673,7 @@ BaseInit(void)
 	 * latest memory context statistics that could be published by this
 	 * proc if requested.
 	 */
-	before_shmem_exit(AtProcExit_memstats_dsa_free, 0);
+	before_shmem_exit(AtProcExit_memstats_cleanup, 0);
 }
 
 

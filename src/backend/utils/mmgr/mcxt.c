@@ -1894,7 +1894,7 @@ free_memorycontextstate_dsa(dsa_area *area, int total_stats,
  * in DSA area.
  */
 void
-AtProcExit_memstats_dsa_free(int code, Datum arg)
+AtProcExit_memstats_cleanup(int code, Datum arg)
 {
 	int			idx = MyProcNumber;
 
