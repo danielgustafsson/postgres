@@ -1677,7 +1677,8 @@ cleanup:
  * compute_context_path
  *
  * Append the transient context_id of this context and each of its ancestors
- * to a list, in order to compute a path.
+ * to a list, in order to compute a path.  The list is limited to max_level
+ * elements counted from the head of the list.
  */
 static List *
 compute_context_path(MemoryContext c, HTAB *context_id_lookup, int max_level)
@@ -1685,8 +1686,9 @@ compute_context_path(MemoryContext c, HTAB *context_id_lookup, int max_level)
 	bool		found;
 	List	   *path = NIL;
 	List	   *tmp = NIL;
+	MemoryContext cur_context;
 
-	for (MemoryContext cur_context = c; cur_context != NULL; cur_context = cur_context->parent)
+	for (cur_context = c; cur_context != NULL; cur_context = cur_context->parent)
 	{
 		MemoryContextId *cur_entry;
 
@@ -1698,6 +1700,12 @@ compute_context_path(MemoryContext c, HTAB *context_id_lookup, int max_level)
 		path = lcons_int(cur_entry->context_id, path);
 	}
 
+	/*
+	 * Limit returned list to max_level elements. This is a bit clunky since
+	 * we throw away parts of the list rather than stop building at max_level,
+	 * but since we build from the tail and limit from the head it's a trivial
+	 * solution for now.
+	 */
 	if (list_length(path) > max_level)
 	{
 		tmp = list_copy_head(path, max_level);
