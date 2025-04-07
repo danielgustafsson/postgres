@@ -84,6 +84,13 @@ AuxiliaryProcessMainCommon(void)
 	/* register a before-shutdown callback for LWLock cleanup */
 	before_shmem_exit(ShutdownAuxiliaryProcess, 0);
 
+	/*
+	 * The before shmem exit callback frees the DSA memory occupied by the
+	 * latest memory context statistics that could be published by this aux
+	 * proc if requested.
+	 */
+	before_shmem_exit(AtProcExit_memstats_dsa_free, 0);
+
 	SetProcessingMode(NormalProcessing);
 }
 

@@ -116,6 +116,13 @@ BackendMain(const void *startup_data, size_t startup_data_len)
 	InitProcess();
 
 	/*
+	 * The before shmem exit callback frees the DSA memory occupied by the
+	 * latest memory context statistics that could be published by this
+	 * backend if requested.
+	 */
+	before_shmem_exit(AtProcExit_memstats_dsa_free, 0);
+
+	/*
 	 * Make sure we aren't in PostmasterContext anymore.  (We can't delete it
 	 * just yet, though, because InitPostgres will need the HBA data.)
 	 */

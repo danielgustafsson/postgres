@@ -1662,12 +1662,16 @@ MemoizeState
 MemoizeTuple
 MemoryChunk
 MemoryContext
+MemoryContextBackendState
 MemoryContextCallback
 MemoryContextCallbackFunction
 MemoryContextCounters
 MemoryContextData
+MemoryContextId
 MemoryContextMethodID
 MemoryContextMethods
+MemoryContextState
+MemoryContextStatsEntry
 MemoryStatsPrintFunc
 MergeAction
 MergeActionState

@@ -18,6 +18,9 @@
 #define MEMUTILS_H
 
 #include "nodes/memnodes.h"
+#include "storage/condition_variable.h"
+#include "storage/lmgr.h"
+#include "utils/dsa.h"
 
 
 /*
@@ -48,6 +51,22 @@
 
 #define AllocHugeSizeIsValid(size)	((Size) (size) <= MaxAllocHugeSize)
 
+/*
+ * Memory Context reporting size limits.
+ */
+
+/* Max length of context name and ident */
+#define MEMORY_CONTEXT_IDENT_SHMEM_SIZE 64
+/* Maximum size (in Mb) of DSA area per process */
+#define MAX_SEGMENTS_PER_BACKEND 1
+/*
+ * Maximum size per context. Actual size may be lower as this assumes the worst
+ * case of deepest path and longest identifiers (name and ident, thus the
+ * multiplication by 2). The path depth is limited to 100 like for memory
+ * context logging.
+ */
+#define MAX_MEMORY_CONTEXT_STATS_SIZE sizeof(MemoryContextStatsEntry) + \
+	(100 * sizeof(int)) + (2 * MEMORY_CONTEXT_IDENT_SHMEM_SIZE)
 
 /*
  * Standard top-level memory contexts.
@@ -318,5 +337,67 @@ pg_memory_is_all_zeros(const void *ptr, size_t len)
 
 	return true;
 }
+
+/* Dynamic shared memory state for statistics per context */
+typedef struct MemoryContextStatsEntry
+{
+	dsa_pointer name;
+	dsa_pointer ident;
+	dsa_pointer path;
+	const char *type;
+	int			path_length;
+	int			levels;
+	int64		totalspace;
+	int64		nblocks;
+	int64		freespace;
+	int64		freechunks;
+	int			num_agg_stats;
+} MemoryContextStatsEntry;
+
+/*
+ * Static shared memory state representing the DSA area created for memory
+ * context statistics reporting.  A single DSA area is created and used by all
+ * the processes, each having its specific DSA allocations for sharing memory
+ * statistics, tracked by per backend static shared memory state.
+ */
+typedef struct MemoryContextState
+{
+	dsa_handle	memstats_dsa_handle;
+	LWLock		lw_lock;
+} MemoryContextState;
+
+/*
+ * Per backend static shared memory state for memory context statistics
+ * reporting.
+ */
+typedef struct MemoryContextBackendState
+{
+	ConditionVariable memctx_cv;
+	LWLock		lw_lock;
+	int			proc_id;
+	int			total_stats;
+	bool		summary;
+	dsa_pointer memstats_dsa_pointer;
+	TimestampTz stats_timestamp;
+} MemoryContextBackendState;
+
+
+/*
+ * Used for storage of transient identifiers for pg_get_backend_memory_contexts
+ */
+typedef struct MemoryContextId
+{
+	MemoryContext context;
+	int			context_id;
+} MemoryContextId;
+
+extern PGDLLIMPORT MemoryContextBackendState *memCtxState;
+extern PGDLLIMPORT MemoryContextState *memCtxArea;
+extern void ProcessGetMemoryContextInterrupt(void);
+extern const char *ContextTypeToString(NodeTag type);
+extern void HandleGetMemoryContextInterrupt(void);
+extern Size MemoryContextReportingShmemSize(void);
+extern void MemoryContextReportingShmemInit(void);
+extern void AtProcExit_memstats_dsa_free(int code, Datum arg);
 
 #endif							/* MEMUTILS_H */
