@@ -88,7 +88,7 @@ sub wait_for_checksum_state
 		'postgres',
 		"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';",
 		$state);
-	is($res, 1, 'ensure data checksums are transitioned to ' . $state);
+	is($res, 1, 'ensure data checksums are transitioned to ' . $state . ' on ' . $postgresnode->name());
 	return $res == 1;
 }
 
