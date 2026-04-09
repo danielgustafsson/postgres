@@ -253,7 +253,6 @@ extern bool DataChecksumsInProgressOn(void);
 extern void SetDataChecksumsOnInProgress(void);
 extern void SetDataChecksumsOn(void);
 extern void SetDataChecksumsOff(void);
-extern const char *show_data_checksums(void);
 extern const char *get_checksum_state_string(uint32 state);
 extern void InitLocalDataChecksumState(void);
 extern void SetLocalDataChecksumState(uint32 data_checksum_version);

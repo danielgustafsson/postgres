@@ -4973,13 +4973,6 @@ SetLocalDataChecksumState(uint32 data_checksum_version)
 	data_checksums = data_checksum_version;
 }
 
-/* guc hook */
-const char *
-show_data_checksums(void)
-{
-	return get_checksum_state_string(LocalDataChecksumState);
-}
-
 /*
  * Return true if the cluster was initialized on a platform where the
  * default signedness of char is "signed". This function exists for code
