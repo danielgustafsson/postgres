@@ -83,6 +83,7 @@ sub background_pgbench
 	push(@cmd, '-C') if ($extended && cointoss());
 	# If we run on a standby it needs to be a read-only benchmark
 	push(@cmd, '-S') if ($standby);
+	push(@cmd, '-n') if ($standby);
 	# Finally add the database name to use
 	push(@cmd, 'postgres');
 
@@ -210,6 +211,7 @@ $node_primary->append_conf(
 	qq[
 max_connections = 30
 log_statement = none
+hot_standby_feedback = on
 ]);
 $node_primary->start;
 $node_primary->safe_psql('postgres', 'CREATE EXTENSION test_checksums;');
