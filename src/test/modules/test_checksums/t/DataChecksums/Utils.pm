@@ -66,7 +66,7 @@ sub test_checksum_state
 	my $result = $postgresnode->safe_psql('postgres',
 		"SELECT setting FROM pg_catalog.pg_settings WHERE name = 'data_checksums';"
 	);
-	is($result, $state, 'ensure checksums are set to ' . $state);
+	is($result, $state, 'ensure checksums are set to ' . $state . ' on ' . $postgresnode->name());
 	return $result eq $state;
 }
 
