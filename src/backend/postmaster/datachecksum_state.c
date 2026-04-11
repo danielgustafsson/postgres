@@ -263,8 +263,8 @@ static const ChecksumBarrierCondition checksum_barriers[7] =
 	{PG_DATA_CHECKSUM_INPROGRESS_OFF, PG_DATA_CHECKSUM_VERSION},
 
 	/*
-	 * If checksums are being enabled when launcher_exit is executed, state
-	 * is set to off since we cannot reach on at that point.
+	 * If checksums are being enabled when launcher_exit is executed, state is
+	 * set to off since we cannot reach on at that point.
 	 */
 	{PG_DATA_CHECKSUM_INPROGRESS_ON, PG_DATA_CHECKSUM_INPROGRESS_OFF},
 };
@@ -419,6 +419,8 @@ AbsorbDataChecksumsBarrier(ProcSignalBarrierType barrier)
 	uint32		target_state;
 	int			current = data_checksums;
 	bool		found = false;
+
+	elog(LOG, "XXX: AbsorbDataChecksumsBarrier for %i", barrier);
 
 	/*
 	 * Translate the barrier condition to the target state, doing it here
@@ -827,8 +829,7 @@ ProcessDatabase(DataChecksumsWorkerDatabase *db)
 
 		/*
 		 * Heuristic to see if the database was dropped, and if it was we can
-		 * treat it as not an error, else treat as fatal and error out. TODO:
-		 * this could probably be improved with a tighter check.
+		 * treat it as not an error, else treat as fatal and error out.
 		 */
 		if (DatabaseExists(db->dboid))
 			return DATACHECKSUMSWORKER_FAILED;
@@ -1288,7 +1289,9 @@ DataChecksumsShmemRequest(void *arg)
  * DatabaseExists
  *
  * Scans the system catalog to check if a database with the given Oid exist
- * and returns true if it is found, else false.
+ * and returns true if it is found and valid, else false. Note, we cannot use
+ * database_is_invalid_oid here it will ERROR out, and we want to gracefully
+ * handle errors.
  */
 static bool
 DatabaseExists(Oid dboid)
@@ -1298,6 +1301,7 @@ DatabaseExists(Oid dboid)
 	SysScanDesc scan;
 	bool		found;
 	HeapTuple	tuple;
+	Form_pg_database pg_database_tuple;
 
 	StartTransactionCommand();
 
@@ -1310,6 +1314,14 @@ DatabaseExists(Oid dboid)
 							  1, &skey);
 	tuple = systable_getnext(scan);
 	found = HeapTupleIsValid(tuple);
+
+	/* If the Oid exists, ensure that it's not partially dropped */
+	if (found)
+	{
+		pg_database_tuple = (Form_pg_database) GETSTRUCT(tuple);
+		if (database_is_invalid_form(pg_database_tuple))
+			found = false;
+	}
 
 	systable_endscan(scan);
 	table_close(rel, AccessShareLock);

@@ -148,7 +148,7 @@ sub flip_data_checksums
 			  . "WHERE name = 'data_checksums';");
 
 		is(($result eq 'inprogress-on' || $result eq 'on'),
-			1, 'ensure checksums are on, or in progress, on standby_1');
+			1, 'ensure checksums are on, or in progress, on standby_1: ' . $result);
 
 		# Wait for checksums enabled on the primary and standby
 		wait_for_checksum_state($node_primary, 'on');

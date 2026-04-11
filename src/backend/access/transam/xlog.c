@@ -5390,7 +5390,7 @@ XLOGShmemInit(void *arg)
 
 	/* Use the checksum info from control file */
 	XLogCtl->data_checksum_version = ControlFile->data_checksum_version;
-
+	pg_memory_barrier();
 	SetLocalDataChecksumState(XLogCtl->data_checksum_version);
 
 	SpinLockInit(&XLogCtl->Insert.insertpos_lck);
@@ -8899,6 +8899,8 @@ xlog_redo(XLogReaderState *record)
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
 		ControlFile->data_checksum_version = checkPoint.dataChecksumState;
+
+		UpdateControlFile();
 		LWLockRelease(ControlFileLock);
 
 		/*
@@ -8966,6 +8968,10 @@ xlog_redo(XLogReaderState *record)
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
 		old_state = ControlFile->data_checksum_version;
+
+		elog(LOG, "xlog_redo / ControlFile->data_checksum_version %u => %u",
+			ControlFile->data_checksum_version, checkPoint.dataChecksumState);
+
 		ControlFile->data_checksum_version = checkPoint.dataChecksumState;
 		LWLockRelease(ControlFileLock);
 
@@ -9230,6 +9236,14 @@ xlog2_redo(XLogReaderState *record)
 		SpinLockAcquire(&XLogCtl->info_lck);
 		XLogCtl->data_checksum_version = state.new_checksum_state;
 		SpinLockRelease(&XLogCtl->info_lck);
+
+		elog(LOG, "xlog2_redo / XLogCtl->data_checksum_version %u => %u",
+			data_checksums, state.new_checksum_state);
+
+		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+		ControlFile->data_checksum_version = state.new_checksum_state;
+		UpdateControlFile();
+		LWLockRelease(ControlFileLock);
 
 		/*
 		 * Block on a procsignalbarrier to await all processes having seen the
