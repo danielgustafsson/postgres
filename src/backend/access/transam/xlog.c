@@ -7482,7 +7482,9 @@ CreateCheckPoint(int flags)
 	 * Get the current data_checksum_version value from xlogctl, valid at the
 	 * time of the checkpoint.
 	 */
+	SpinLockAcquire(&XLogCtl->info_lck);
 	checkPoint.dataChecksumState = XLogCtl->data_checksum_version;
+	SpinLockRelease(&XLogCtl->info_lck);
 
 	if (shutdown)
 	{
@@ -7602,10 +7604,6 @@ CreateCheckPoint(int flags)
 	if (!shutdown)
 		checkPoint.nextOid += TransamVariables->oidCount;
 	LWLockRelease(OidGenLock);
-
-	SpinLockAcquire(&XLogCtl->info_lck);
-	checkPoint.dataChecksumState = XLogCtl->data_checksum_version;
-	SpinLockRelease(&XLogCtl->info_lck);
 
 	checkPoint.logicalDecodingEnabled = IsLogicalDecodingEnabled();
 
@@ -7755,9 +7753,6 @@ CreateCheckPoint(int flags)
 	/* crash recovery should always recover to the end of WAL */
 	ControlFile->minRecoveryPoint = InvalidXLogRecPtr;
 	ControlFile->minRecoveryPointTLI = 0;
-
-	/* make sure we start with the checksum version as of the checkpoint */
-	ControlFile->data_checksum_version = checkPoint.dataChecksumState;
 
 	/*
 	 * Persist unloggedLSN value. It's reset on crash recovery, so this goes
@@ -8968,10 +8963,10 @@ xlog_redo(XLogReaderState *record)
 		/* ControlFile->checkPointCopy always tracks the latest ckpt XID */
 		LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
 		ControlFile->checkPointCopy.nextXid = checkPoint.nextXid;
-		old_state = ControlFile->data_checksum_version;
 
-		elog(LOG, "xlog_redo / ControlFile->data_checksum_version %u => %u",
-			ControlFile->data_checksum_version, checkPoint.dataChecksumState);
+		elog(LOG, "XXX: xlog_redo / ControlFile->data_checksum_version %u => %u / XLogCtl->data_checksum_version %u => %u",
+			ControlFile->data_checksum_version, checkPoint.dataChecksumState,
+			XLogCtl->data_checksum_version, checkPoint.dataChecksumState);
 
 		LWLockRelease(ControlFileLock);
 
@@ -8989,6 +8984,7 @@ xlog_redo(XLogReaderState *record)
 		 * well as persist the new state in the ControlFile.
 		 */
 		SpinLockAcquire(&XLogCtl->info_lck);
+		old_state = XLogCtl->data_checksum_version;
 		XLogCtl->data_checksum_version = checkPoint.dataChecksumState;
 		SetLocalDataChecksumState(checkPoint.dataChecksumState);
 		if (checkPoint.dataChecksumState != old_state)
