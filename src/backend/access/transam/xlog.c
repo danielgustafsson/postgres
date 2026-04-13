@@ -8973,7 +8973,6 @@ xlog_redo(XLogReaderState *record)
 		elog(LOG, "xlog_redo / ControlFile->data_checksum_version %u => %u",
 			ControlFile->data_checksum_version, checkPoint.dataChecksumState);
 
-		ControlFile->data_checksum_version = checkPoint.dataChecksumState;
 		LWLockRelease(ControlFileLock);
 
 		/* TLI should not change in an on-line checkpoint */
@@ -8986,16 +8985,25 @@ xlog_redo(XLogReaderState *record)
 		RecoveryRestartPoint(&checkPoint, record);
 
 		/*
-		 * If the data checksum state change we need to emit a barrier.
+		 * If the data checksum state changes we need to emit a barrier as
+		 * well as persist the new state in the ControlFile.
 		 */
 		SpinLockAcquire(&XLogCtl->info_lck);
 		XLogCtl->data_checksum_version = checkPoint.dataChecksumState;
+		SetLocalDataChecksumState(checkPoint.dataChecksumState);
 		if (checkPoint.dataChecksumState != old_state)
 			new_state = true;
 		SpinLockRelease(&XLogCtl->info_lck);
 
 		if (new_state)
+		{
+			LWLockAcquire(ControlFileLock, LW_EXCLUSIVE);
+			ControlFile->data_checksum_version = checkPoint.dataChecksumState;
+			LWLockRelease(ControlFileLock);
+			UpdateControlFile();
+
 			EmitAndWaitDataChecksumsBarrier(checkPoint.dataChecksumState);
+		}
 
 		/*
 		 * After replaying a checkpoint record, free all smgr objects.
@@ -9165,6 +9173,7 @@ xlog_redo(XLogReaderState *record)
 
 		SpinLockAcquire(&XLogCtl->info_lck);
 		XLogCtl->data_checksum_version = redo_rec.data_checksum_version;
+		SetLocalDataChecksumState(redo_rec.data_checksum_version);
 		if (redo_rec.data_checksum_version != ControlFile->data_checksum_version)
 			new_state = true;
 		SpinLockRelease(&XLogCtl->info_lck);
