@@ -12477,7 +12477,7 @@
   prorettype => 'void', proargtypes => 'int4 int4',
   proallargtypes => '{int4,int4}', proargmodes => '{i,i}',
   proargnames => '{cost_delay,cost_limit}', proargdefaults => '{0,100}',
-  prosrc => 'enable_data_checksums', proacl => '{POSTGRES=X}' },
+  prosrc => 'enable_data_checksums' },
 
 # collation management functions
 { oid => '3445', descr => 'import collations from operating system',
