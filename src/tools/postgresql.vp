@@ -36,9 +36,10 @@
 // variant by sending cancel_request_plain directly instead of
 // cancel_request_record.
 //
-// Suggested invocation:
+// Suggested quick and bounded invocation (the default two-session analysis is
+// substantially more expensive):
 //
-//   verifpal verify src/tools/postgresql.vp
+//   verifpal verify src/tools/postgresql.vp --sessions 1
 
 attacker[active]
 
@@ -58,7 +59,7 @@ principal Server[
 
 	knows public protocol_3_2
 	knows public ssl_request
-	knows public ssl_supported
+	knows public ssl_supported_response
 	knows public tls_1_3
 	knows public tls_server_context
 	knows public tls_server_finished_label
@@ -102,7 +103,7 @@ principal Client[
 	knows private password
 	knows public protocol_3_2
 	knows public ssl_request
-	knows public ssl_supported
+	knows public ssl_supported_response
 	knows public tls_1_3
 	knows public tls_server_context
 	knows public tls_server_finished_label
@@ -149,7 +150,7 @@ principal Client[
 Client -> Server: [credential_record]
 
 principal Server[
-	credential_plain_s = PKE_DEC(credential_decryption_key, credential_record)?
+	credential_plain_s = PKE_DEC(credential_decryption_key, credential_record)
 	password_salt_s, stored_key_s, server_key_s = SPLIT(credential_plain_s)?
 ]
 
@@ -157,11 +158,21 @@ principal Server[
 // PostgreSQL SSLRequest and an abstract authenticated TLS 1.3 handshake.
 // ---------------------------------------------------------------------------
 
-Client -> Server: ssl_request
-Server -> Client: ssl_supported
+principal Client[
+	ssl_request_message = HASH(ssl_request)
+]
+
+Client -> Server: ssl_request_message
+
+principal Server[
+	_ = ASSERT(ssl_request_message, HASH(ssl_request))?
+	ssl_response = HASH(ssl_supported_response)
+]
+
+Server -> Client: ssl_response
 
 principal Client[
-	_ = ASSERT(ssl_supported, ssl_supported)?
+	_ = ASSERT(ssl_response, HASH(ssl_supported_response))?
 	generates tls_client_random
 	generates tls_client_ephemeral
 	tls_client_ephemeral_public = PUBKEY(tls_client_ephemeral)
@@ -250,7 +261,7 @@ principal Client[
 	sasl_plus_c, sasl_plain_c = SPLIT(sasl_mechanisms_c)?
 	_ = ASSERT(sasl_plus_c, scram_sha_256_plus)?
 	generates client_nonce
-	gs2_header = CONCAT(scram_sha_256_plus, tls_server_end_point, tls_server_end_point_c)
+	gs2_header = CONCAT(scram_sha_256_plus, tls_server_end_point)
 	client_first_bare = CONCAT(user_name, client_nonce)
 	client_first = CONCAT(gs2_header, client_first_bare)
 	sasl_initial_plain = CONCAT(scram_sha_256_plus, client_first)
@@ -265,10 +276,9 @@ principal Server[
 	sasl_mechanism_s, client_first_s = SPLIT(sasl_initial_plain_s)?
 	_ = ASSERT(sasl_mechanism_s, scram_sha_256_plus)?
 	gs2_header_s, client_first_bare_s = SPLIT(client_first_s)?
-	gs2_mechanism_s, gs2_binding_type_s, gs2_binding_data_s = SPLIT(gs2_header_s)?
+	gs2_mechanism_s, gs2_binding_type_s = SPLIT(gs2_header_s)?
 	_ = ASSERT(gs2_mechanism_s, scram_sha_256_plus)?
 	_ = ASSERT(gs2_binding_type_s, tls_server_end_point)?
-	_ = ASSERT(gs2_binding_data_s, tls_server_end_point_s)?
 	client_user_s, client_nonce_s = SPLIT(client_first_bare_s)?
 	_ = ASSERT(client_user_s, user_name)?
 	generates server_nonce
@@ -283,7 +293,9 @@ Server -> Client: server_first_nonce, server_first_record
 principal Client[
 	server_first_c = AEAD_DEC(tls_server_application_key_c, server_first_nonce, server_first_record, authentication_sasl_continue_type)?
 	combined_nonce_c, password_salt_c, scram_iterations_c = SPLIT(server_first_c)?
-	expected_combined_nonce_c = CONCAT(client_nonce, server_nonce)
+	client_nonce_echo_c, server_nonce_c = SPLIT(combined_nonce_c)?
+	_ = ASSERT(client_nonce_echo_c, client_nonce)?
+	expected_combined_nonce_c = CONCAT(client_nonce, server_nonce_c)
 	_ = ASSERT(combined_nonce_c, expected_combined_nonce_c)?
 	_ = ASSERT(password_salt_c, password_salt)?
 	_ = ASSERT(scram_iterations_c, scram_iterations)?
@@ -363,7 +375,8 @@ principal Client[
 
 	knows private prepared_statement
 	knows private bind_parameters
-	extended_query_plain = CONCAT(prepared_statement, bind_parameters, parse_type, bind_type, execute_type, sync_type)
+	extended_steps = CONCAT(parse_type, bind_type, execute_type, sync_type)
+	extended_query_plain = CONCAT(prepared_statement, bind_parameters, extended_steps)
 	generates extended_query_nonce
 	extended_query_record = AEAD_ENC(tls_client_application_key_c, extended_query_nonce, extended_query_plain, execute_type)
 ]
@@ -372,7 +385,8 @@ Client -> Server: extended_query_nonce, extended_query_record
 
 principal Server[
 	extended_query_plain_s = AEAD_DEC(tls_client_application_key_s, extended_query_nonce, extended_query_record, execute_type)?
-	prepared_statement_s, bind_parameters_s, parse_s, bind_s, execute_s, sync_s = SPLIT(extended_query_plain_s)?
+	prepared_statement_s, bind_parameters_s, extended_steps_s = SPLIT(extended_query_plain_s)?
+	parse_s, bind_s, execute_s, sync_s = SPLIT(extended_steps_s)?
 	_ = ASSERT(parse_s, parse_type)?
 	_ = ASSERT(bind_s, bind_type)?
 	_ = ASSERT(execute_s, execute_type)?
