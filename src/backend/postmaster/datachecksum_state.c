@@ -1377,8 +1377,6 @@ done:
 	/* Shut down progress reporting as we are done */
 	pgstat_progress_end_command();
 
-	launcher_running = false;
-	DataChecksumState->launcher_running = false;
 	LWLockRelease(DataChecksumsWorkerLock);
 }
 
