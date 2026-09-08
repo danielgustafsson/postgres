@@ -1,0 +1,431 @@
+// PostgreSQL protocol model for Verifpal.
+//
+// This model follows the version 3 frontend/backend protocol and the libpq
+// SCRAM implementation.  It covers:
+//
+//   * PostgreSQL-style SSLRequest negotiation;
+//   * an authenticated, forward-secret TLS-like channel;
+//   * StartupMessage;
+//   * SCRAM-SHA-256-PLUS with tls-server-end-point channel binding;
+//   * AuthenticationOk, BackendKeyData, and ReadyForQuery;
+//   * simple and extended query traffic; and
+//   * a TLS-protected CancelRequest.
+//
+// It is intentionally a symbolic model, not a byte-for-byte encoder.  Message
+// type, length, Base64, and string framing are represented by CONCAT and public
+// domain-separation labels.  TLS uses a compact signed ephemeral-DH handshake
+// instead of reproducing the full TLS state machine.
+//
+// Verifpal has no XOR primitive.  SCRAM's
+//
+//   ClientProof = ClientKey XOR ClientSignature
+//
+// is represented as ENC(ClientSignature, ClientKey).  The server decrypts the
+// proof and checks HASH(ClientKey) against StoredKey.  This preserves the
+// verifier data flow and authentication gate, but treats XOR as ideal
+// encryption.  Verifpal also treats `knows private password` as unguessable,
+// so this model cannot analyze offline dictionary attacks or PBKDF2 cost.
+//
+// Credential provisioning is included only to initialize the server with the
+// same salt, StoredKey, and ServerKey as the client.  Its guarded ciphertext
+// represents an authenticated administrative channel and is not part of the
+// PostgreSQL startup protocol.
+//
+// The CancelRequest below models PQcancelStart/PQcancelBlocking with TLS
+// required.  The legacy PQcancel API sends its packet in plaintext; model that
+// variant by sending cancel_request_plain directly instead of
+// cancel_request_record.
+//
+// Suggested invocation:
+//
+//   verifpal verify src/tools/postgresql.vp
+
+attacker[active]
+
+principal Client[]
+principal Server[]
+
+// ---------------------------------------------------------------------------
+// Public protocol constants and trusted credential provisioning.
+// ---------------------------------------------------------------------------
+
+principal Server[
+	knows private credential_decryption_key
+	credential_encryption_key = PUBKEY(credential_decryption_key)
+
+	knows private tls_certificate_key
+	tls_certificate_public_key = PUBKEY(tls_certificate_key)
+
+	knows public protocol_3_2
+	knows public ssl_request
+	knows public ssl_supported
+	knows public tls_1_3
+	knows public tls_server_context
+	knows public tls_server_finished_label
+	knows public tls_client_finished_label
+	knows public tls_client_application_label
+	knows public tls_server_application_label
+
+	knows public startup_message_type
+	knows public authentication_sasl_type
+	knows public sasl_initial_response_type
+	knows public authentication_sasl_continue_type
+	knows public sasl_response_type
+	knows public authentication_sasl_final_type
+	knows public authentication_ok_type
+	knows public backend_key_data_type
+	knows public ready_for_query_type
+	knows public simple_query_type
+	knows public simple_result_type
+	knows public parse_type
+	knows public bind_type
+	knows public execute_type
+	knows public sync_type
+	knows public extended_result_type
+	knows public cancel_request_type
+
+	knows public scram_sha_256
+	knows public scram_sha_256_plus
+	knows public tls_server_end_point
+	knows public client_key_label
+	knows public server_key_label
+	knows public scram_iterations
+	knows public authentication_ok
+	knows public transaction_idle
+]
+
+// The brackets model PKI/configuration authenticity.  Public keys remain
+// visible to the attacker, but cannot be replaced in transit.
+Server -> Client: [credential_encryption_key], [tls_certificate_public_key]
+
+principal Client[
+	knows private password
+	knows public protocol_3_2
+	knows public ssl_request
+	knows public ssl_supported
+	knows public tls_1_3
+	knows public tls_server_context
+	knows public tls_server_finished_label
+	knows public tls_client_finished_label
+	knows public tls_client_application_label
+	knows public tls_server_application_label
+
+	knows public startup_message_type
+	knows public authentication_sasl_type
+	knows public sasl_initial_response_type
+	knows public authentication_sasl_continue_type
+	knows public sasl_response_type
+	knows public authentication_sasl_final_type
+	knows public authentication_ok_type
+	knows public backend_key_data_type
+	knows public ready_for_query_type
+	knows public simple_query_type
+	knows public simple_result_type
+	knows public parse_type
+	knows public bind_type
+	knows public execute_type
+	knows public sync_type
+	knows public extended_result_type
+	knows public cancel_request_type
+
+	knows public scram_sha_256
+	knows public scram_sha_256_plus
+	knows public tls_server_end_point
+	knows public client_key_label
+	knows public server_key_label
+	knows public scram_iterations
+	knows public authentication_ok
+	knows public transaction_idle
+
+	generates password_salt
+	salted_password = HASH(password, password_salt, scram_iterations)
+	client_key = MAC(salted_password, client_key_label)
+	stored_key = HASH(client_key)
+	server_key = MAC(salted_password, server_key_label)
+	credential_plain = CONCAT(password_salt, stored_key, server_key)
+	credential_record = PKE_ENC(credential_encryption_key, credential_plain)
+]
+
+Client -> Server: [credential_record]
+
+principal Server[
+	credential_plain_s = PKE_DEC(credential_decryption_key, credential_record)?
+	password_salt_s, stored_key_s, server_key_s = SPLIT(credential_plain_s)?
+]
+
+// ---------------------------------------------------------------------------
+// PostgreSQL SSLRequest and an abstract authenticated TLS 1.3 handshake.
+// ---------------------------------------------------------------------------
+
+Client -> Server: ssl_request
+Server -> Client: ssl_supported
+
+principal Client[
+	_ = ASSERT(ssl_supported, ssl_supported)?
+	generates tls_client_random
+	generates tls_client_ephemeral
+	tls_client_ephemeral_public = PUBKEY(tls_client_ephemeral)
+	tls_client_hello = CONCAT(tls_1_3, tls_client_random, tls_client_ephemeral_public)
+]
+
+Client -> Server: tls_client_hello
+
+principal Server[
+	tls_version_s, tls_client_random_s, tls_client_ephemeral_public_s = SPLIT(tls_client_hello)?
+	_ = ASSERT(tls_version_s, tls_1_3)?
+	generates tls_server_random
+	generates tls_server_ephemeral
+	tls_server_ephemeral_public = PUBKEY(tls_server_ephemeral)
+	tls_shared_secret_s = DH_KEX(tls_client_ephemeral_public_s, tls_server_ephemeral)
+	tls_hello_transcript_s = HASH(tls_client_hello, tls_server_random, tls_server_ephemeral_public)
+	tls_certificate_verify = SIGN(tls_certificate_key, CONCAT(tls_server_context, tls_hello_transcript_s))
+	tls_handshake_key_s = HKDF(nil, tls_shared_secret_s, tls_hello_transcript_s)
+	tls_server_finished_key_s = HKDF(tls_handshake_key_s, tls_server_finished_label, tls_hello_transcript_s)
+	tls_server_finished = MAC(tls_server_finished_key_s, tls_hello_transcript_s)
+	generates tls_server_finished_nonce
+	tls_server_finished_record = AEAD_ENC(tls_handshake_key_s, tls_server_finished_nonce, tls_server_finished, tls_hello_transcript_s)
+]
+
+Server -> Client: tls_server_random, tls_server_ephemeral_public, tls_certificate_verify, tls_server_finished_nonce, tls_server_finished_record
+
+principal Client[
+	tls_hello_transcript_c = HASH(tls_client_hello, tls_server_random, tls_server_ephemeral_public)
+	_ = SIGNVERIF(tls_certificate_public_key, CONCAT(tls_server_context, tls_hello_transcript_c), tls_certificate_verify)?
+	tls_shared_secret_c = DH_KEX(tls_server_ephemeral_public, tls_client_ephemeral)
+	tls_handshake_key_c = HKDF(nil, tls_shared_secret_c, tls_hello_transcript_c)
+	tls_server_finished_key_c = HKDF(tls_handshake_key_c, tls_server_finished_label, tls_hello_transcript_c)
+	tls_server_finished_c = AEAD_DEC(tls_handshake_key_c, tls_server_finished_nonce, tls_server_finished_record, tls_hello_transcript_c)?
+	_ = ASSERT(tls_server_finished_c, MAC(tls_server_finished_key_c, tls_hello_transcript_c))?
+	tls_client_finished_key_c = HKDF(tls_handshake_key_c, tls_client_finished_label, tls_hello_transcript_c)
+	tls_client_finished = MAC(tls_client_finished_key_c, HASH(tls_hello_transcript_c, tls_server_finished_c))
+	generates tls_client_finished_nonce
+	tls_client_finished_record = AEAD_ENC(tls_handshake_key_c, tls_client_finished_nonce, tls_client_finished, tls_hello_transcript_c)
+	tls_client_application_key_c = HKDF(tls_handshake_key_c, tls_client_application_label, tls_hello_transcript_c)
+	tls_server_application_key_c = HKDF(tls_handshake_key_c, tls_server_application_label, tls_hello_transcript_c)
+	tls_server_end_point_c = HASH(tls_certificate_public_key)
+]
+
+Client -> Server: tls_client_finished_nonce, tls_client_finished_record
+
+principal Server[
+	tls_client_finished_s = AEAD_DEC(tls_handshake_key_s, tls_client_finished_nonce, tls_client_finished_record, tls_hello_transcript_s)?
+	tls_client_finished_key_s = HKDF(tls_handshake_key_s, tls_client_finished_label, tls_hello_transcript_s)
+	_ = ASSERT(tls_client_finished_s, MAC(tls_client_finished_key_s, HASH(tls_hello_transcript_s, tls_server_finished)))?
+	tls_client_application_key_s = HKDF(tls_handshake_key_s, tls_client_application_label, tls_hello_transcript_s)
+	tls_server_application_key_s = HKDF(tls_handshake_key_s, tls_server_application_label, tls_hello_transcript_s)
+	tls_server_end_point_s = HASH(tls_certificate_public_key)
+]
+
+// ---------------------------------------------------------------------------
+// StartupMessage and SCRAM-SHA-256-PLUS.
+// ---------------------------------------------------------------------------
+
+principal Client[
+	knows public user_name
+	knows public database_name
+	startup_plain = CONCAT(protocol_3_2, user_name, database_name)
+	generates startup_nonce
+	startup_record = AEAD_ENC(tls_client_application_key_c, startup_nonce, startup_plain, startup_message_type)
+]
+
+Client -> Server: startup_nonce, startup_record
+
+principal Server[
+	knows public user_name
+	knows public database_name
+	startup_plain_s = AEAD_DEC(tls_client_application_key_s, startup_nonce, startup_record, startup_message_type)?
+	startup_protocol_s, startup_user_s, startup_database_s = SPLIT(startup_plain_s)?
+	_ = ASSERT(startup_protocol_s, protocol_3_2)?
+	_ = ASSERT(startup_user_s, user_name)?
+	_ = ASSERT(startup_database_s, database_name)?
+	sasl_mechanisms = CONCAT(scram_sha_256_plus, scram_sha_256)
+	generates sasl_mechanisms_nonce
+	sasl_mechanisms_record = AEAD_ENC(tls_server_application_key_s, sasl_mechanisms_nonce, sasl_mechanisms, authentication_sasl_type)
+]
+
+Server -> Client: sasl_mechanisms_nonce, sasl_mechanisms_record
+
+principal Client[
+	sasl_mechanisms_c = AEAD_DEC(tls_server_application_key_c, sasl_mechanisms_nonce, sasl_mechanisms_record, authentication_sasl_type)?
+	sasl_plus_c, sasl_plain_c = SPLIT(sasl_mechanisms_c)?
+	_ = ASSERT(sasl_plus_c, scram_sha_256_plus)?
+	generates client_nonce
+	gs2_header = CONCAT(scram_sha_256_plus, tls_server_end_point, tls_server_end_point_c)
+	client_first_bare = CONCAT(user_name, client_nonce)
+	client_first = CONCAT(gs2_header, client_first_bare)
+	sasl_initial_plain = CONCAT(scram_sha_256_plus, client_first)
+	generates sasl_initial_nonce
+	sasl_initial_record = AEAD_ENC(tls_client_application_key_c, sasl_initial_nonce, sasl_initial_plain, sasl_initial_response_type)
+]
+
+Client -> Server: sasl_initial_nonce, sasl_initial_record
+
+principal Server[
+	sasl_initial_plain_s = AEAD_DEC(tls_client_application_key_s, sasl_initial_nonce, sasl_initial_record, sasl_initial_response_type)?
+	sasl_mechanism_s, client_first_s = SPLIT(sasl_initial_plain_s)?
+	_ = ASSERT(sasl_mechanism_s, scram_sha_256_plus)?
+	gs2_header_s, client_first_bare_s = SPLIT(client_first_s)?
+	gs2_mechanism_s, gs2_binding_type_s, gs2_binding_data_s = SPLIT(gs2_header_s)?
+	_ = ASSERT(gs2_mechanism_s, scram_sha_256_plus)?
+	_ = ASSERT(gs2_binding_type_s, tls_server_end_point)?
+	_ = ASSERT(gs2_binding_data_s, tls_server_end_point_s)?
+	client_user_s, client_nonce_s = SPLIT(client_first_bare_s)?
+	_ = ASSERT(client_user_s, user_name)?
+	generates server_nonce
+	combined_nonce_s = CONCAT(client_nonce_s, server_nonce)
+	server_first = CONCAT(combined_nonce_s, password_salt_s, scram_iterations)
+	generates server_first_nonce
+	server_first_record = AEAD_ENC(tls_server_application_key_s, server_first_nonce, server_first, authentication_sasl_continue_type)
+]
+
+Server -> Client: server_first_nonce, server_first_record
+
+principal Client[
+	server_first_c = AEAD_DEC(tls_server_application_key_c, server_first_nonce, server_first_record, authentication_sasl_continue_type)?
+	combined_nonce_c, password_salt_c, scram_iterations_c = SPLIT(server_first_c)?
+	expected_combined_nonce_c = CONCAT(client_nonce, server_nonce)
+	_ = ASSERT(combined_nonce_c, expected_combined_nonce_c)?
+	_ = ASSERT(password_salt_c, password_salt)?
+	_ = ASSERT(scram_iterations_c, scram_iterations)?
+	channel_binding_c = CONCAT(gs2_header, tls_server_end_point_c)
+	client_final_without_proof = CONCAT(channel_binding_c, combined_nonce_c)
+	auth_message_c = CONCAT(client_first_bare, server_first_c, client_final_without_proof)
+	client_signature_c = MAC(stored_key, auth_message_c)
+	client_proof = ENC(client_signature_c, client_key)
+	client_final = CONCAT(client_final_without_proof, client_proof)
+	generates client_final_nonce
+	client_final_record = AEAD_ENC(tls_client_application_key_c, client_final_nonce, client_final, sasl_response_type)
+]
+
+Client -> Server: client_final_nonce, client_final_record
+
+principal Server[
+	client_final_s = AEAD_DEC(tls_client_application_key_s, client_final_nonce, client_final_record, sasl_response_type)?
+	client_final_without_proof_s, client_proof_s = SPLIT(client_final_s)?
+	channel_binding_s, combined_nonce_final_s = SPLIT(client_final_without_proof_s)?
+	_ = ASSERT(channel_binding_s, CONCAT(gs2_header_s, tls_server_end_point_s))?
+	_ = ASSERT(combined_nonce_final_s, combined_nonce_s)?
+	auth_message_s = CONCAT(client_first_bare_s, server_first, client_final_without_proof_s)
+	client_signature_s = MAC(stored_key_s, auth_message_s)
+	client_key_from_proof_s = DEC(client_signature_s, client_proof_s)
+	_ = ASSERT(HASH(client_key_from_proof_s), stored_key_s)?
+	server_signature = MAC(server_key_s, auth_message_s)
+	generates server_final_nonce
+	server_final_record = AEAD_ENC(tls_server_application_key_s, server_final_nonce, server_signature, authentication_sasl_final_type)
+]
+
+Server -> Client: server_final_nonce, server_final_record
+
+principal Client[
+	server_signature_c = AEAD_DEC(tls_server_application_key_c, server_final_nonce, server_final_record, authentication_sasl_final_type)?
+	expected_server_signature_c = MAC(server_key, auth_message_c)
+	_ = ASSERT(server_signature_c, expected_server_signature_c)?
+]
+
+// ---------------------------------------------------------------------------
+// Successful startup completion and normal protocol traffic.
+// ---------------------------------------------------------------------------
+
+principal Server[
+	generates backend_pid
+	generates cancel_key
+	startup_complete_plain = CONCAT(authentication_ok, backend_pid, cancel_key, transaction_idle)
+	generates startup_complete_nonce
+	startup_complete_record = AEAD_ENC(tls_server_application_key_s, startup_complete_nonce, startup_complete_plain, authentication_ok_type)
+]
+
+Server -> Client: startup_complete_nonce, startup_complete_record
+
+principal Client[
+	startup_complete_c = AEAD_DEC(tls_server_application_key_c, startup_complete_nonce, startup_complete_record, authentication_ok_type)?
+	authentication_ok_c, backend_pid_c, cancel_key_c, transaction_status_c = SPLIT(startup_complete_c)?
+	_ = ASSERT(authentication_ok_c, authentication_ok)?
+	_ = ASSERT(transaction_status_c, transaction_idle)?
+
+	knows private simple_query
+	generates simple_query_nonce
+	simple_query_record = AEAD_ENC(tls_client_application_key_c, simple_query_nonce, simple_query, simple_query_type)
+]
+
+Client -> Server: simple_query_nonce, simple_query_record
+
+principal Server[
+	simple_query_s = AEAD_DEC(tls_client_application_key_s, simple_query_nonce, simple_query_record, simple_query_type)?
+	generates simple_result
+	generates simple_result_nonce
+	simple_result_record = AEAD_ENC(tls_server_application_key_s, simple_result_nonce, simple_result, simple_result_type)
+]
+
+Server -> Client: simple_result_nonce, simple_result_record
+
+principal Client[
+	simple_result_c = AEAD_DEC(tls_server_application_key_c, simple_result_nonce, simple_result_record, simple_result_type)?
+
+	knows private prepared_statement
+	knows private bind_parameters
+	extended_query_plain = CONCAT(prepared_statement, bind_parameters, parse_type, bind_type, execute_type, sync_type)
+	generates extended_query_nonce
+	extended_query_record = AEAD_ENC(tls_client_application_key_c, extended_query_nonce, extended_query_plain, execute_type)
+]
+
+Client -> Server: extended_query_nonce, extended_query_record
+
+principal Server[
+	extended_query_plain_s = AEAD_DEC(tls_client_application_key_s, extended_query_nonce, extended_query_record, execute_type)?
+	prepared_statement_s, bind_parameters_s, parse_s, bind_s, execute_s, sync_s = SPLIT(extended_query_plain_s)?
+	_ = ASSERT(parse_s, parse_type)?
+	_ = ASSERT(bind_s, bind_type)?
+	_ = ASSERT(execute_s, execute_type)?
+	_ = ASSERT(sync_s, sync_type)?
+	generates extended_result
+	generates extended_result_nonce
+	extended_result_record = AEAD_ENC(tls_server_application_key_s, extended_result_nonce, extended_result, extended_result_type)
+]
+
+Server -> Client: extended_result_nonce, extended_result_record
+
+principal Client[
+	extended_result_c = AEAD_DEC(tls_server_application_key_c, extended_result_nonce, extended_result_record, extended_result_type)?
+	cancel_request_plain = CONCAT(backend_pid_c, cancel_key_c)
+	generates cancel_request_nonce
+	cancel_request_record = AEAD_ENC(tls_client_application_key_c, cancel_request_nonce, cancel_request_plain, cancel_request_type)
+]
+
+Client -> Server: cancel_request_nonce, cancel_request_record
+
+principal Server[
+	cancel_request_plain_s = AEAD_DEC(tls_client_application_key_s, cancel_request_nonce, cancel_request_record, cancel_request_type)?
+	cancel_pid_s, cancel_key_received_s = SPLIT(cancel_request_plain_s)?
+	_ = ASSERT(cancel_pid_s, backend_pid)?
+	_ = ASSERT(cancel_key_received_s, cancel_key)?
+]
+
+queries[
+	confidentiality? password
+	confidentiality? salted_password
+	confidentiality? client_key
+	confidentiality? tls_shared_secret_c
+	confidentiality? tls_client_application_key_c
+	confidentiality? tls_server_application_key_c
+	confidentiality? cancel_key
+	confidentiality? simple_query
+	confidentiality? bind_parameters
+
+	authentication? Server -> Client: tls_server_finished_record
+	authentication? Client -> Server: tls_client_finished_record
+	authentication? Client -> Server: client_final_record
+	authentication? Server -> Client: server_final_record
+	authentication? Client -> Server: simple_query_record
+	authentication? Client -> Server: extended_query_record
+	authentication? Client -> Server: cancel_request_record
+
+	freshness? tls_shared_secret_c
+	freshness? client_nonce
+	freshness? server_nonce
+	freshness? cancel_key
+
+	equivalence? tls_shared_secret_c, tls_shared_secret_s
+	equivalence? tls_client_application_key_c, tls_client_application_key_s
+	equivalence? tls_server_application_key_c, tls_server_application_key_s
+	equivalence? auth_message_c, auth_message_s
+]
