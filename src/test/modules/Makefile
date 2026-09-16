@@ -56,6 +56,7 @@ SUBDIRS = \
 		  test_tidstore \
 		  test_wait_lsn \
 		  unsafe_tests \
+		  waldemort \
 		  worker_spi \
 		  xid_wraparound
 
