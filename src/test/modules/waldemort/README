@@ -59,7 +59,10 @@ removes the newly created output.  The input is opened read-only.
   mixed     Generate the same framing, then damage every second synthetic
             record's last payload byte (or checksum when there is no payload).
             Checksums are not recomputed after damage.  The first record and
-            terminal SWITCH remain valid.
+            terminal SWITCH remain valid.  With --input, import complete
+            records in their original order and damage one checksum byte in
+            every second complete record.  All other input bytes, including
+            record positions, links, page headers and padding, are unchanged.
   headers   Randomize page bodies, retaining every page header byte.  Without
             input, first generate the same layout as valid mode, including
             continuation metadata.  With input, preserve even uninitialized
@@ -74,11 +77,15 @@ removes the newly created output.  The input is opened read-only.
             transaction IDs, and record information bits are retained.
 
 --input PATH is required for bitflip, truncate, and permute; optional for
-headers and garbage; and prohibited for valid and mixed.  The input must be a
-regular, complete segment with a compatible first long header.  Segment size,
-base LSN, timeline, and system identifier are derived from that header, not
-the filename.  With input, --seg-size, --segno, --timeline, --system-id, --prev,
---records, --payload-size, and --types are rejected.
+mixed, headers, and garbage; and prohibited for valid.  In mixed, headers, and
+permute modes, the input must be a regular, complete segment with a compatible
+first long header.  Raw bitflip and truncate mutations accept damaged or
+truncated regular files up to 1 GB without inspecting their headers.  Garbage
+mode also ignores input headers but requires a valid segment file size.
+Segment size, base LSN, timeline, and system identifier are derived from that
+header, not the filename, when the mode uses WAL metadata.  With input,
+--seg-size, --segno, --timeline, --system-id, --prev, --records, --payload-size,
+and --types are rejected.
 
 Generation parameters:
 
@@ -100,7 +107,7 @@ Generation parameters:
                      --payload-size affects NOOP only.
 
 --prev, --records, --payload-size, and --types are not accepted for garbage.
-All generated non-garbage segments have initialized headers on every page,
+Generated valid and mixed segments have initialized headers on every page,
 zero padding, and a final SWITCH.  There are no cross-segment generated records.
 
 Mutation parameters:
@@ -119,8 +126,8 @@ options except --prev and hexadecimal --mask require unsigned decimal text,
 without whitespace or signs.  Duplicate and incompatible options are errors.
 --help and --version print information and exit.
 
-Permutation limitations
------------------------
+Record import limitations (permute and mixed with input)
+-------------------------------------------------------
 
 Page headers, continuation lengths, record bounds, rmgr IDs, previous links,
 and CRC32C are checked before importing complete records.  The matching
@@ -151,3 +158,30 @@ different build/version/platform need not produce or accept the same files.
 Choose a canonical 24-character WAL filename matching the selected timeline
 and segment number when using tools which infer WAL locations from filenames.
 Input files must remain unchanged for the duration of the command.
+
+Building and testing
+--------------------
+
+Build PostgreSQL normally, then, from the configured build directory:
+
+  make -C src/test/modules/waldemort
+  make -C src/test/modules/waldemort check
+
+Configure with --enable-tap-tests to run the tests.  With Meson:
+
+  meson compile -C build waldemort
+  meson test -C build --suite waldemort
+
+Enable the tap_tests Meson option.  Like other test executables, waldemort is
+not installed; it can be run directly from src/test/modules/waldemort in the
+build directory.  Building requires the PostgreSQL source tree, but executing
+the program needs neither a running server nor a database connection.
+
+The TAP tests first check generation and mutation with pg_waldump.  Recovery
+tests initialize an archiving primary, populate a table, take a base backup,
+and archive a subsequent transaction.  Independent restores exercise intact
+WAL and copies damaged by bitflip, mixed records, garbage bodies, whole-file
+garbage, and truncation.  They verify that recovery stops before the damaged
+transaction becomes visible, resumes after the archive is repaired, and
+retains the correct contents after promotion and restart.  pg_checksums
+checks the recovered data files.  These tests use only disposable archives.

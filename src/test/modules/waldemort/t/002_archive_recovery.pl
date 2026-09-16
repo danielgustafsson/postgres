@@ -16,7 +16,7 @@ my $primary = PostgreSQL::Test::Cluster->new('primary');
 $primary->init(
 	has_archiving => 1,
 	allows_streaming => 1,
-	extra => ['--wal-segsize=1', '--data-checksums']);
+	extra => [ '--wal-segsize=1', '--data-checksums' ]);
 $primary->append_conf(
 	'postgresql.conf', q{
 autovacuum = off
@@ -54,8 +54,7 @@ my $target =
   $primary->safe_psql('postgres', 'SELECT pg_current_wal_insert_lsn()');
 $primary->safe_psql('postgres', 'SELECT pg_switch_wal()');
 my $archive = $primary->archive_dir;
-$primary->poll_query_until(
-	'postgres',
+$primary->poll_query_until('postgres',
 	"SELECT archived_count > 0 AND last_archived_wal >= '$walfile' FROM pg_stat_archiver"
 ) or die 'timed out waiting for WAL archiving';
 ok(-f "$archive/$walfile", 'transaction WAL has been archived');
@@ -69,7 +68,7 @@ copy("$archive/$walfile", "$saved/$walfile") or die "copy WAL: $!";
 
 my ($dump, $stderr);
 ok( IPC::Run::run(
-		['pg_waldump', '--path', $saved, $walfile],
+		[ 'pg_waldump', '--path', $saved, $walfile ],
 		'>' => \$dump,
 		'2>' => \$stderr),
 	'decode archived transaction WAL');
@@ -85,13 +84,31 @@ my $flip_offset = hex($low) % (1024 * 1024) + 4;
 mkdir "$saved/permuted" or die "mkdir: $!";
 command_ok(
 	[
-		'waldemort', '--mode', 'permute', '--input', "$saved/$walfile",
-		'--output', "$saved/permuted/$walfile", '--seed', '42',
+		'waldemort', '--mode',
+		'permute', '--input',
+		"$saved/$walfile", '--output',
+		"$saved/permuted/$walfile", '--seed',
+		'42',
 	],
 	'permute real archived WAL records');
-command_ok(
-	['pg_waldump', '--path', "$saved/permuted", $walfile],
+my $permuted_dump;
+ok( IPC::Run::run(
+		[ 'pg_waldump', '--path', "$saved/permuted", $walfile ],
+		'>' => \$permuted_dump,
+		'2>' => \$stderr),
 	'permuted real WAL has valid framing and checksums');
+
+# Only record locations and previous-record links should change.  Check the
+# entire multiset of descriptors, including transaction IDs and block refs.
+my @inventories;
+for my $text ($dump, $permuted_dump)
+{
+	$text =~ s/lsn: [0-9A-F]+\/[0-9A-F]+, prev [0-9A-F]+\/[0-9A-F]+, //g;
+	push @inventories, [ sort split(/\n/, $text) ];
+}
+is_deeply($inventories[1], $inventories[0],
+	'permutation retains every complete record and its resource-manager data'
+);
 
 sub new_standby
 {
@@ -112,7 +129,8 @@ sub caught_up
 	$node->poll_query_until('postgres',
 		"SELECT pg_last_wal_replay_lsn() >= '$target'::pg_lsn")
 	  or die 'timed out waiting for archive replay';
-	is($node->safe_psql('postgres', $contents), $after,
+	is($node->safe_psql('postgres', $contents),
+		$after,
 		$node->name . ': complete recovered data matches the primary');
 }
 
@@ -124,30 +142,25 @@ $control->stop;
 my @cases = (
 	[
 		'bitflip',
-		['--mode', 'bitflip', '--offset', $flip_offset, '--mask', '1'],
+		[ '--mode', 'bitflip', '--offset', $flip_offset, '--mask', '1' ],
 		qr/incorrect resource manager data checksum/,
 	],
 	[
 		'mixed',
-		['--mode', 'mixed'],
+		[ '--mode', 'mixed' ],
 		qr/incorrect resource manager data checksum/,
 	],
 	[
 		'headers',
-		['--mode', 'headers'],
+		[ '--mode', 'headers' ],
 		qr/invalid record length|invalid resource manager ID|incorrect prev-link/,
 	],
-	[
-		'garbage',
-		['--mode', 'garbage'],
-		qr/invalid magic number/,
-	],
+	[ 'garbage', [ '--mode', 'garbage' ], qr/invalid magic number/, ],
 	[
 		'truncate',
-		['--mode', 'truncate', '--length', '100'],
+		[ '--mode', 'truncate', '--length', '100' ],
 		qr/archive file .* has wrong size/,
-	],
-);
+	],);
 
 for my $case (@cases)
 {
@@ -155,8 +168,8 @@ for my $case (@cases)
 	my $broken = "$saved/$name";
 	command_ok(
 		[
-			'waldemort', '--input', "$saved/$walfile", '--output', $broken,
-			@$options,
+			'waldemort', '--input', "$saved/$walfile", '--output',
+			$broken, @$options,
 		],
 		"$name: corrupt a copy of archived WAL");
 	unlink "$archive/$walfile" or die "unlink archive: $!";
@@ -165,13 +178,13 @@ for my $case (@cases)
 	my $node = new_standby($name);
 	$node->start;
 	$node->wait_for_log($error);
-	is($node->safe_psql('postgres', 'SELECT pg_is_in_recovery()'), 't',
-		"$name: remains in recovery");
-	is($node->safe_psql('postgres', $contents), $before,
-		"$name: no partial transaction is visible");
+	is($node->safe_psql('postgres', 'SELECT pg_is_in_recovery()'),
+		't', "$name: remains in recovery");
+	is($node->safe_psql('postgres', $contents),
+		$before, "$name: no partial transaction is visible");
 	is( $node->safe_psql(
-			'postgres',
-			"SELECT pg_last_wal_replay_lsn() < '$target'::pg_lsn"),
+			'postgres', "SELECT pg_last_wal_replay_lsn() < '$target'::pg_lsn"
+		),
 		't',
 		"$name: replay does not advance past corruption");
 
@@ -183,15 +196,15 @@ for my $case (@cases)
 	  or die "rename repaired archive: $!";
 	caught_up($node);
 	$node->promote;
-	is($node->safe_psql('postgres', $contents), $after,
-		"$name: data intact after promotion");
+	is($node->safe_psql('postgres', $contents),
+		$after, "$name: data intact after promotion");
 	$node->stop;
 	command_ok(
-		['pg_checksums', '--check', '--pgdata', $node->data_dir],
+		[ 'pg_checksums', '--check', '--pgdata', $node->data_dir ],
 		"$name: recovered data pages have valid checksums");
 	$node->start;
-	is($node->safe_psql('postgres', $contents), $after,
-		"$name: recovered data survives a restart");
+	is($node->safe_psql('postgres', $contents),
+		$after, "$name: recovered data survives a restart");
 	$node->stop;
 }
 

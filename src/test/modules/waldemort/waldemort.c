@@ -75,6 +75,7 @@ typedef struct Input
 typedef struct RecordSet
 {
 	XLogRecord **records;
+	uint32	   *crc_offsets;
 	uint32		count;
 	uint32		capacity;
 	size_t		bytes;
@@ -353,9 +354,9 @@ parse_options(int argc, char **argv, Options *opt)
 				break;
 			case OPT_PAYLOAD:
 				opt->payload = parse_uint(optarg,
-										 MAX_RECORD_BYTES - SizeOfXLogRecord -
-										 SizeOfXLogRecordDataHeaderLong,
-										 "--payload-size");
+										  MAX_RECORD_BYTES - SizeOfXLogRecord -
+										  SizeOfXLogRecordDataHeaderLong,
+										  "--payload-size");
 				break;
 			case OPT_TYPES:
 				parse_types(opt, optarg);
@@ -387,8 +388,8 @@ parse_options(int argc, char **argv, Options *opt)
 		pg_fatal("--output is required");
 	if (opt->mode >= MODE_BITFLIP && opt->input == NULL)
 		pg_fatal("--input is required for this mode");
-	if (opt->input && opt->mode < MODE_HEADERS)
-		pg_fatal("--input is not supported in valid or mixed mode");
+	if (opt->input && opt->mode == MODE_VALID)
+		pg_fatal("--input is not supported in valid mode");
 	if (opt->input)
 		for (i = OPT_SEGSIZE; i <= OPT_TYPES; i++)
 			if (seen[i - OPT_MODE])
@@ -450,8 +451,20 @@ open_input(Input *input, Options *opt)
 		pg_fatal("could not open input \"%s\": %m", opt->input);
 	if (fstat(fileno(input->file), &st) != 0)
 		pg_fatal("could not stat input: %m");
-	if (!S_ISREG(st.st_mode) || st.st_size < SizeOfXLogLongPHD ||
-		st.st_size > WalSegMaxSize)
+	if (!S_ISREG(st.st_mode) || st.st_size < 0 || st.st_size > WalSegMaxSize)
+		pg_fatal("input must be a regular file no larger than 1 GB");
+	input->size = st.st_size;
+	/* Raw mutations must also work on already damaged or truncated fixtures. */
+	if (opt->mode == MODE_BITFLIP || opt->mode == MODE_TRUNCATE)
+		return;
+	if (opt->mode == MODE_GARBAGE)
+	{
+		if (!IsValidWalSegSize(input->size))
+			pg_fatal("garbage input length must be a valid WAL segment size");
+		opt->segsize = input->size;
+		return;
+	}
+	if (st.st_size < SizeOfXLogLongPHD)
 		pg_fatal("input must be a regular, complete WAL segment");
 	read_bytes(input->file, (char *) &header, sizeof(header));
 	if (header.std.xlp_magic != XLOG_PAGE_MAGIC ||
@@ -471,8 +484,8 @@ open_input(Input *input, Options *opt)
 	opt->sysid = header.xlp_sysid;
 	input->page = pg_malloc(XLOG_BLCKSZ);
 	input->reader = XLogReaderAllocate(opt->segsize, NULL,
-									  XL_ROUTINE(.segment_close = reader_close),
-									  NULL);
+									   XL_ROUTINE(.segment_close = reader_close),
+									   NULL);
 	if (input->reader == NULL)
 		pg_fatal("could not allocate WAL reader");
 	input->reader->system_identifier = opt->sysid;
@@ -488,7 +501,7 @@ input_page(Input *input, uint32 offset)
 		seek_file(input->file, offset);
 		read_bytes(input->file, input->page, XLOG_BLCKSZ);
 		if (!XLogReaderValidatePageHeader(input->reader, input->base + offset,
-										 input->page))
+										  input->page))
 			pg_fatal("invalid input page: %s", input->reader->errormsg_buf);
 		if (((XLogPageHeader) input->page)->xlp_info &
 			XLP_FIRST_IS_OVERWRITE_CONTRECORD)
@@ -575,6 +588,100 @@ zero_tail(Input *input, uint32 position)
 	return true;
 }
 
+/*
+ * DecodeXLogRecord accumulates fragment lengths in a uint32.  Bound the long
+ * main-data length before calling it, so even a deliberately forged CRC cannot
+ * make that sum wrap.  Leave all other encoding checks to the real decoder.
+ */
+static bool
+bounded_main_data(XLogRecord *record)
+{
+	const unsigned char *ptr = (unsigned char *) record + SizeOfXLogRecord;
+	size_t		remaining = record->xl_tot_len - SizeOfXLogRecord;
+	uint64		datatotal = 0;
+
+	while (remaining > datatotal)
+	{
+		uint8		id = *ptr++;
+		size_t		skip;
+
+		remaining--;
+		if (id == XLR_BLOCK_ID_DATA_LONG)
+		{
+			uint32		length;
+
+			if (remaining < sizeof(length))
+				return true;
+			memcpy(&length, ptr, sizeof(length));
+			return length <= record->xl_tot_len;
+		}
+		if (id == XLR_BLOCK_ID_DATA_SHORT)
+			return true;
+		if (id == XLR_BLOCK_ID_ORIGIN)
+			skip = sizeof(ReplOriginId);
+		else if (id == XLR_BLOCK_ID_TOPLEVEL_XID)
+			skip = sizeof(TransactionId);
+		else if (id <= XLR_MAX_BLOCK_ID)
+		{
+			uint8		flags;
+			uint16		length;
+
+			skip = SizeOfXLogRecordBlockHeader - sizeof(uint8);
+			if (remaining < skip)
+				return true;
+			flags = *ptr;
+			memcpy(&length, ptr + sizeof(uint8), sizeof(length));
+			datatotal += length;
+			ptr += skip;
+			remaining -= skip;
+			if (flags & BKPBLOCK_HAS_IMAGE)
+			{
+				uint8		info;
+
+				if (remaining < SizeOfXLogRecordBlockImageHeader)
+					return true;
+				memcpy(&length, ptr, sizeof(length));
+				datatotal += length;
+				info = ptr[offsetof(XLogRecordBlockImageHeader, bimg_info)];
+				ptr += SizeOfXLogRecordBlockImageHeader;
+				remaining -= SizeOfXLogRecordBlockImageHeader;
+				if (BKPIMAGE_COMPRESSED(info) && (info & BKPIMAGE_HAS_HOLE))
+				{
+					if (remaining < SizeOfXLogRecordBlockCompressHeader)
+						return true;
+					ptr += SizeOfXLogRecordBlockCompressHeader;
+					remaining -= SizeOfXLogRecordBlockCompressHeader;
+				}
+			}
+			skip = sizeof(BlockNumber);
+			if (!(flags & BKPBLOCK_SAME_REL))
+				skip += sizeof(RelFileLocator);
+		}
+		else
+			return true;
+		if (remaining < skip)
+			return true;
+		ptr += skip;
+		remaining -= skip;
+	}
+	return true;
+}
+
+static uint32
+record_byte_offset(Input *input, uint32 start, uint32 offset)
+{
+	for (;;)
+	{
+		uint32		available = XLOG_BLCKSZ - start % XLOG_BLCKSZ;
+
+		if (offset < available)
+			return start + offset;
+		offset -= available;
+		start += available;
+		start += XLogPageHeaderSize(input_page(input, start));
+	}
+}
+
 static RecordSet
 import_records(Input *input, Options *opt)
 {
@@ -639,6 +746,8 @@ import_records(Input *input, Options *opt)
 		crc = record_crc(record);
 		if (!EQ_CRC32C(crc, record->xl_crc))
 			pg_fatal("incorrect record checksum at input offset %u", start);
+		if (!bounded_main_data(record))
+			pg_fatal("invalid main-data length at input offset %u", start);
 		decoded = pg_malloc(DecodeXLogRecordRequiredSpace(length));
 		decoded->oversized = false;
 		input->reader->ReadRecPtr = input->base + start;
@@ -660,9 +769,19 @@ import_records(Input *input, Options *opt)
 		{
 			set.capacity = set.capacity ? Min(set.capacity * 2, MAX_RECORDS) : 1024;
 			set.records = pg_realloc(set.records, set.capacity * sizeof(XLogRecord *));
+			if (opt->mode == MODE_MIXED)
+				set.crc_offsets = pg_realloc(set.crc_offsets,
+											 set.capacity * sizeof(uint32));
 		}
 		if (set.count == 0)
 			opt->prev = record->xl_prev;
+		if (opt->mode == MODE_MIXED)
+		{
+			set.crc_offsets[set.count] =
+				record_byte_offset(input, start, offsetof(XLogRecord, xl_crc));
+			pg_free(record);
+			record = NULL;
+		}
 		set.records[set.count++] = record;
 		set.bytes += length;
 		previous = input->base + start;
@@ -672,7 +791,7 @@ import_records(Input *input, Options *opt)
 	/* A skipped continuation may have started in this segment's predecessor. */
 	if (opt->prev >= input->base + SizeOfXLogLongPHD)
 		opt->prev = InvalidXLogRecPtr;
-	for (uint32 i = set.count; i > 1; i--)
+	for (uint32 i = opt->mode == MODE_PERMUTE ? set.count : 0; i > 1; i--)
 	{
 		uint32		j = random_below(i);
 		XLogRecord *record = set.records[i - 1];
@@ -785,7 +904,7 @@ place_record(FILE *file, const Options *opt, uint32 pos,
 		record->xl_crc = record_crc(record);
 		if (corrupt)
 		{
-			if (length > SizeOfXLogRecord)
+			if (opt->input == NULL && length > SizeOfXLogRecord)
 				((char *) record)[length - 1] ^= 1;
 			else
 				record->xl_crc ^= 1;
@@ -893,18 +1012,22 @@ fill_output(FILE *file, const Options *opt)
 		if (opt->mode == MODE_GARBAGE)
 			random_bytes(page, XLOG_BLCKSZ);
 		else
+		{
+			memset(page, 0, XLOG_BLCKSZ);
 			make_page_header(page, pos, opt);
+		}
 		write_bytes(file, page, XLOG_BLCKSZ);
 	}
 	pg_free(page);
 }
 
 static void
-mutate_input(FILE *output, Input *input, const Options *opt)
+mutate_input(FILE *output, Input *input, const Options *opt, RecordSet *set)
 {
 	char	   *page = pg_malloc(XLOG_BLCKSZ);
 	uint32		length = opt->mode == MODE_TRUNCATE ? opt->length : input->size;
 	uint32		pos;
+	uint32		next_damage = 1;
 
 	seek_file(input->file, 0);
 	for (pos = 0; pos < length; pos += XLOG_BLCKSZ)
@@ -924,6 +1047,16 @@ mutate_input(FILE *output, Input *input, const Options *opt)
 		else if (opt->mode == MODE_BITFLIP &&
 				 opt->offset >= pos && opt->offset < pos + amount)
 			page[opt->offset - pos] ^= opt->mask;
+		else if (opt->mode == MODE_MIXED)
+		{
+			while (next_damage < set->count &&
+				   set->crc_offsets[next_damage] < pos + amount)
+			{
+				Assert(set->crc_offsets[next_damage] >= pos);
+				page[set->crc_offsets[next_damage] - pos] ^= 1;
+				next_damage += 2;
+			}
+		}
 		write_bytes(output, page, amount);
 	}
 	pg_free(page);
@@ -971,15 +1104,15 @@ main(int argc, char **argv)
 		pg_fatal("--offset must be less than the input length");
 	if (opt.mode == MODE_TRUNCATE && opt.length > input.size)
 		pg_fatal("--length must not exceed the input length");
-	if (opt.mode == MODE_PERMUTE)
+	if (opt.mode == MODE_PERMUTE || (opt.mode == MODE_MIXED && opt.input))
 		set = import_records(&input, &opt);
 	generate = opt.mode == MODE_PERMUTE ||
 		(opt.input == NULL && opt.mode != MODE_GARBAGE);
 	if (generate)
 		write_records(NULL, &opt, &set);
 	output = create_output(opt.output);
-	if (opt.input != NULL && opt.mode != MODE_PERMUTE)
-		mutate_input(output, &input, &opt);
+	if (opt.input != NULL && !generate)
+		mutate_input(output, &input, &opt, &set);
 	else
 	{
 		fill_output(output, &opt);
@@ -994,11 +1127,13 @@ main(int argc, char **argv)
 	for (uint32 i = 0; i < set.count; i++)
 		pg_free(set.records[i]);
 	pg_free(set.records);
+	pg_free(set.crc_offsets);
 	if (input.file)
 	{
 		if (fclose(input.file) != 0)
 			pg_fatal("could not close input: %m");
-		XLogReaderFree(input.reader);
+		if (input.reader)
+			XLogReaderFree(input.reader);
 		pg_free(input.page);
 	}
 	return EXIT_SUCCESS;
